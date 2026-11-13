@@ -1,0 +1,14 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+
+  <!-- Per-user MSI around the published app. Built by build.ps1:
+       dotnet build installer\Installer.wixproj -p:Version=1.2.3 -p:PublishDir=<folder with CompressForDiscord.exe> -->
+  <PropertyGroup>
+    <OutputName>CompressForDiscord</OutputName>
+    <Version Condition="'$(Version)' == ''">1.0.0</Version>
+    <PublishDir Condition="'$(PublishDir)' == ''">..\bin\publish\</PublishDir>
+    <DefineConstants>Version=$(Version);PublishDir=$(PublishDir);AssetsDir=..\assets</DefineConstants>
+    <!-- ICE91: per-user folder is per-user. ICE61: same-version upgrades are allowed on purpose -->
+    <SuppressIces>ICE91;ICE61</SuppressIces>
+  </PropertyGroup>
+
+</Project>

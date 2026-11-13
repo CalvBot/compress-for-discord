@@ -1,0 +1,43 @@
+# Builds the MSI and publishes a GitHub release whenever a version tag (v1.2.3) arrives.
+# Tags are pushed to Forgejo; its push mirror carries them here.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v1.0.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Build MSI
+        shell: pwsh
+        run: ./build.ps1 -Version $env:TAG
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $msi = Get-ChildItem dist/*.msi | Select-Object -First 1
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -eq 0) { gh release upload $env:TAG $msi.FullName --clobber }
+          else { gh release create $env:TAG $msi.FullName --title "Compress for Discord $env:TAG" --generate-notes }

@@ -1,0 +1,71 @@
+<!--
+  Compress for Discord: per-user install, no admin prompt.
+  Installs to %LOCALAPPDATA%\Programs\Compress for Discord, adds a Start menu shortcut and the
+  "Compress for Discord" right-click entry for video files. Upgrades replace older versions in place.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Compress for Discord"
+           Manufacturer="CalvBot"
+           Version="$(Version)"
+           UpgradeCode="f76c22b0-c762-4ffa-a02d-c7bb3d0f2261"
+           Scope="perUser"
+           Compressed="yes">
+
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Compress for Discord is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="$(AssetsDir)\app.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/CalvBot/compress-for-discord" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsDir" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Compress for Discord" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main">
+      <!-- The app. Per-user components need an HKCU key path rather than the file. -->
+      <Component Id="App" Directory="INSTALLFOLDER" Guid="2b1e8f0a-6f43-4c4e-9a57-3d7c1f0e9b21">
+        <File Id="AppExe" Source="$(PublishDir)\CompressForDiscord.exe" KeyPath="no" />
+        <RegistryValue Root="HKCU" Key="Software\CompressForDiscord" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" KeyPath="yes" />
+        <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+        <RemoveFolder Id="RemoveProgramsDir" Directory="ProgramsDir" On="uninstall" />
+      </Component>
+
+      <!-- Start menu, plus clean-up of the optional desktop shortcut the app's Settings can create -->
+      <Component Directory="ProgramMenuFolder">
+        <Shortcut Id="StartMenuShortcut" Name="Compress for Discord" Description="Shrink videos to fit Discord's upload limit"
+                  Target="[INSTALLFOLDER]CompressForDiscord.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFile Id="RemoveDesktopShortcut" Directory="DesktopFolder" Name="Compress for Discord.lnk" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\CompressForDiscord" Name="StartMenuShortcut" Value="1" Type="integer" KeyPath="yes" />
+      </Component>
+
+      <!-- Right-click > Compress for Discord on each video type -->
+      <?foreach Ext in mp4;m4v;mov;mkv;webm;avi;wmv;flv;ts;mts;m2ts;3gp;mpg;mpeg?>
+      <Component Id="Menu_$(Ext)" Directory="INSTALLFOLDER">
+        <RegistryKey Root="HKCU" Key="Software\Classes\SystemFileAssociations\.$(Ext)\shell\CompressForDiscord">
+          <RegistryValue Value="Compress for Discord" Type="string" KeyPath="yes" />
+          <RegistryValue Name="Icon" Value="&quot;[INSTALLFOLDER]CompressForDiscord.exe&quot;,0" Type="string" />
+          <RegistryKey Key="command">
+            <RegistryValue Value="&quot;[INSTALLFOLDER]CompressForDiscord.exe&quot; &quot;%1&quot;" Type="string" />
+          </RegistryKey>
+        </RegistryKey>
+      </Component>
+      <?endforeach?>
+    </Feature>
+
+    <!-- Uninstall: delete the downloaded ffmpeg and temp files (settings in %APPDATA% are kept) -->
+    <CustomAction Id="RemoveDownloads" FileRef="AppExe" ExeCommand="--remove-downloads"
+                  Execute="deferred" Impersonate="yes" Return="ignore" />
+    <!-- Open the app once installed (also after an in-app update), unless installed silently -->
+    <CustomAction Id="LaunchApp" FileRef="AppExe" ExeCommand="" Return="asyncNoWait" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RemoveDownloads" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="LaunchApp" After="InstallFinalize" Condition="NOT Installed AND UILevel &lt;&gt; 2" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>
