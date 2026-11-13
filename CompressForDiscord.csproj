@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>CompressForDiscord</AssemblyName>
+    <Version>1.0.0</Version>
+    <Product>Compress for Discord</Product>
+    <RootNamespace>CompressForDiscord</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ApplicationIcon>assets\app.ico</ApplicationIcon>
+    <!-- No forms designer here, so designer serialization attributes are pointless -->
+    <NoWarn>$(NoWarn);WFO1000</NoWarn>
+
+    <!-- Fast startup: precompiled (ReadyToRun) single exe that uses the installed .NET runtime -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="assets\complete.wav" LogicalName="complete.wav" />
+    <EmbeddedResource Include="assets\app.ico" LogicalName="app.ico" />
+  </ItemGroup>
+
+</Project>
