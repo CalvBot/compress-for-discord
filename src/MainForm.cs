@@ -721,6 +721,45 @@ sealed class MainForm : DarkForm
                 // Zooms back out to the whole video this many ms later
                 case "unzoom": { var t = new System.Windows.Forms.Timer { Interval = int.Parse(value) }; t.Tick += (_, _) => { t.Dispose(); SetView(0, timeline.Duration); }; t.Start(); break; }
                 case "preview": SetPreview(true); break;
+                case "dragsim":
+                {
+                    // dragsim=<seconds>: drags the playhead back and forth like a fast mouse would (a move arrives
+                    // whenever the last one has been handled, 1 ms on), then logs how often the timeline repainted
+                    var seconds = double.Parse(value);
+                    var handle = timeline.Handle;
+                    var (w, y) = (timeline.Width, timeline.Height - 10);
+                    timeline.DebugBeginSeekDrag();
+                    var spies = new List<MessageSpy>();
+                    void Spy(Control c) { spies.Add(new MessageSpy(c)); foreach (Control child in c.Controls) Spy(child); }
+                    Spy(this);
+                    var (moves0, paints0, ms0) = (timeline.DebugMoves, timeline.DebugPaints, timeline.DebugMoveMs);
+                    _ = Task.Run(() =>
+                    {
+                        var watch = System.Diagnostics.Stopwatch.StartNew();
+                        var posted = 0;
+                        while (watch.Elapsed.TotalSeconds < seconds)
+                        {
+                            var spin = System.Diagnostics.Stopwatch.StartNew();
+                            while (spin.Elapsed.TotalMilliseconds < 1) Thread.SpinWait(50);
+                            if (timeline.DebugMoves - moves0 < posted) continue;
+                            // Across and back once every 2 s
+                            var phase = watch.Elapsed.TotalSeconds % 2 / 2;
+                            var x = 40 + (int)((w - 60) * (phase < 0.5 ? phase * 2 : 2 - phase * 2));
+                            PostMessage(handle, 0x200, 1, (y << 16) | x);
+                            posted++;
+                        }
+                        BeginInvoke(() =>
+                        {
+                            timeline.DebugEndDrag();
+                            int moves = timeline.DebugMoves - moves0, paints = timeline.DebugPaints - paints0;
+                            AppLog.Info($"Drag: {moves / seconds:0} moves/s, {paints / seconds:0} timeline paints/s, {(timeline.DebugMoveMs - ms0) / Math.Max(1, moves):0.00} ms per move");
+                            foreach (var (what, (count, ms)) in MessageSpy.Totals.OrderByDescending(kv => kv.Value.Ms).Take(12))
+                                AppLog.Info($"Drag:   {what}: {count / seconds:0}/s, {ms / seconds:0.0} ms/s");
+                            foreach (var s in spies) s.ReleaseHandle();
+                        });
+                    });
+                    break;
+                }
                 case "scrubbench":
                 {
                     // scrubbench=<png to save a frame to>: times Windows' decoder against ffmpeg on this video
@@ -929,9 +968,13 @@ sealed class MainForm : DarkForm
 
     // ---------- preview frame ----------
 
+    /// <summary>When the last preview frame was asked for (Environment.TickCount64), so the waveforms can make way while scrubbing</summary>
+    long lastFrameRequest;
+
     void RequestFrame(double t)
     {
         pendingFrame = t;
+        lastFrameRequest = Environment.TickCount64;
         UpdateTimeLabel();
         if (!frameBusy) LoadFrames();
     }
@@ -959,6 +1002,8 @@ sealed class MainForm : DarkForm
                     var old = preview.Image;
                     preview.Image = img;
                     old?.Dispose();
+                    // Show it now: while the mouse is dragging, Windows would put the repaint off
+                    preview.Update();
                 }
                 if (playCts != null) break;
                 if (pendingFrame != wanted) dragging = true;
@@ -1113,6 +1158,27 @@ sealed class MainForm : DarkForm
             .Select(t => (t.Lane.Sources[0].Wave, (Func<double, double>?)t.Lane.GainAt))];
         masterLane.Invalidate();
     }
+
+#if DEBUG
+    /// <summary>For the drag test: times every message a control handles, by control and message</summary>
+    sealed class MessageSpy : NativeWindow
+    {
+        public static readonly Dictionary<string, (int Count, double Ms)> Totals = [];
+        readonly string name;
+        public MessageSpy(Control c) { name = string.IsNullOrEmpty(c.Name) ? c.GetType().Name : c.Name; AssignHandle(c.Handle); }
+        protected override void WndProc(ref Message m)
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            base.WndProc(ref m);
+            var key = $"{name} 0x{m.Msg:x}";
+            var (n, ms) = Totals.GetValueOrDefault(key);
+            Totals[key] = (n + 1, ms + watch.Elapsed.TotalMilliseconds);
+        }
+    }
+#endif
+
+    [DllImport("user32.dll")]
+    static extern bool PostMessage(IntPtr hwnd, int msg, nint wparam, nint lparam);
 
     [DllImport("user32.dll")]
     static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wparam, IntPtr lparam);
@@ -1509,10 +1575,12 @@ sealed class MainForm : DarkForm
             tracks.Add((wave, track.Index));
         }
         var path = file;
-        // All tracks from one read of the file; held back while compressing so the encode has the disk to itself
+        // All tracks from one read of the file. Held back while compressing, so the encode has the disk to itself,
+        // and while scrubbing: reading a huge recording alongside the preview cut the frames shown from ~29 a second to ~8.
+        bool Paused() => encodeCts != null || frameBusy || Environment.TickCount64 - lastFrameRequest < 400;
         _ = Task.Run(async () =>
         {
-            try { await Waveform.LoadAll(path, tracks, () => (viewStart, viewEnd), () => encodeCts != null, lifetime.Token); }
+            try { await Waveform.LoadAll(path, tracks, () => (viewStart, viewEnd), Paused, lifetime.Token); }
             catch (OperationCanceledException) { }
             catch (Exception ex) { AppLog.Error("Waveforms", ex); }
         });

@@ -521,8 +521,25 @@ sealed class Timeline : Control
         if (drag == DragKind.Seek) Seek(t);
     }
 
+#if DEBUG
+    // For the drag test: how many moves and paints there were, and the time spent handling the moves
+    public int DebugMoves, DebugPaints;
+    public double DebugMoveMs;
+    public void DebugBeginSeekDrag() => drag = DragKind.Seek;
+    public void DebugEndDrag() => drag = DragKind.None;
+#endif
+
     protected override void OnMouseMove(MouseEventArgs e)
     {
+#if DEBUG
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        try { Moved(e); }
+        finally { DebugMoveMs += watch.Elapsed.TotalMilliseconds; DebugMoves++; }
+    }
+
+    void Moved(MouseEventArgs e)
+    {
+#endif
         base.OnMouseMove(e);
         if (drag == DragKind.None)
         {
@@ -530,13 +547,38 @@ sealed class Timeline : Control
             Cursor = HitTest(e.Location) switch { DragKind.Start or DragKind.End => Cursors.SizeWE, DragKind.Range => Cursors.SizeAll, DragKind.Seek => Cursors.Hand, _ => Cursors.Default };
             return;
         }
-        var t = T(e.X);
+        // A fast mouse sends many hundreds of moves a second; following more than ~120 of them only takes time
+        // from drawing. The latest is kept and followed shortly.
+        if (sinceDrag.IsRunning && sinceDrag.Elapsed.TotalMilliseconds < 8)
+        {
+            pendingDrag = e.X;
+            if (dragTimer == null)
+            {
+                dragTimer = new System.Windows.Forms.Timer { Interval = 8 };
+                dragTimer.Tick += (_, _) => { if (pendingDrag is { } x && drag != DragKind.None) DragTo(x); else dragTimer.Stop(); };
+                Disposed += (_, _) => dragTimer.Dispose();
+            }
+            dragTimer.Start();
+            return;
+        }
+        DragTo(e.X);
+    }
+
+    readonly System.Diagnostics.Stopwatch sinceDrag = new();
+    System.Windows.Forms.Timer? dragTimer;
+    int? pendingDrag;
+
+    void DragTo(int x)
+    {
+        pendingDrag = null;
+        sinceDrag.Restart();
+        var t = T(x);
         switch (drag)
         {
             // Normally the playhead follows the edge so you see the frame you're cutting on. With Shift it stays
             // where it is, and the edge snaps to it when close.
-            case DragKind.Start when ModifierKeys.HasFlag(Keys.Shift): SetStart(SnapToPlayhead(t, e.X)); break;
-            case DragKind.End when ModifierKeys.HasFlag(Keys.Shift): SetEnd(SnapToPlayhead(t, e.X)); break;
+            case DragKind.Start when ModifierKeys.HasFlag(Keys.Shift): SetStart(SnapToPlayhead(t, x)); break;
+            case DragKind.End when ModifierKeys.HasFlag(Keys.Shift): SetEnd(SnapToPlayhead(t, x)); break;
             case DragKind.Start: SetStart(t); Seek(Start); break;
             case DragKind.End: SetEnd(t); Seek(End); break;
             case DragKind.Range:
@@ -546,6 +588,9 @@ sealed class Timeline : Control
                 break;
             default: Seek(t); break;
         }
+        // Draw the playhead now. Windows only repaints when no input is waiting, so with a fast mouse the
+        // playhead would otherwise trail behind in jumps.
+        Update();
     }
 
     protected override void OnMouseDoubleClick(MouseEventArgs e)
@@ -556,7 +601,14 @@ sealed class Timeline : Control
 
     double SnapToPlayhead(double t, int x) => Math.Abs(x - X(Current)) <= Px(7) ? Current : t;
 
-    protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); drag = DragKind.None; }
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        // Land where the mouse was let go, even if that last move was being held back
+        if (drag != DragKind.None && pendingDrag != null) DragTo(e.X);
+        drag = DragKind.None;
+        pendingDrag = null;
+    }
     // The mouse was taken away mid-drag (Alt+Tab, a popup): no MouseUp will come, so let go here
     protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) drag = DragKind.None; }
 
@@ -576,6 +628,9 @@ sealed class Timeline : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
+#if DEBUG
+        DebugPaints++;
+#endif
         var key = HashCode.Combine(HashCode.Combine(From, Span, Start, End, Enabled, Focused, Grid), ThumbStart, ThumbSpan, stripVersion, Thumbs, FrameLock);
         if (strip == null || strip.Width != Width || strip.Height != Height || key != stripKey)
         {
@@ -1276,7 +1331,8 @@ sealed class CropView : Control
     /// <summary>Width / height of the video, so the box maps to the picture and not the black bars</summary>
     public double FrameAspect = 16 / 9.0;
     /// <summary>The box as fractions of the frame (0..1 is on the picture); null = none</summary>
-    public RectangleF? Box { get => box; set { box = value; Invalidate(); } }
+    // Set on every playhead move: only a real change repaints (a needless repaint per move starved the timeline's)
+    public RectangleF? Box { get => box; set { if (box == value) return; box = value; Invalidate(); } }
     /// <summary>Width / height the box must keep, in those same fractions; 0 = any shape</summary>
     public double BoxAspect;
     /// <summary>Widest the box may be, as a fraction of the frame</summary>

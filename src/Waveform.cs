@@ -145,6 +145,8 @@ sealed class Waveform
             {
                 while (!moved)
                 {
+                    // Stop reading as soon as asked (not just between chunks): ffmpeg then stops too, once its output backs up
+                    await WhilePaused();
                     int n;
                     try { n = await stdout.ReadAsync(buf.AsMemory(leftover), ct).ConfigureAwait(false); }
                     catch (Exception) when (!ct.IsCancellationRequested) { break; }
@@ -168,7 +170,6 @@ sealed class Waveform
                         if (slice % ChunkSlices != 0 || done >= first + run) continue;
                         foreach (var w in waves) w.Finish(done);
                         done++;
-                        await WhilePaused();
                         // Something in view still needs measuring and this run won't reach it next: go there instead
                         moved = done < first + run && lead.MissingInView(view()) is { } want && want != done;
                     }
