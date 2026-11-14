@@ -17,8 +17,8 @@ static class Player
 
     static string S(double d) => d.ToString("0.000", CultureInfo.InvariantCulture);
 
-    /// <summary>Plays [from, to). onFrame gets each frame and its time; returns when done or cancelled.</summary>
-    public static async Task Play(string path, double from, double to, List<TrackMix> tracks, TrackMix? master, Size box, double srcW, double srcH, double srcFps,
+    /// <summary>Plays [from, to) at this many frames a second. onFrame gets each frame and its time; returns when done or cancelled.</summary>
+    public static async Task Play(string path, double from, double to, List<TrackMix> tracks, TrackMix? master, Size box, double srcW, double srcH, double fps,
         Action<Bitmap, double> onFrame, CancellationToken ct)
     {
         to = Math.Min(to, from + MaxSpan);
@@ -28,7 +28,7 @@ static class Player
         // Fit the frame inside the preview box, even dimensions
         var scale = Math.Min(box.Width / srcW, box.Height / srcH);
         int w = Math.Max(2, (int)(srcW * scale) & ~1), h = Math.Max(2, (int)(srcH * scale) & ~1);
-        var fps = Math.Min(srcFps > 0 ? srcFps : 30, 30);
+        if (fps <= 0) fps = 30;
 
         // Audio first: mixed exactly like the encode will mix it
         MemoryStream? wav = null;

@@ -694,6 +694,8 @@ sealed class RoundBox : Panel
     public int Radius { get; init; }
     /// <summary>Filled with this colour (a text field); otherwise just an outline</summary>
     public Color? Fill { get; init; }
+    /// <summary>Gap between each end and the text box, in 96-dpi pixels</summary>
+    public int Inset { get; init; } = 12;
 
     int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
     void Fit() => Size = new Size(logicalWidth > 0 ? Px(logicalWidth) : Width, Px(logicalHeight));
@@ -707,7 +709,7 @@ sealed class RoundBox : Panel
         base.OnLayout(e);
         if (Controls.Count == 0) return;
         var c = Controls[0];
-        c.Bounds = new Rectangle(Px(12), (Height - c.Height) / 2, Width - Px(24), c.Height);
+        c.Bounds = new Rectangle(Px(Inset), (Height - c.Height) / 2, Width - Px(2 * Inset), c.Height);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -736,6 +738,9 @@ sealed class VolumeLane : Control
 
     /// <summary>Loudest sample in each slice of the track, 0..1; null until measured</summary>
     public float[]? Peaks;
+    // The loudest slice of Peaks, worked out once per waveform rather than every paint
+    float[]? loudestOf;
+    float loudest = 1;
     public double Duration = 1, Start, End = 1, Current;
     /// <summary>False for a muted track (drawn grey, left out of the mix)</summary>
     public bool Active = true;
@@ -1134,14 +1139,19 @@ sealed class VolumeLane : Control
         float mid = Height / 2f, half = Height / 2f - 2;
         if (Peaks is { Length: > 0 } peaks)
         {
-            var loudest = Math.Max(peaks.Max(), 0.02f);
+            if (peaks != loudestOf) (loudestOf, loudest) = (peaks, Math.Max(peaks.Max(), 0.02f));
             using var inside = new Pen(Active ? Theme.Brand : Theme.Secondary);
             using var outside = new Pen(Color.FromArgb(90, Active ? Theme.Brand : Theme.Secondary));
             for (var x = 0; x < BodyW; x++)
             {
                 var t = From + x / (double)BodyW * Span;
+                // The loudest of every slice under this pixel: zoomed out, a short peak still shows
+                var i0 = Math.Clamp((int)(t / Duration * peaks.Length), 0, peaks.Length - 1);
+                var i1 = Math.Clamp((int)((t + Span / BodyW) / Duration * peaks.Length), i0 + 1, peaks.Length);
+                var peak = 0f;
+                for (var i = i0; i < i1; i++) peak = Math.Max(peak, peaks[i]);
                 // Half height at 100% so there's room to show a boost
-                var h = (float)Math.Min(1, peaks[Math.Clamp((int)(t / Duration * peaks.Length), 0, peaks.Length - 1)] / loudest * 0.5 * GainAt(t)) * half;
+                var h = (float)Math.Min(1, peak / loudest * 0.5 * GainAt(t)) * half;
                 if (h >= 0.5f) g.DrawLine(t >= Start && t <= End ? inside : outside, G + x + 0.5f, mid - h, G + x + 0.5f, mid + h);
             }
         }

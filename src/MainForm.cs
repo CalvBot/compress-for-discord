@@ -238,7 +238,7 @@ sealed class MainForm : DarkForm
         {
             var box = new TextBox { BackColor = Theme.Bg2, ForeColor = Theme.Text, BorderStyle = BorderStyle.None, PlaceholderText = "Custom", TextAlign = HorizontalAlignment.Center };
             // Just wide enough for "Custom": about chip-sized, so it doesn't stand out from the row
-            var field = new RoundBox { LogicalWidth = 72, Margin = new Padding(0, 0, 6, 6), Cursor = Cursors.IBeam };
+            var field = new RoundBox { LogicalWidth = 62, Inset = 5, Margin = new Padding(0, 0, 6, 6), Cursor = Cursors.IBeam };
             box.GotFocus += (_, _) => field.Invalidate();
             box.LostFocus += (_, _) => field.Invalidate();
             box.Leave += (_, _) => { if (box.Text != "" && !valid(box.Text)) box.Text = ""; };
@@ -416,6 +416,21 @@ sealed class MainForm : DarkForm
         var srcKbps = (probe.Bitrate > 0 ? probe.Bitrate : fileSize * 8 / Math.Max(probe.Duration, 0.1)) / 1000.0;
         details = $" · {Planner.FormatBytes(fileSize)} · {shortSide}p{fps} · {Planner.FormatRate(srcKbps)}";
         FitSubtitle();
+        // Hovering the top line: the source in full
+        var lines = new List<string>
+        {
+            Path.GetFileName(file),
+            $"Folder:  {Path.GetDirectoryName(file)}",
+            $"Size:  {Planner.FormatBytes(fileSize)}",
+            $"Length:  {Planner.FormatTime(probe.Duration)}",
+            $"Picture:  {probe.Width}×{probe.Height} at {probe.Fps:0.##} fps",
+            $"Video:  {probe.VideoCodec.ToUpperInvariant()}{(probe.VideoBitrate > 0 ? $", {Planner.FormatRate(probe.VideoBitrate / 1000.0)}" : "")}",
+            $"Overall:  {Planner.FormatRate(srcKbps)}",
+        };
+        if (probe.AudioTracks.Count == 0) lines.Add("Audio:  none");
+        foreach (var a in probe.AudioTracks)
+            lines.Add($"Audio {a.Index + 1}:  {a.Label} · {a.Codec.ToUpperInvariant()}, {(a.Layout != "" ? a.Layout : $"{a.Channels} ch")}{(a.Language is "" or "und" ? "" : $", {a.Language}")}");
+        tips.SetToolTip(subtitle, string.Join("\n", lines));
 
         preview.FrameAspect = probe.Width / (double)probe.Height;
         timeline.Fps = probe.Fps;
@@ -668,6 +683,7 @@ sealed class MainForm : DarkForm
                 // Zooms back out to the whole video this many ms later
                 case "unzoom": { var t = new System.Windows.Forms.Timer { Interval = int.Parse(value) }; t.Tick += (_, _) => { t.Dispose(); SetView(0, timeline.Duration); }; t.Start(); break; }
                 case "preview": SetPreview(true); break;
+                case "play": TogglePlay(); break;
                 case "goto": timeBox.Text = value; if (ParseTime(value) is { } go) timeline.Seek(go); break;
                 case "cropkeys":
                     // A zoom: the full box at 20% of the way in, half the width and off-centre by 60%
@@ -681,7 +697,7 @@ sealed class MainForm : DarkForm
                     break;
                 // Not SetTarget: a test mustn't change the size remembered in the real settings
                 // Opens the summary's hover details shortly after, for screenshots
-                case "tip": { var t = new System.Windows.Forms.Timer { Interval = 800 }; t.Tick += (_, _) => { t.Dispose(); AppLog.Info("Summary tip: " + tips.GetToolTip(summary).Replace("\n", " | ")); tips.Show(tips.GetToolTip(summary), summary, 0, -D(110), 8000); }; t.Start(); break; }
+                case "tip": { var t = new System.Windows.Forms.Timer { Interval = 800 }; t.Tick += (_, _) => { t.Dispose(); AppLog.Info("Summary tip: " + tips.GetToolTip(summary).Replace("\n", " | ")); AppLog.Info("File tip: " + tips.GetToolTip(subtitle).Replace("\n", " | ")); tips.Show(tips.GetToolTip(summary), summary, 0, -D(110), 8000); }; t.Start(); break; }
                 case "size": targetMb = double.Parse(value); SelectChip(sizeChips, targetMb); UpdateSummary(); break;
                 case "trim": timeline.SetEnd(double.Parse(value)); break;
                 case "keys":
@@ -889,9 +905,10 @@ sealed class MainForm : DarkForm
         var cts = playCts = new CancellationTokenSource();
         frameCts?.Cancel();
         playBtn.Icon = PillIcon.Pause;
+        AppLog.Info($"Playing from {from:0.00} s at {PlaybackFps:0.##} fps{(showResult ? " (preview)" : "")}");
         try
         {
-            await Player.Play(file, from, to ?? timeline.End, Mix(), Master, DecodeSize(), probe!.Width, probe.Height, probe.Fps, (bmp, t) =>
+            await Player.Play(file, from, to ?? timeline.End, Mix(), Master, DecodeSize(), probe!.Width, probe.Height, PlaybackFps, (bmp, t) =>
             {
                 if (cts.IsCancellationRequested || IsDisposed) { bmp.Dispose(); return; }
                 var old = preview.Image;
@@ -1292,7 +1309,7 @@ sealed class MainForm : DarkForm
         {
             foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane)) lane.RowHeight = trackH;
             foreach (var lane in new[] { keyLane, posLane, scaleLane }) lane.RowHeight = trackH;
-            timeline.RowHeight = trackH;
+            // The timeline keeps its own height: only the tracks under it grow
             SizeTracks();
         });
     }
@@ -1313,6 +1330,19 @@ sealed class MainForm : DarkForm
         scale.Set(timeline.Current, MaxCropW);
         ShowCrop();
         UpdateSummary();
+    }
+
+    /// <summary>
+    /// Frames a second to play at. Preview shows the result, so it plays at the frame rate picked for it (up to
+    /// 60); otherwise the source, capped at 30 to keep playback light.
+    /// </summary>
+    double PlaybackFps
+    {
+        get
+        {
+            var src = probe is { Fps: > 0 } ? probe.Fps : 30;
+            return showResult ? Math.Min(frameRate ?? src, 60) : Math.Min(src, 30);
+        }
     }
 
     void SetPreview(bool on)
@@ -1356,7 +1386,9 @@ sealed class MainForm : DarkForm
         foreach (var (track, lane) in trackUi)
         {
             float[]? peaks;
-            try { peaks = await Ff.Peaks(file, track.Index, 1200, lifetime.Token); } catch { return; }
+            // 100 slices a second (10 ms), so the waveform still has detail zoomed right in
+            var slices = (int)Math.Clamp(timeline.Duration * 100, 1200, 400_000);
+            try { peaks = await Ff.Peaks(file, track.Index, slices, lifetime.Token); } catch { return; }
             if (IsDisposed) return;
             lane.Peaks = peaks;
             lane.Silent = peaks != null && peaks.Max() < 0.01f;
@@ -1623,6 +1655,8 @@ sealed class MainForm : DarkForm
         foreach (Control c in scroller.Content.Controls) c.Invalidate();
         // Zoomed right in, the thumbnails are one per frame, so they follow the frame rate too
         if ((viewEnd - viewStart) / frame <= timeline.Thumbs.Length) { thumbTimer.Stop(); thumbTimer.Start(); }
+        // Preview plays at the chosen frame rate, so pick up a new one straight away
+        if (showResult) RestartIfPlaying();
     }
 
     /// <param name="keepStatus">leave an error or "Cancelled" showing instead of going back to the result line</param>
