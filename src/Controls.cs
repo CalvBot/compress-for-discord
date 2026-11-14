@@ -21,6 +21,10 @@ static class Theme
     public static readonly Color Green = Color.FromArgb(0x23, 0xa5, 0x59);
     public static readonly Color Link = Color.FromArgb(0x00, 0xa8, 0xfc);
 
+    /// <summary>A colour part of the way from one to another</summary>
+    public static Color Blend(Color from, Color to, double amount) =>
+        Color.FromArgb((int)(from.R + (to.R - from.R) * amount), (int)(from.G + (to.G - from.G) * amount), (int)(from.B + (to.B - from.B) * amount));
+
     public static GraphicsPath Round(RectangleF r, float radius)
     {
         var d = Math.Min(radius * 2, Math.Min(r.Width, r.Height));
@@ -36,6 +40,9 @@ static class Theme
 
 enum PillKind { Chip, Primary, Secondary }
 
+/// <summary>Symbols a chip can show instead of text</summary>
+enum PillIcon { None, Play, Pause, Eye, Sliders }
+
 /// <summary>Rounded chip or button, painted like Discord's</summary>
 sealed class Pill : Control
 {
@@ -48,6 +55,9 @@ sealed class Pill : Control
     /// <summary>Rounds only the left or right corners, for split buttons</summary>
     public bool FlatLeft { get; init; }
     public bool FlatRight { get; init; }
+    PillIcon icon;
+    /// <summary>Shows a symbol instead of the text; the chip is then just big enough for it</summary>
+    public PillIcon Icon { get => icon; set { icon = value; Fit(); Invalidate(); } }
     string? alt;
     /// <summary>Drawn in place of Text without resizing the button, e.g. "Compressing…"</summary>
     public string? AltText { get => alt; set { alt = value; Invalidate(); } }
@@ -68,6 +78,7 @@ sealed class Pill : Control
 
     public override Size GetPreferredSize(Size proposedSize)
     {
+        if (icon != PillIcon.None) return new Size(Px(40), Px(28));
         var t = TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
         return kind == PillKind.Chip ? new Size(t.Width + Px(20), Px(28)) : new Size(Math.Max(t.Width + Px(MinWidth < 96 ? 16 : 32), Px(MinWidth)), Px(38));
     }
@@ -114,8 +125,46 @@ sealed class Pill : Control
         using var path = Shape(r, kind == PillKind.Chip ? Height / 2f : Px(8));
         using (var b = new SolidBrush(fill)) g.FillPath(b, path);
         if (border is { } bc) using (var pen = new Pen(Enabled ? bc : Color.FromArgb(110, bc))) g.DrawPath(pen, path);
+        if (icon != PillIcon.None) { DrawIcon(g, text); return; }
         var label = hover && Enabled && HoverText != null ? HoverText : alt ?? Text;
         TextRenderer.DrawText(g, label, Font, ClientRectangle, text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+    }
+
+    void DrawIcon(Graphics g, Color ink)
+    {
+        float cx = Width / 2f, cy = Height / 2f, u = DeviceDpi / 96f;
+        using var fill = new SolidBrush(ink);
+        using var pen = new Pen(ink, 1.6f * u);
+        switch (icon)
+        {
+            case PillIcon.Play:
+                g.FillPolygon(fill, [new PointF(cx - 4 * u, cy - 6 * u), new PointF(cx + 6 * u, cy), new PointF(cx - 4 * u, cy + 6 * u)]);
+                break;
+            case PillIcon.Pause:
+                g.FillRectangle(fill, cx - 5 * u, cy - 6 * u, 3.5f * u, 12 * u);
+                g.FillRectangle(fill, cx + 1.5f * u, cy - 6 * u, 3.5f * u, 12 * u);
+                break;
+            case PillIcon.Eye:
+                using (var lids = new GraphicsPath())
+                {
+                    PointF left = new(cx - 9 * u, cy), right = new(cx + 9 * u, cy);
+                    lids.AddBezier(left, new PointF(cx - 4 * u, cy - 7 * u), new PointF(cx + 4 * u, cy - 7 * u), right);
+                    lids.AddBezier(right, new PointF(cx + 4 * u, cy + 7 * u), new PointF(cx - 4 * u, cy + 7 * u), left);
+                    g.DrawPath(pen, lids);
+                }
+                g.FillEllipse(fill, cx - 3 * u, cy - 3 * u, 6 * u, 6 * u);
+                break;
+            case PillIcon.Sliders:
+                // Three sliders with their knobs in different places
+                float[] knobs = [3, -4, 1];
+                for (var i = 0; i < 3; i++)
+                {
+                    var y = cy + (i - 1) * 5 * u;
+                    g.DrawLine(pen, cx - 8 * u, y, cx + 8 * u, y);
+                    g.FillEllipse(fill, cx + knobs[i] * u - 2.5f * u, y - 2.5f * u, 5 * u, 5 * u);
+                }
+                break;
+        }
     }
 
     /// <summary>Rounded rectangle; a split-button half keeps its joined side square, out to the edge</summary>
@@ -542,6 +591,8 @@ sealed class VolumeLane : Control
     public double Duration = 1, Start, End = 1, Current;
     /// <summary>False for a muted track (drawn grey, left out of the mix)</summary>
     public bool Active = true;
+    /// <summary>Background of the lane. The result (master) lane has its own, so it stands apart from the tracks.</summary>
+    public Color Back = Theme.Bg3;
     /// <summary>The track's name, shown at the top left of the lane</summary>
     public string Label = "";
     /// <summary>Nothing audible in this track; said on the badge</summary>
@@ -699,7 +750,7 @@ sealed class VolumeLane : Control
         g.Clear(Parent?.BackColor ?? Theme.Bg2);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         using var shape = Theme.Round(new RectangleF(G, 0, BodyW - 1, Height - 1), Px(6));
-        using (var bg = new SolidBrush(Theme.Bg3)) g.FillPath(bg, shape);
+        using (var bg = new SolidBrush(Back)) g.FillPath(bg, shape);
         g.SetClip(shape);
 
         float mid = Height / 2f, half = Height / 2f - 2;
@@ -949,8 +1000,14 @@ sealed class KeyLane : Control
     public double Duration = 1, Current;
     /// <summary>Times of the key points, in order</summary>
     public IReadOnlyList<double> Keys = [];
-    /// <summary>Zoom at each key point, 0 (the widest) to 1, for the line</summary>
+    /// <summary>Height of the line at each key point, 0 (bottom) to 1</summary>
     public IReadOnlyList<double> Levels = [];
+    /// <summary>A second, fainter line (position has two values: across and down); empty = none</summary>
+    public IReadOnlyList<double> Levels2 = [];
+    public string Label = "Position & scale";
+    public Color Back = Theme.Bg3;
+    /// <summary>Right-clicked somewhere that isn't a key point</summary>
+    public event Action<Point>? MenuRequested;
     /// <summary>A point wanted at this time</summary>
     public event Action<double>? AddRequested;
     public event Action<int>? RemoveRequested, Picked;
@@ -997,6 +1054,7 @@ sealed class KeyLane : Control
         if (e.X < G) return;
         var k = HitKey(e.X);
         if (e.Button == MouseButtons.Right && k >= 0) RemoveRequested?.Invoke(k);
+        else if (e.Button == MouseButtons.Right) MenuRequested?.Invoke(e.Location);
         else if (e.Button == MouseButtons.Left && k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) AddRequested?.Invoke(T(e.X));
         else if (e.Button == MouseButtons.Left) { dragKey = k; moved = false; }
     }
@@ -1022,10 +1080,18 @@ sealed class KeyLane : Control
         g.Clear(Parent?.BackColor ?? Theme.Bg);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         using var track = Theme.Round(new RectangleF(G, 0, BodyW - 1, Height - 1), Px(6));
-        using (var bg = new SolidBrush(Theme.Bg3)) g.FillPath(bg, track);
+        using (var bg = new SolidBrush(Back)) g.FillPath(bg, track);
         g.SetClip(track);
 
-        // The zoom over time: flat before the first point and after the last
+        if (Keys.Count > 0 && Levels2.Count == Keys.Count)
+        {
+            var second = new List<PointF> { new(X(0), Y(Levels2[0])) };
+            for (var i = 0; i < Keys.Count; i++) second.Add(new PointF(X(Keys[i]), Y(Levels2[i])));
+            second.Add(new PointF(X(Duration), Y(Levels2[^1])));
+            using var faint = new Pen(Color.FromArgb(110, Theme.Brand), Math.Max(1f, Px(1)));
+            g.DrawLines(faint, second.ToArray());
+        }
+        // The value over time: flat before the first point and after the last
         if (Keys.Count > 0)
         {
             var pts = new List<PointF> { new(X(0), Y(Level(0))) };
@@ -1046,7 +1112,7 @@ sealed class KeyLane : Control
         g.ResetClip();
 
         KeyButton.Draw(g, AddButton, Enabled);
-        const string name = "Position & scale";
+        var name = Label;
         var badge = new Rectangle(G + Px(5), Px(4), Px(10) + TextRenderer.MeasureText(name, SmallFont, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
         using (var back = Theme.Round(badge, Px(4)))
         using (var fill = new SolidBrush(Color.FromArgb(215, Theme.Bg2))) g.FillPath(fill, back);
@@ -1164,5 +1230,121 @@ sealed class ZoomBar : Control
             foreach (var x in new[] { a + Px(5), Math.Min(b, Width - 1) - Px(5) })
                 g.DrawLine(grip, x, Px(4), x, Height - Px(5));
         using (var head = new Pen(Color.White, Math.Max(1, Px(2)))) g.DrawLine(head, X(Current), 0, X(Current), Height);
+    }
+}
+
+/// <summary>
+/// A box of tracks that scrolls when there are more than fit. It scrolls by moving its content, with a slim bar
+/// drawn over the right edge, because a standard scroll bar would take width and the tracks would stop lining up
+/// with the timeline.
+/// </summary>
+sealed class TrackScroller : Panel
+{
+    public readonly FlowLayoutPanel Content = new() { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = Padding.Empty, Location = Point.Empty };
+    readonly Control thumb = new Thumb();
+    int offset, grabY, grabOffset;
+    bool dragging;
+
+    public TrackScroller()
+    {
+        Controls.Add(thumb);
+        Controls.Add(Content);
+        Content.SizeChanged += (_, _) => ScrollTo(offset);
+        thumb.MouseDown += (_, e) => { dragging = e.Button == MouseButtons.Left; grabY = Cursor.Position.Y; grabOffset = offset; };
+        thumb.MouseMove += (_, _) => { if (dragging) ScrollTo(grabOffset + (int)((Cursor.Position.Y - grabY) * (Content.Height / (double)Math.Max(1, Height)))); };
+        thumb.MouseUp += (_, _) => dragging = false;
+    }
+
+    int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
+    // A pixel or two over is rounding, not something to scroll to
+    int Hidden => Content.Height - Height > 2 ? Content.Height - Height : 0;
+
+    public void ScrollTo(int to)
+    {
+        offset = Math.Clamp(to, 0, Hidden);
+        Content.Top = -offset;
+        // The bar: as long as the share of the content in view, placed by how far down it's scrolled
+        thumb.Visible = Hidden > 0;
+        if (Hidden > 0)
+        {
+            var length = Math.Max(Px(20), (int)((long)Height * Height / Content.Height));
+            thumb.Bounds = new Rectangle(Width - Px(6), (int)((long)(Height - length) * offset / Hidden), Px(5), length);
+            thumb.BringToFront();
+        }
+    }
+
+    protected override void OnResize(EventArgs e) { base.OnResize(e); ScrollTo(offset); }
+
+    // The wheel reaches here from whichever track the mouse is over
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        if (Hidden == 0) { base.OnMouseWheel(e); return; }
+        ScrollTo(offset - Math.Sign(e.Delta) * Px(48));
+        if (e is HandledMouseEventArgs h) h.Handled = true;
+    }
+
+    sealed class Thumb : Control
+    {
+        public Thumb()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Cursor = Cursors.Hand;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Theme.Bg3);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using var shape = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), Width / 2f);
+            using var fill = new SolidBrush(Theme.SecondaryHover);
+            e.Graphics.FillPath(fill, shape);
+        }
+    }
+}
+
+/// <summary>A thin bar to drag up or down, for making the box above it taller or shorter</summary>
+sealed class SizeGrip : Control
+{
+    public event Action? DragStarted;
+    /// <summary>Dragged this many pixels down from where it started</summary>
+    public event Action<int>? Dragged;
+    bool dragging;
+    int grabY;
+
+    public SizeGrip()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, false);
+        Cursor = Cursors.SizeNS;
+    }
+
+    int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
+    void Fit() => Height = Px(10);
+    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
+    protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
+    protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button != MouseButtons.Left) return;
+        dragging = true;
+        grabY = Cursor.Position.Y;
+        DragStarted?.Invoke();
+    }
+
+    // Screen position, not the mouse event's: the grip itself moves as the box changes height
+    protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); if (dragging) Dragged?.Invoke(Cursor.Position.Y - grabY); }
+    protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); dragging = false; }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Parent?.BackColor ?? Theme.Bg);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        float w = Px(36), h = Math.Max(2, Px(3));
+        using var shape = Theme.Round(new RectangleF((Width - w) / 2, (Height - h) / 2, w, h), h / 2);
+        using var fill = new SolidBrush(Theme.Secondary);
+        g.FillPath(fill, shape);
     }
 }
