@@ -294,6 +294,55 @@ sealed class DarkMenu : ContextMenuStrip
     }
 }
 
+/// <summary>Check box drawn like the rest of the app: a rounded box, brand blue with a tick when on</summary>
+sealed class DarkCheck : CheckBox
+{
+    bool hover;
+
+    public DarkCheck()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        ForeColor = Theme.Text;
+        Cursor = Cursors.Hand;
+    }
+
+    int Px(float v) => (int)Math.Round(v * DeviceDpi / 96f);
+
+    public override Size GetPreferredSize(Size proposedSize)
+    {
+        var text = TextRenderer.MeasureText(Text, Font);
+        return new Size(Px(26) + text.Width, Math.Max(Px(24), text.Height + Px(4)));
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); hover = true; Invalidate(); }
+    protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hover = false; Invalidate(); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Parent?.BackColor ?? Theme.Bg);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        float s = Px(18), x = 0.5f, y = (Height - s) / 2f;
+        using (var box = Theme.Round(new RectangleF(x, y, s, s), Px(5)))
+        {
+            if (Checked)
+                using (var fill = new SolidBrush(hover ? Theme.BrandHover : Theme.Brand)) g.FillPath(fill, box);
+            else
+            {
+                using (var fill = new SolidBrush(Theme.Bg3)) g.FillPath(fill, box);
+                using var edge = new Pen(hover ? Theme.SecondaryHover : Theme.Secondary, Px(1.5f));
+                g.DrawPath(edge, box);
+            }
+        }
+        if (Checked)
+        {
+            using var tick = new Pen(Color.White, Px(2)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+            g.DrawLines(tick, [new PointF(x + s * 0.26f, y + s * 0.52f), new PointF(x + s * 0.43f, y + s * 0.69f), new PointF(x + s * 0.75f, y + s * 0.33f)]);
+        }
+        TextRenderer.DrawText(g, Text, Font, new Rectangle((int)s + Px(8), 0, Width, Height), Enabled ? ForeColor : Theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix);
+    }
+}
+
 /// <summary>Thin progress bar</summary>
 sealed class Bar : Control
 {

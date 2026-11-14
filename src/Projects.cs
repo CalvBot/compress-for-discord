@@ -77,6 +77,24 @@ static class Projects
         catch { }
     }
 
+    /// <summary>Points a saved project at another video (found where it moved to, or a different one), keeping its place in the list</summary>
+    public static void Relink(string path, Project p, string video)
+    {
+        try
+        {
+            p.File = Path.GetFullPath(video);
+            foreach (var (other, _) in Recent().Where(x => x.Path != path && string.Equals(x.Project.File, p.File, StringComparison.OrdinalIgnoreCase)))
+                try { File.Delete(other); } catch { }
+            File.WriteAllText(path, JsonSerializer.Serialize(p));
+        }
+        catch { }
+    }
+
+    public static void Remove(string path)
+    {
+        try { File.Delete(path); } catch { }
+    }
+
     /// <summary>Drops all but the newest ones the setting keeps</summary>
     public static void Trim()
     {

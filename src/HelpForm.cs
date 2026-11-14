@@ -21,6 +21,7 @@ sealed class HelpForm : DarkForm
         ("Right-click a key point", "Linear, smooth, ease or hold"),
         ("Button left of the timeline", "Frame lock: stop on whole frames"),
         ("Settings > Recent projects", "Open a video as you last set it up"),
+        ("Right-click a recent project", "Locate a moved video, or swap in another"),
         ("Ctrl / Shift + drag picture", "Snap to edges / one direction"),
         ("Ctrl / Shift / Alt + drag corner", "Snap / from centre / reshape"),
         ("Enter", "Compress & copy"),

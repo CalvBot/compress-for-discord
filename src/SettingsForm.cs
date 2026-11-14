@@ -19,7 +19,8 @@ sealed class SettingsForm : DarkForm
     public event Action? FfmpegChanged;
     /// <summary>A recent project was picked: the window that opened Settings opens it once Settings has closed</summary>
     public Project? OpenProject { get; private set; }
-    readonly FlowLayoutPanel recentList;
+    readonly RecentList recentList;
+    readonly DarkMenu recentMenu = new();
     readonly Label recentNote;
 
     public SettingsForm()
@@ -33,7 +34,9 @@ sealed class SettingsForm : DarkForm
 
         // Recent projects: every compress is saved, so a closed window can be picked up again
         root.Controls.Add(Section("Recent projects"));
-        recentList = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, Margin = Padding.Empty };
+        recentList = new RecentList { Width = W, Margin = new Padding(0, 0, 0, 8) };
+        recentList.RowClicked += OpenRecent;
+        recentList.RowMenu += ShowRecentMenu;
         root.Controls.Add(recentList);
         recentNote = Muted("");
         recentNote.Margin = new Padding(0, 4, 10, 0);
@@ -160,36 +163,62 @@ sealed class SettingsForm : DarkForm
     {
         base.OnShown(e);
         ActiveControl = null;
+#if DEBUG
+        // Test screenshots: recenthover=N shows a row hovered, recentmenu=N opens its right-click menu
+        foreach (var part in (Environment.GetEnvironmentVariable("CFD_TEST") ?? "").Split(';'))
+        {
+            if (part.StartsWith("recenthover=")) recentList.Hover(int.Parse(part[12..]));
+            if (part.StartsWith("recentmenu=")) BeginInvoke(() => ShowRecentMenu(int.Parse(part[11..]), new Point(recentList.Width / 2, 20)));
+        }
+#endif
     }
 
-    /// <summary>One row per recent project, newest first; click to open it. The list scrolls after six.</summary>
+    /// <summary>One row per recent project, newest first; click to open it, right-click for more. The list scrolls after six.</summary>
     void FillRecent()
     {
-        recentList.SuspendLayout();
-        foreach (Control c in recentList.Controls.Cast<Control>().ToList()) c.Dispose();
         var recent = Projects.Recent();
-        const int Shown = 6, RowH = 34;
-        var scrolls = recent.Count > Shown;
-        var box = scrolls ? new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Size = new Size(W, Shown * (RowH + 2)), Margin = Padding.Empty } : recentList;
-        foreach (var (_, project) in recent)
-        {
-            var row = new ProjectRow(Path.GetFileName(project.File), Projects.When(project.Saved), !File.Exists(project.File)) { Size = new Size(scrolls ? W - SystemInformation.VerticalScrollBarWidth - 2 : W, RowH), Margin = new Padding(0, 0, 0, 2) };
-            tips.SetToolTip(row, project.File);
-            row.Click += (_, _) =>
-            {
-                if (!File.Exists(project.File)) return;
-                OpenProject = project;
-                Close();
-            };
-            box.Controls.Add(row);
-        }
-        if (scrolls) { DarkScrollbars(box); recentList.Controls.Add(box); }
-        recentList.ResumeLayout();
+        recentList.SetItems([.. recent.Select(r => new RecentList.Item(r.Path, r.Project, !File.Exists(r.Project.File)))]);
+        recentList.Visible = recent.Count > 0;
         recentNote.Text = cfg.RecentProjects == 0 ? "Projects aren't saved." : recent.Count == 0 ? "Nothing yet. Each video you compress shows up here." : "";
         recentNote.Visible = recentNote.Text != "";
     }
 
-    readonly ToolTip tips = new();
+    /// <summary>Opens a recent project; one whose video has gone asks where it is first</summary>
+    void OpenRecent(int i)
+    {
+        var item = recentList.Items[i];
+        if (item.Missing && !PickVideoFor(item, "Locate")) return;
+        OpenProject = item.Project;
+        Close();
+    }
+
+    /// <summary>Asks for the video a project should use: where the old one went, or a different one to set up the same way</summary>
+    bool PickVideoFor(RecentList.Item item, string verb)
+    {
+        var old = item.Project.File;
+        using var dlg = new OpenFileDialog
+        {
+            Title = $"{verb} {Path.GetFileName(old)}",
+            Filter = Program.VideoFilter,
+            FileName = Path.GetFileName(old),
+            InitialDirectory = Directory.Exists(Path.GetDirectoryName(old)) ? Path.GetDirectoryName(old) : "",
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return false;
+        Projects.Relink(item.Path, item.Project, dlg.FileName);
+        return true;
+    }
+
+    void ShowRecentMenu(int i, Point at)
+    {
+        var item = recentList.Items[i];
+        recentMenu.Items.Clear();
+        if (!item.Missing) recentMenu.Add("Open", "", () => OpenRecent(i));
+        recentMenu.Add(item.Missing ? "Locate video…" : "Swap video…", "", () => { if (PickVideoFor(item, item.Missing ? "Locate" : "Swap for")) FillRecent(); });
+        if (!item.Missing) recentMenu.Add("Show in folder", "", () => System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{item.Project.File}\""));
+        recentMenu.Items.Add(new ToolStripSeparator());
+        recentMenu.Add("Remove from list", "", () => { Projects.Remove(item.Path); FillRecent(); });
+        recentMenu.Show(recentList, at);
+    }
 
     static Label Section(string text) =>
         new() { Text = text.ToUpperInvariant(), AutoSize = true, ForeColor = Theme.Muted, Font = new Font("Segoe UI Semibold", 8.5f), Margin = new Padding(0, 14, 0, 8) };
@@ -201,7 +230,7 @@ sealed class SettingsForm : DarkForm
         return row;
     }
 
-    static CheckBox Check(string text, bool on) => new() { Text = text, Checked = on, AutoSize = true, ForeColor = Theme.Text, Margin = new Padding(0, 0, 0, 4) };
+    static DarkCheck Check(string text, bool on) => new() { Text = text, Checked = on, AutoSize = true, Margin = new Padding(0, 0, 0, 2) };
 
     void RefreshFfmpeg()
     {
@@ -303,35 +332,168 @@ sealed class SettingsForm : DarkForm
         }
     }
 
-    /// <summary>A recent project: the video's name, and when it was saved. Greyed out when the video has gone.</summary>
-    sealed class ProjectRow : Control
+    /// <summary>
+    /// The recent projects in one rounded box, like the text fields: each row is the video's name and when it was
+    /// saved, a gone video in red. Scrolls (wheel or the thin bar) after six rows.
+    /// </summary>
+    sealed class RecentList : Control
     {
-        readonly string name, when;
-        readonly bool missing;
-        bool hover;
+        public sealed record Item(string Path, Project Project, bool Missing);
+        public IReadOnlyList<Item> Items { get; private set; } = [];
+        public event Action<int>? RowClicked;
+        public event Action<int, Point>? RowMenu;
 
-        public ProjectRow(string name, string when, bool missing)
+        const int RowH = 34, Shown = 6, Pad = 4, BarW = 6;
+        int hover = -1, scroll;
+        bool overBar;
+        int? dragFrom;
+        readonly ToolTip tips = new();
+
+        public RecentList()
         {
-            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            (this.name, this.when, this.missing) = (name, missing ? "video moved or deleted" : when, missing);
-            Cursor = missing ? Cursors.Default : Cursors.Hand;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            Fit();
         }
 
-        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); hover = !missing; Invalidate(); }
-        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hover = false; Invalidate(); }
+        int Px(float v) => (int)Math.Round(v * DeviceDpi / 96f);
+        int Row => Px(RowH);
+        int View => Math.Min(Items.Count, Shown) * Row;
+        int MaxScroll => Math.Max(0, Items.Count * Row - View);
+        bool Scrolls => MaxScroll > 0;
+        Rectangle Track => new(Width - Px(Pad) - Px(BarW), Px(Pad), Px(BarW), View);
+        Rectangle Thumb
+        {
+            get
+            {
+                var t = Track;
+                var h = Math.Max(Px(24), t.Height * View / Math.Max(1, Items.Count * Row));
+                return new Rectangle(t.X, t.Y + (MaxScroll == 0 ? 0 : (t.Height - h) * scroll / MaxScroll), t.Width, h);
+            }
+        }
+
+        void Fit() => Height = View + 2 * Px(Pad);
+        protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
+        protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
+
+        public void SetItems(IReadOnlyList<Item> items)
+        {
+            Items = items;
+            (hover, scroll) = (-1, 0);
+            Fit();
+            Invalidate();
+        }
+
+        int RowAt(Point p)
+        {
+            if (p.Y < Px(Pad) || p.Y >= Px(Pad) + View || (Scrolls && p.X >= Track.X - Px(2))) return -1;
+            var i = (p.Y - Px(Pad) + scroll) / Row;
+            return i < Items.Count ? i : -1;
+        }
+
+        void ScrollTo(int to)
+        {
+            to = Math.Clamp(to, 0, MaxScroll);
+            if (to == scroll) return;
+            scroll = to;
+            Invalidate();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (dragFrom is { } from)
+            {
+                // Dragging the thumb: its travel maps onto the whole list
+                var travel = Math.Max(1, Track.Height - Thumb.Height);
+                ScrollTo(from + (e.Y - dragStartY) * MaxScroll / travel);
+                return;
+            }
+            var bar = Scrolls && e.X >= Track.X - Px(2) && Thumb.Contains(Track.X, e.Y);
+            var row = RowAt(e.Location);
+            if (row != hover || bar != overBar)
+            {
+                (hover, overBar) = (row, bar);
+                Cursor = row >= 0 ? Cursors.Hand : Cursors.Default;
+                tips.SetToolTip(this, row >= 0 ? Items[row].Project.File : null);
+                Invalidate();
+            }
+        }
+
+        int dragStartY;
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left || !Scrolls || e.X < Track.X - Px(2)) return;
+            var thumb = Thumb;
+            // A click on the track jumps a page towards it; on the thumb, drags it
+            if (e.Y < thumb.Y) ScrollTo(scroll - View);
+            else if (e.Y >= thumb.Bottom) ScrollTo(scroll + View);
+            else (dragFrom, dragStartY) = (scroll, e.Y);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (dragFrom != null) { dragFrom = null; return; }
+            var row = RowAt(e.Location);
+            if (row < 0) return;
+            if (e.Button == MouseButtons.Left) RowClicked?.Invoke(row);
+            else if (e.Button == MouseButtons.Right) RowMenu?.Invoke(row, e.Location);
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            ScrollTo(scroll - e.Delta / 120 * Row);
+            OnMouseMove(new MouseEventArgs(MouseButtons.None, 0, PointToClient(MousePosition).X, PointToClient(MousePosition).Y, 0));
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            (hover, overBar) = (-1, false);
+            Invalidate();
+        }
+
+        /// <summary>Shows a row as hovered (test screenshots)</summary>
+        public void Hover(int i) { hover = i; Invalidate(); }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.Clear(Parent?.BackColor ?? Theme.Bg);
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            var px = DeviceDpi / 96f;
-            using (var shape = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), 6 * px))
-            using (var fill = new SolidBrush(hover ? Theme.Bg3 : Theme.Bg2)) g.FillPath(fill, shape);
-            var pad = (int)(12 * px);
-            var whenW = TextRenderer.MeasureText(when, Font).Width;
-            TextRenderer.DrawText(g, when, Font, new Rectangle(Width - pad - whenW, 0, whenW, Height), missing ? Theme.Danger : Theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPrefix);
-            TextRenderer.DrawText(g, name, Font, new Rectangle(pad, 0, Width - 3 * pad - whenW, Height), missing ? Theme.Muted : Theme.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            using (var box = Theme.Round(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), Px(8)))
+            using (var fill = new SolidBrush(Theme.Bg3)) g.FillPath(fill, box);
+
+            var pad = Px(Pad);
+            var right = Scrolls ? Track.X - Px(4) : Width - pad;
+            g.SetClip(new Rectangle(pad, pad, Width - 2 * pad, View));
+            var first = scroll / Row;
+            for (var i = first; i < Items.Count && i * Row - scroll < View; i++)
+            {
+                var item = Items[i];
+                var r = new Rectangle(pad, pad + i * Row - scroll, right - pad, Row);
+                if (i == hover)
+                    using (var shape = Theme.Round(new RectangleF(r.X, r.Y + 1, r.Width - 1, r.Height - 2), Px(6)))
+                    using (var fill = new SolidBrush(Theme.Bg)) g.FillPath(fill, shape);
+                var text = Px(10);
+                var when = item.Missing ? "moved or deleted · click to locate" : Projects.When(item.Project.Saved);
+                var whenW = TextRenderer.MeasureText(when, Font).Width;
+                TextRenderer.DrawText(g, when, Font, new Rectangle(r.Right - text - whenW, r.Y, whenW, r.Height), item.Missing ? Theme.Danger : Theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPrefix);
+                TextRenderer.DrawText(g, System.IO.Path.GetFileName(item.Project.File), Font, new Rectangle(r.X + text, r.Y, r.Width - 3 * text - whenW, r.Height), item.Missing ? Theme.Muted : Theme.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            }
+            g.ResetClip();
+
+            // Thin rounded scrollbar, as on the timeline's tracks
+            if (Scrolls)
+            {
+                var thumb = Thumb;
+                using var shape = Theme.Round(new RectangleF(thumb.X, thumb.Y, thumb.Width, thumb.Height), thumb.Width / 2f);
+                using var fill = new SolidBrush(overBar || dragFrom != null ? Theme.SecondaryHover : Theme.Secondary);
+                g.FillPath(fill, shape);
+            }
         }
     }
 
