@@ -31,6 +31,7 @@ sealed class HelpForm : DarkForm
             ("Ctrl+C / Ctrl+V", "Copy / paste at the playhead"),
             ("Del", "Delete selected key points"),
             ("Right-click a point", "Linear, smooth, ease or hold"),
+            ("1 – 5", "Linear / smooth / ease in / ease out / hold"),
         ]),
         ("Picture", [
             ("Ctrl / Shift + drag", "Snap to edges / one direction"),

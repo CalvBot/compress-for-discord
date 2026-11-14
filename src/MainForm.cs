@@ -685,10 +685,16 @@ sealed class MainForm : DarkForm
                 case "separate": SetSeparate(true); break;
                 case "select": keyLane.Select(int.Parse(value)); break;
                 case "del": DeleteSelectedKey(); break;
+                // presskey=D2: once the window's up, as if that key was pressed; then logs each audio track's key point eases
+                case "presskey":
+                    var pressed = Enum.Parse<Keys>(value);
+                    _ = Task.Delay(1500).ContinueWith(_ => BeginInvoke(() =>
+                        AppLog.Info($"Presskey {value}: handled {HandleEditKey(pressed)}; eases {string.Join(" | ", trackUi.Select(t => t.Lane).Prepend(masterLane).Select(l => string.Join(",", l.Keys.Select(k => k.E))))}")));
+                    break;
                 // selmulti=lane:0,1 (lane: key, pos, scale, or an audio track number)
                 case "selmulti":
                     var (which, ids) = (value.Split(':')[0], value.Split(':')[1].Split(',').Select(int.Parse));
-                    if (which is "key" or "pos" or "scale") (which == "key" ? keyLane : which == "pos" ? posLane : scaleLane).Selection.SetMany(ids);
+                    if (which is "key" or "pos" or "scale" or "master") (which == "key" ? keyLane : which == "pos" ? posLane : which == "scale" ? scaleLane : (KeyTrackLane)masterLane).Selection.SetMany(ids);
                     else trackUi[int.Parse(which)].Lane.Selection.SetMany(ids);
                     foreach (var t in AllTracks) t.Invalidate();
                     break;
@@ -937,6 +943,11 @@ sealed class MainForm : DarkForm
                         lane.Active = true;
                         lane.Invalidate();
                     }
+                    break;
+                // The same three on the main audio lane (the only one a single-track video shows)
+                case "masterkeys":
+                    masterLane.Keys.AddRange([(probe!.Duration * 0.2, 1, Ease.Linear), (probe.Duration * 0.4, 0.3, Ease.Linear), (probe.Duration * 0.7, 1.6, Ease.Linear)]);
+                    masterLane.Invalidate();
                     break;
                 case "mousesim":
                     // Drags the crop box, key points and the playhead with posted mouse messages (the real mouse
@@ -1558,8 +1569,9 @@ sealed class MainForm : DarkForm
         };
         if (selected >= 0)
         {
-            foreach (var (ease, name) in Interp.Kinds)
-                trackMenu.Add("       " + name, ease == current ? "current" : "", () => SetEase(track, selected, ease)).Tag = ease;
+            // With the number key that does the same
+            foreach (var ((ease, name), n) in Interp.Kinds.Select((k, i) => (k, i + 1)))
+                trackMenu.Add("       " + name, ease == current ? $"current   {n}" : $"{n}", () => SetEase(track, selected, ease)).Tag = ease;
             trackMenu.Items.Add(new ToolStripSeparator());
         }
         trackMenu.Add("Clear keyframes", "", () => ClearKeys(track));
@@ -2454,6 +2466,12 @@ sealed class MainForm : DarkForm
             case Keys.Q or Keys.I: timeline.SetStart(timeline.Current); break;
             case Keys.E or Keys.O: timeline.SetEnd(timeline.Current); break;
             case Keys.Delete: if (!DeleteSelectedKey()) return false; break;
+            // 1-5: how the value moves next to the selected key points (the order of the right-click menu)
+            case >= Keys.D1 and <= Keys.D5 or >= Keys.NumPad1 and <= Keys.NumPad5:
+                if (ShownTracks.FirstOrDefault(t => t.SelectedKey >= 0) is not { } keyed) return false;
+                var n = key >= Keys.NumPad1 ? key - Keys.NumPad1 : key - Keys.D1;
+                SetEase(keyed, keyed.SelectedKey, Interp.Kinds[n].Ease);
+                break;
             case Keys.Home: timeline.Seek(timeline.Start); break;
             case Keys.End: timeline.Seek(timeline.End); break;
             default: return false;
