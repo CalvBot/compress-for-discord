@@ -753,10 +753,13 @@ sealed class VolumeLane : Control
     public readonly List<(double T, double V, Ease E)> Keys = [];
 
     /// <summary>Changes how the volume moves next to a point</summary>
-    public void SetEase(int i, Ease ease)
+    public void SetEase(int i, Ease ease) => SetEase([i], ease);
+
+    /// <summary>Changes several points at once, committing once (so playback restarts once, not per point)</summary>
+    public void SetEase(IEnumerable<int> ids, Ease ease)
     {
-        if (i < 0 || i >= Keys.Count) return;
-        Keys[i] = (Keys[i].T, Keys[i].V, ease);
+        foreach (var i in ids)
+            if (i >= 0 && i < Keys.Count) Keys[i] = (Keys[i].T, Keys[i].V, ease);
         Invalidate();
         Committed?.Invoke();
     }
@@ -797,7 +800,7 @@ sealed class VolumeLane : Control
     public void SelectTimes(IEnumerable<double> times)
     {
         var ts = times.ToList();
-        Selection.SetMany(Enumerable.Range(0, Keys.Count).Where(i => ts.Any(t => Math.Abs(Keys[i].T - t) < 0.02)));
+        Selection.SetMany(Enumerable.Range(0, Keys.Count).Where(i => ts.Any(t => Math.Abs(Keys[i].T - t) < Interp.Same)));
         Invalidate();
         if (Selection.Count > 0) KeySelected?.Invoke();
     }
@@ -805,11 +808,12 @@ sealed class VolumeLane : Control
     /// <summary>Pasted points: each replaces one already at its time, or goes in between. Then they're selected.</summary>
     public void Paste(IEnumerable<(double T, double V, Ease E)> points)
     {
+        EndDrag();
         var times = new List<double>();
         foreach (var (t, v, ease) in points)
         {
             if (t > Duration) continue;
-            var i = Keys.FindIndex(k => Math.Abs(k.T - t) < 0.02);
+            var i = Keys.FindIndex(k => Math.Abs(k.T - t) < Interp.Same);
             if (i >= 0) Keys[i] = (Keys[i].T, v, ease);
             else
             {
@@ -830,7 +834,9 @@ sealed class VolumeLane : Control
     public void DeleteSelected()
     {
         if (Selection.Count == 0) return;
-        foreach (var i in Selection.Sorted.Reverse()) if (i < Keys.Count) Keys.RemoveAt(i);
+        EndDrag();
+        var gone = Selection.Sorted;
+        for (var j = gone.Length - 1; j >= 0; j--) if (gone[j] < Keys.Count) Keys.RemoveAt(gone[j]);
         Selection.Clear();
         Invalidate();
         Committed?.Invoke();
@@ -926,6 +932,7 @@ sealed class VolumeLane : Control
 
     public void ClearKeys()
     {
+        EndDrag();
         Selection.Clear();
         Keys.Clear();
         Invalidate();
@@ -935,6 +942,7 @@ sealed class VolumeLane : Control
     /// <summary>Back to 100% throughout: no points, and the level line where it started</summary>
     public void ResetLevel()
     {
+        EndDrag();
         Selection.Clear();
         Keys.Clear();
         Volume = 1;
@@ -953,8 +961,9 @@ sealed class VolumeLane : Control
     /// <summary>Adds a point on the line at a time (or finds the one already there); returns its index</summary>
     int AddKey(double t)
     {
-        var near = Keys.FindIndex(k => Math.Abs(k.T - t) < 0.05);
+        var near = Keys.FindIndex(k => Math.Abs(k.T - t) < Interp.Same);
         if (near >= 0) return near;
+        added = true;
         var after = Keys.FindIndex(k => k.T > t);
         var at = after < 0 ? Keys.Count : after;
         Keys.Insert(at, (t, GainAt(t), Ease.Linear));
@@ -999,6 +1008,7 @@ sealed class VolumeLane : Control
         {
             var shift = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift);
             // Ctrl+click puts a new point under the mouse, already held so it can be dragged into place
+            added = false;
             if (k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) k = AddKey(OnFrame(T(e.X)));
             toggleOff = -1;
             moved = false;
@@ -1019,6 +1029,31 @@ sealed class VolumeLane : Control
             grabY = e.Y;
             grabVolume = dragStretch >= 0 ? Keys[dragStretch].V : Volume;
         }
+    }
+
+    /// <summary>A Ctrl+click put a new point in during this press</summary>
+    bool added;
+
+    /// <summary>
+    /// Ends a drag: on mouse up, when the mouse is taken away (Alt+Tab, a menu), or before the points change under
+    /// it (Del, paste), so it never holds an index that's gone. Commits whatever it changed.
+    /// </summary>
+    void EndDrag()
+    {
+        var changed = added || (dragKey >= 0 && moved)
+            || (dragStretch >= 0 && dragStretch < Keys.Count && Keys[dragStretch].V != grabVolume)
+            || (dragFlat && Volume != grabVolume);
+        var busy = dragKey >= 0 || dragStretch >= 0 || dragFlat || added;
+        toggleOff = -1;
+        dragKey = dragStretch = -1;
+        dragFlat = added = false;
+        if (busy && changed) Committed?.Invoke();
+    }
+
+    protected override void OnMouseCaptureChanged(EventArgs e)
+    {
+        base.OnMouseCaptureChanged(e);
+        if (!Capture) EndDrag();
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -1068,11 +1103,7 @@ sealed class VolumeLane : Control
             if (toggleOff >= 0) { Selection.Remove(toggleOff); Invalidate(); }
             else if (!ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift)) Select(dragKey);
         }
-        var changed = (dragKey >= 0 && moved) || dragStretch >= 0 || (dragFlat && Volume != grabVolume);
-        toggleOff = -1;
-        dragKey = dragStretch = -1;
-        dragFlat = false;
-        if (changed) Committed?.Invoke();
+        EndDrag();
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -1533,7 +1564,7 @@ sealed class KeyLane : Control
     public void SelectTimes(IEnumerable<double> times)
     {
         var ts = times.ToList();
-        Selection.SetMany(Enumerable.Range(0, Keys.Count).Where(i => ts.Any(t => Math.Abs(Keys[i] - t) < 0.02)));
+        Selection.SetMany(Enumerable.Range(0, Keys.Count).Where(i => ts.Any(t => Math.Abs(Keys[i] - t) < Interp.Same)));
         Invalidate();
         if (Selection.Count > 0) KeySelected?.Invoke();
     }
@@ -1545,6 +1576,7 @@ sealed class KeyLane : Control
     public void DeleteSelected()
     {
         if (Selection.Count == 0) return;
+        dragKey = -1;
         var gone = Selection.Sorted;
         Selection.Clear();
         RemoveRequested?.Invoke(gone);
@@ -1664,6 +1696,12 @@ sealed class KeyLane : Control
         }
         toggleOff = -1;
         dragKey = -1;
+    }
+
+    protected override void OnMouseCaptureChanged(EventArgs e)
+    {
+        base.OnMouseCaptureChanged(e);
+        if (!Capture) { toggleOff = -1; dragKey = -1; }
     }
 
     protected override void OnPaint(PaintEventArgs e)

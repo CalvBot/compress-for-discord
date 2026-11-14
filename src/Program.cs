@@ -13,6 +13,18 @@ static class Program
         // Run by the uninstaller
         if (args.Contains("--remove-downloads")) { Paths.RemoveDownloads(); return; }
 
+        AppLog.Info($"Started v{Updater.Current} ({Environment.OSVersion.VersionString}, .NET {Environment.Version}), args: {string.Join(" ", args)}");
+        // Anything that would otherwise vanish or crash silently goes in the log first
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) =>
+        {
+            AppLog.Error("Unhandled UI error", e.Exception);
+            MessageBox.Show($"Something went wrong: {e.Exception.Message}\n\nDetails are in {Paths.AppLog}", "Compress for Discord", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => AppLog.Error("Unhandled error, closing", e.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, e) => { AppLog.Error("Background task error", e.Exception); e.SetObserved(); };
+        Application.ApplicationExit += (_, _) => AppLog.Info("Exited");
+
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
@@ -34,7 +46,12 @@ static class Program
     static void Show(Form f)
     {
         openWindows++;
-        f.FormClosed += (_, _) => { if (--openWindows == 0) app.ExitThread(); };
+        AppLog.Info($"Opened {f.GetType().Name}");
+        f.FormClosed += (_, e) =>
+        {
+            AppLog.Info($"Closed {f.GetType().Name} ({e.CloseReason})");
+            if (--openWindows == 0) app.ExitThread();
+        };
         f.Show();
     }
 }

@@ -60,7 +60,8 @@ static class Planner
             audioKbps,
             scale,
             fps,
-            videoKbps >= MinVideoKbps,
+            // A source that's already below the minimum (capped to its own rate) fits fine
+            cappedBySource || videoKbps >= MinVideoKbps,
             budgetKbits / cal / (MinVideoKbps + (hasAudio ? 64 : 0)),
             scale ?? shortSide,
             cappedBySource,

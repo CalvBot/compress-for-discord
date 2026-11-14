@@ -247,14 +247,27 @@ sealed class MainForm : DarkForm
         }
 
         sizeChips = ChipRow();
-        (customMb, var customBox) = CustomField(t => double.TryParse(t, out var n) && n > 0);
+        // A row's custom box emptied with none of its chips picked: back to the first chip, so the box never
+        // keeps acting on a value that's no longer shown
+        bool Emptied(TextBox box, FlowLayoutPanel? row) =>
+            box.Text.Trim() == "" && row != null && !row.Controls.OfType<Pill>().Any(c => c.On);
+
+        (customMb, var customBox) = CustomField(t => ParseMb(t) > 0);
         foreach (var mb in Planner.LimitPresets) sizeChips.Controls.Add(Chip(Planner.FormatBytes(mb * Planner.MB), mb, sizeChips, v => { customMb.Text = ""; SetTarget((double)v!); }));
         sizeChips.Controls.Add(customBox);
         if (!Planner.LimitPresets.Contains(targetMb)) customMb.Text = targetMb.ToString("0.##");
         SelectChip(sizeChips, targetMb);
         customMb.TextChanged += (_, _) =>
         {
-            if (!double.TryParse(customMb.Text, out var n) || n <= 0) return;
+            if (Emptied(customMb, sizeChips))
+            {
+                var mb = Planner.LimitPresets[0];
+                SelectChip(sizeChips, mb);
+                SetTarget(mb);
+                return;
+            }
+            var n = ParseMb(customMb.Text);
+            if (n <= 0) return;
             SelectChip(sizeChips, null);
             SetTarget(n);
         };
@@ -263,6 +276,7 @@ sealed class MainForm : DarkForm
         (fpsBox, fpsField) = CustomField(t => int.TryParse(t, out var n) && n > 0);
         fpsBox.TextChanged += (_, _) =>
         {
+            if (probe != null && Emptied(fpsBox, fpsChips)) { frameRate = null; SelectChip(fpsChips!, null); UpdateSummary(); return; }
             if (probe == null || !int.TryParse(fpsBox.Text, out var n) || n < 1) return;
             // Never above the source's own rate
             frameRate = n < probe.Fps - 0.5 ? n : null;
@@ -274,6 +288,7 @@ sealed class MainForm : DarkForm
         (resBox, resField) = CustomField(t => int.TryParse(t.Trim().TrimEnd('%'), out var n) && n > 0);
         resBox.TextChanged += (_, _) =>
         {
+            if (probe != null && Emptied(resBox, resChips)) { scalePct = null; SelectChip(resChips!, null); UpdateSummary(); return; }
             if (probe == null || !int.TryParse(resBox.Text.Trim().TrimEnd('%'), out var n) || n < 1) return;
             // Never above the source, and never below a watchable size
             n = Math.Min(n, 100);
@@ -345,6 +360,8 @@ sealed class MainForm : DarkForm
         {
             if (c == customMb || c == timeBox || c == fpsBox || c == resBox) return;
             c.MouseDown += (_, _) => { if (Typing) LeaveCustomBox(); };
+            // Chips and audio lanes are added once the video is read, so catch those too
+            c.ControlAdded += (_, e) => { if (e.Control != null) HookClicks(e.Control); };
             foreach (Control child in c.Controls) HookClicks(child);
         }
         HookClicks(this);
@@ -367,7 +384,21 @@ sealed class MainForm : DarkForm
 
     async Task LoadVideo()
     {
-        if (probe != null) return; // already loaded (Settings re-reports ffmpeg)
+        // Already loaded, or being read (Settings re-reports ffmpeg, maybe while the first read is still going)
+        if (probe != null || loading) return;
+        loading = true;
+        try { await ReadVideo(); }
+        finally { loading = false; }
+    }
+
+    bool loading;
+
+    /// <summary>A size in MB as typed: "8", "8.5" or "8,5" (a comma as the decimal point); 0 if it isn't one</summary>
+    static double ParseMb(string text) =>
+        double.TryParse(text.Trim().Replace(',', '.'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) && double.IsFinite(n) ? n : 0;
+
+    async Task ReadVideo()
+    {
         var err = Ff.Locate(cfg.FfmpegPath);
         var missing = err != null;
         settingsBtn.Visible = downloadBtn.Visible = missing;
@@ -375,8 +406,9 @@ sealed class MainForm : DarkForm
         if (err != null) { ShowStatus(err, Theme.Danger); return; }
         ShowStatus("Reading video…", Theme.Muted);
         try { probe = await Ff.Probe(file); }
-        catch (Exception ex) { ShowStatus(ex.Message, Theme.Danger); return; }
+        catch (Exception ex) { AppLog.Error($"Couldn't read {file}", ex); ShowStatus(ex.Message, Theme.Danger); return; }
         if (IsDisposed) return;
+        AppLog.Info($"Loaded {file}: {probe.Width}x{probe.Height} {probe.Fps:0.##} fps, {probe.Duration:0.00} s, {probe.AudioTracks.Count} audio track(s)");
 
         var shortSide = Math.Min(probe.Width, probe.Height);
         var fps = (int)Math.Round(probe.Fps);
@@ -483,6 +515,8 @@ sealed class MainForm : DarkForm
     /// <summary>Sets the window up as a saved project</summary>
     void Restore(Project p)
     {
+        // Opening a project uses its size without changing the size remembered for new videos
+        var remembered = cfg.TargetMb;
         Batch(() =>
         {
             timeline.SetEnd(p.End);
@@ -520,7 +554,9 @@ sealed class MainForm : DarkForm
             // Audio: each track that's still there, by its number
             void Apply(TrackState s, VolumeLane lane)
             {
-                (lane.Active, lane.Volume) = (s.Active, s.Volume);
+                // A lone track has no lane of its own on screen to unmute it with (the Audio lane mutes instead)
+                (lane.Active, lane.Volume) = (s.Active || (lane != masterLane && trackUi.Count == 1), s.Volume);
+                lane.Selection.Clear();
                 lane.Keys.Clear();
                 lane.Keys.AddRange(s.Keys.Select(k => (k.T, k.V, k.E)));
                 lane.Invalidate();
@@ -536,6 +572,7 @@ sealed class MainForm : DarkForm
             ShowCrop();
             UpdateSummary();
         });
+        if (cfg.TargetMb != remembered) { cfg.TargetMb = remembered; cfg.Save(); }
     }
 
 #if DEBUG
@@ -861,7 +898,7 @@ sealed class MainForm : DarkForm
             }, cts.Token);
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { if (!IsDisposed) ShowStatus(ex.Message, Theme.Danger); }
+        catch (Exception ex) { AppLog.Error("Playback failed", ex); if (!IsDisposed) ShowStatus(ex.Message, Theme.Danger); }
         if (playCts == cts) StopPlayback();
         cts.Dispose();
     }
@@ -1120,7 +1157,7 @@ sealed class MainForm : DarkForm
             trackMenu.Items.Add(new ToolStripSeparator());
         }
         trackMenu.Add("Clear keyframes", "", () => ClearKeys(track));
-        if (track is VolumeLane audio) trackMenu.Add("Reset audio level", "", () => { audio.ResetLevel(); if (audio != masterLane) UpdateMasterPeaks(); });
+        if (track is VolumeLane audio) trackMenu.Add("Reset audio level", "", audio.ResetLevel);
         if (track is KeyLane) trackMenu.Add(separate ? "Combine position and scale" : "Separate position and scale", "", () => SetSeparate(!separate));
         trackMenu.Show(track, at);
     }
@@ -1130,8 +1167,8 @@ sealed class MainForm : DarkForm
     {
         if (track is VolumeLane v)
         {
-            foreach (var i in v.Selection.Contains(index) ? v.Selection.Sorted : [index]) v.SetEase(i, ease);
-            if (v != masterLane) UpdateMasterPeaks();
+            // Committed (wired to UpdateMasterPeaks and the playback restart) fires once for the lot
+            v.SetEase(v.Selection.Contains(index) ? v.Selection.Sorted : [index], ease);
         }
         else if (track is KeyLane k && keyTracks.TryGetValue(k, out var tracks))
         {
@@ -1151,20 +1188,21 @@ sealed class MainForm : DarkForm
     /// <summary>Ctrl+C: the selected key points, on whichever track they are. False if none are selected.</summary>
     bool CopyKeys()
     {
-        foreach (var track in AllTracks)
+        foreach (var track in ShownTracks)
         {
             if (track is VolumeLane { Selection.Count: > 0 } a)
             {
                 var pts = a.Selection.Sorted.Where(i => i < a.Keys.Count).Select(i => a.Keys[i]).ToList();
+                if (pts.Count == 0) continue;
                 keyClip = new(true, [.. pts.Select(k => (k.T - pts[0].T, k.V, ((double, double)?)null, (double?)null, k.E))]);
             }
             else if (track is KeyLane { Selection.Count: > 0 } b)
             {
-                var idx = b.Selection.Sorted.Where(i => i < pos.Count || i < scale.Count).ToList();
-                if (idx.Count == 0) return false;
                 // The shared track's points are both position and scale; a separate track's are just its own
                 var withPos = b != scaleLane;
                 var withScale = b != posLane;
+                var idx = b.Selection.Sorted.Where(i => (!withPos || i < pos.Count) && (!withScale || i < scale.Count)).ToList();
+                if (idx.Count == 0) continue;
                 var first = (withPos ? pos : (IKeyTrack)scale).TimeAt(idx[0]);
                 keyClip = new(false, [.. idx.Select(i => (
                     (withPos ? pos.Keys[i].T : scale.Keys[i].T) - first,
@@ -1197,7 +1235,6 @@ sealed class MainForm : DarkForm
         if (target is VolumeLane lane)
         {
             lane.Paste(points.Select(x => (x.T, x.p.V, x.p.E)));
-            if (lane != masterLane) UpdateMasterPeaks();
             return true;
         }
         if (!Cropping) return false;
@@ -1218,7 +1255,7 @@ sealed class MainForm : DarkForm
     /// <summary>Back to no key points. For audio that's a level volume line; for position and scale, the whole frame.</summary>
     void ClearKeys(Control track)
     {
-        if (track is VolumeLane v) { v.ClearKeys(); if (track != masterLane) UpdateMasterPeaks(); return; }
+        if (track is VolumeLane v) { v.ClearKeys(); return; }
         if (track != scaleLane) pos.Reset((0.5, 0.5));
         if (track != posLane) scale.Reset(MaxCropW);
         ShowCrop();
@@ -1226,18 +1263,15 @@ sealed class MainForm : DarkForm
     }
 
     IEnumerable<Control> AllTracks => new Control[] { keyLane, posLane, scaleLane, masterLane }.Concat(trackUi.Select(t => t.Lane));
+    /// <summary>The tracks on screen: Del and Ctrl+C never act on a hidden one's leftover selection</summary>
+    IEnumerable<Control> ShownTracks => AllTracks.Where(t => t.Visible);
 
     /// <summary>Del: removes the selected key point, whichever track it's on. False if none is selected.</summary>
     bool DeleteSelectedKey()
     {
-        foreach (var track in AllTracks)
+        foreach (var track in ShownTracks)
         {
-            if (track is VolumeLane { SelectedKey: >= 0 } a)
-            {
-                a.DeleteSelected();
-                if (a != masterLane) UpdateMasterPeaks();
-                return true;
-            }
+            if (track is VolumeLane { SelectedKey: >= 0 } a) { a.DeleteSelected(); return true; }
             if (track is KeyLane { SelectedKey: >= 0 } b) { b.DeleteSelected(); return true; }
         }
         return false;
@@ -1655,6 +1689,8 @@ sealed class MainForm : DarkForm
         string? savePath = null;
         if (save && (savePath = saveTo ?? AskSavePath()) == null) return;
         encodeCts = new CancellationTokenSource();
+        AppLog.Info($"Compress {(save ? "& save" : "& copy")}: {timeline.Start:0.00}-{timeline.End:0.00} s, limit {plan.TargetBytes / Planner.MB:0.00} MB, video {plan.VideoKbps} kbps, audio {plan.AudioKbps} kbps, " +
+            $"short side {plan.ScaleShortSide?.ToString() ?? "source"}, fps {plan.Fps?.ToString() ?? "source"}, crop {(CropForEncode() != null ? "yes" : "no")}, tracks {Mix().Count}, encoder {cfg.Encoder}");
         SetBusy(true);
         var progress = new Progress<(string Stage, double Progress)>(p =>
         {
@@ -1663,7 +1699,7 @@ sealed class MainForm : DarkForm
         });
         try
         {
-            var (temp, size) = await Ff.Encode(new EncodeRequest
+            var request = new EncodeRequest
             {
                 Input = file,
                 Start = timeline.Start,
@@ -1684,7 +1720,10 @@ sealed class MainForm : DarkForm
                 Encoder = cfg.Encoder,
                 CappedBySource = plan.CappedBySource,
                 Calibration = plan.Calibration,
-            }, progress, encodeCts.Token);
+            };
+            var (temp, size) = await Ff.Encode(request, progress, encodeCts.Token);
+            // The encoder couldn't get small enough at the chosen size, so the picture was made smaller
+            var shrunk = request.ScaleShortSide != plan.ScaleShortSide ? $", made {request.ScaleShortSide}p to fit" : "";
 
             if (savePath != null)
             {
@@ -1695,23 +1734,31 @@ sealed class MainForm : DarkForm
                     cfg.SaveFolder = Path.GetDirectoryName(savePath) ?? "";
                     cfg.Save();
                 }
-                Done($"✓ Saved {Path.GetFileName(savePath)} ({Planner.FormatBytes(size)})");
+                Done($"✓ Saved {Path.GetFileName(savePath)} ({Planner.FormatBytes(size)}{shrunk})");
             }
             else
             {
                 outPath = Ff.MoveToOut(temp, name);
-                // Same as Explorer's Copy, so Ctrl+V in Discord attaches the file
-                Clipboard.SetFileDropList(new StringCollection { outPath });
-                Done($"✓ Copied ({Planner.FormatBytes(size)}). Press Ctrl+V in Discord.");
+                // Same as Explorer's Copy, so Ctrl+V in Discord attaches the file. Another app can be holding the
+                // clipboard; the file is made either way, so show it in Explorer to drag in instead of failing
+                try { Clipboard.SetFileDropList(new StringCollection { outPath }); }
+                catch (Exception ex)
+                {
+                    AppLog.Error("Couldn't copy to the clipboard; showing the file instead", ex);
+                    try { System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{outPath}\""); } catch { }
+                }
+                Done($"✓ Copied ({Planner.FormatBytes(size)}{shrunk}). Press Ctrl+V in Discord.");
             }
         }
         catch (OperationCanceledException)
         {
+            AppLog.Info("Compress cancelled");
             ShowStatus("Cancelled", Theme.Muted);
             SetBusy(false);
         }
         catch (Exception ex)
         {
+            AppLog.Error("Compress failed", ex);
             ShowStatus(ex.Message, Theme.Danger);
             SetBusy(false);
         }
@@ -1742,6 +1789,7 @@ sealed class MainForm : DarkForm
 
     async void Done(string message)
     {
+        AppLog.Info($"Compress done: {outPath}");
         SaveProject();
         // Chime, then get out of the way; the file is already on the clipboard or saved
         bar.Value = 1;
@@ -1777,7 +1825,7 @@ sealed class MainForm : DarkForm
             await LoadVideo();
         }
         catch (OperationCanceledException) { encodeCts = null; bar.Visible = false; ShowStatus("Download cancelled.", Theme.Muted); }
-        catch (Exception ex) { encodeCts = null; bar.Visible = false; ShowStatus("Download failed: " + ex.Message, Theme.Danger); }
+        catch (Exception ex) { AppLog.Error("ffmpeg download failed", ex); encodeCts = null; bar.Visible = false; ShowStatus("Download failed: " + ex.Message, Theme.Danger); }
         finally { settingsBtn.Enabled = true; (downloadBtn.AltText, downloadBtn.HoverText) = (null, null); }
     }
 

@@ -10,6 +10,8 @@ static class Paths
     public static readonly string Data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CompressForDiscord");
     public static readonly string Config = Path.Combine(Data, "config.json");
     public static readonly string Log = Path.Combine(Data, "log.jsonl");
+    /// <summary>What the app did, in plain text, for debugging: opens, ffmpeg runs, errors, window closes</summary>
+    public static readonly string AppLog = Path.Combine(Data, "app.log");
     /// <summary>Machine-local data (kept out of the roaming profile): the in-app ffmpeg download</summary>
     public static readonly string LocalData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CompressForDiscord");
     public static readonly string Ffmpeg = Path.Combine(LocalData, "ffmpeg");

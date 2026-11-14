@@ -274,7 +274,7 @@ sealed class SettingsForm : DarkForm
             SetPath(""); // the download is found automatically
         }
         catch (OperationCanceledException) { RefreshFfmpeg(); }
-        catch (Exception ex) { ffmpegStatus.Text = "Download failed: " + ex.Message; ffmpegStatus.ForeColor = Theme.Danger; }
+        catch (Exception ex) { AppLog.Error("ffmpeg download failed", ex); ffmpegStatus.Text = "Download failed: " + ex.Message; ffmpegStatus.ForeColor = Theme.Danger; }
         finally
         {
             download = null;
@@ -297,8 +297,9 @@ sealed class SettingsForm : DarkForm
             updateStatus.ForeColor = release == null ? Theme.Muted : Theme.Green;
             installBtn.Visible = release != null;
         }
-        catch
+        catch (Exception ex)
         {
+            AppLog.Warn($"Update check failed: {ex.Message}");
             updateStatus.Text = "Couldn't check for updates. Are you online?";
             updateStatus.ForeColor = Theme.Danger;
         }
@@ -317,6 +318,7 @@ sealed class SettingsForm : DarkForm
         }
         catch (Exception ex)
         {
+            AppLog.Error("Update install failed", ex);
             updateStatus.Text = "Update failed: " + ex.Message;
             updateStatus.ForeColor = Theme.Danger;
             installBtn.Enabled = checkLink.Enabled = true;

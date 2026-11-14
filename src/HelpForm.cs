@@ -72,6 +72,11 @@ sealed class HelpForm : DarkForm
         var footer = new FlowLayoutPanel { AutoSize = true, Margin = Padding.Empty, WrapContents = false };
         footer.Controls.Add(new Label { Text = $"Version {Updater.Current}", AutoSize = true, ForeColor = Theme.Muted, Margin = new Padding(0, 0, 14, 0) });
         footer.Controls.Add(Link("Project page", () => Updater.Open(Updater.RepoUrl)));
+        // For bug reports: opens the folder with app.log selected
+        footer.Controls.Add(Link("Show log", () =>
+        {
+            try { System.Diagnostics.Process.Start("explorer.exe", File.Exists(Paths.AppLog) ? $"/select,\"{Paths.AppLog}\"" : $"\"{Paths.Data}\""); } catch { }
+        }));
         root.Controls.Add(footer);
         Controls.Add(root);
     }

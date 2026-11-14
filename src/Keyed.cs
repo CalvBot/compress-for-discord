@@ -12,6 +12,12 @@ static class Interp
     public static readonly (Ease Ease, string Name)[] Kinds =
         [(Ease.Linear, "Linear"), (Ease.Smooth, "Smooth"), (Ease.EaseIn, "Ease in"), (Ease.EaseOut, "Ease out"), (Ease.Hold, "Hold")];
 
+    /// <summary>
+    /// Two key points this close (seconds) are at the same moment. Well under half a frame even at 100 fps, so a
+    /// point one frame from another is always its own point.
+    /// </summary>
+    public const double Same = 0.004;
+
     static bool SlowLeaving(Ease e) => e is Ease.Smooth or Ease.EaseOut;
     static bool SlowArriving(Ease e) => e is Ease.Smooth or Ease.EaseIn;
 
@@ -59,7 +65,7 @@ static class Interp
     /// How far a group of points can move together: as far as asked, short of the first unselected neighbour on
     /// either side (keeping a small gap) and the ends of the video. The group keeps its spacing and order.
     /// </summary>
-    public static double ClampShift(IReadOnlyList<double> times, IReadOnlySet<int> selected, double delta, double duration, double gap = 0.05)
+    public static double ClampShift(IReadOnlyList<double> times, IReadOnlySet<int> selected, double delta, double duration, double gap = Same)
     {
         double lo = double.NegativeInfinity, hi = double.PositiveInfinity;
         foreach (var i in selected)
@@ -68,7 +74,11 @@ static class Interp
             lo = Math.Max(lo, (i > 0 && !selected.Contains(i - 1) ? times[i - 1] + gap : 0) - times[i]);
             hi = Math.Min(hi, (i < times.Count - 1 && !selected.Contains(i + 1) ? times[i + 1] - gap : duration) - times[i]);
         }
-        return lo > hi || double.IsInfinity(lo) ? 0 : Math.Clamp(delta, lo, hi);
+        if (double.IsInfinity(lo)) return 0;
+        // A neighbour already closer than the gap only stops movement towards it; it never pushes the group away
+        lo = Math.Min(0, lo);
+        hi = Math.Max(0, hi);
+        return Math.Clamp(delta, lo, hi);
     }
 }
 
@@ -158,14 +168,14 @@ sealed class Keyed<V>(Func<V, V, double, V> mix) : IKeyTrack
     /// </summary>
     public void Set(double t, V value)
     {
-        var i = Keys.Count == 1 ? 0 : Keys.FindIndex(k => Math.Abs(k.T - t) < 0.02);
+        var i = Keys.Count == 1 ? 0 : Keys.FindIndex(k => Math.Abs(k.T - t) < Interp.Same);
         if (i >= 0) Keys[i] = (Keys[i].T, value, Keys[i].E);
         else Insert(t, value, Ease.Linear);
     }
 
     public bool Add(double t)
     {
-        if (Keys.Any(k => Math.Abs(k.T - t) < 0.05)) return false;
+        if (Keys.Any(k => Math.Abs(k.T - t) < Interp.Same)) return false;
         Insert(t, At(t), Ease.Linear);
         return true;
     }
@@ -185,7 +195,7 @@ sealed class Keyed<V>(Func<V, V, double, V> mix) : IKeyTrack
     /// <summary>A pasted point: replaces the one already at that time, or goes in between</summary>
     public void Put(double t, V value, Ease ease)
     {
-        var i = Keys.FindIndex(k => Math.Abs(k.T - t) < 0.02);
+        var i = Keys.FindIndex(k => Math.Abs(k.T - t) < Interp.Same);
         if (i >= 0) Keys[i] = (Keys[i].T, value, ease);
         else Insert(t, value, ease);
     }

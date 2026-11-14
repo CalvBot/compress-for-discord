@@ -150,6 +150,9 @@ static class Ff
 
     // ---------- process helper ----------
 
+    /// <summary>The last few lines of ffmpeg's error output, where the reason usually is</summary>
+    static string Tail(string stderr, int lines = 6) => string.Join("\n", stderr.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).TakeLast(lines));
+
     internal static async Task<(int Code, byte[] Stdout, string Stderr)> Run(string exe, IEnumerable<string> args, CancellationToken ct = default, int timeoutMs = 0)
     {
         var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -161,9 +164,17 @@ static class Ff
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         if (timeoutMs > 0) cts.CancelAfter(timeoutMs);
         try { await p.WaitForExitAsync(cts.Token).ConfigureAwait(false); }
-        catch (OperationCanceledException) { try { p.Kill(true); } catch { } throw; }
+        catch (OperationCanceledException)
+        {
+            try { p.Kill(true); p.WaitForExit(2000); } catch { }
+            // A timeout is worth knowing about; a plain cancel (zoomed again, closed) isn't
+            if (!ct.IsCancellationRequested) AppLog.Warn($"Timed out after {timeoutMs} ms: {AppLog.Command(exe, args)}");
+            throw;
+        }
         await outTask.ConfigureAwait(false);
-        return (p.ExitCode, stdout.ToArray(), await errTask.ConfigureAwait(false));
+        var stderr = await errTask.ConfigureAwait(false);
+        if (p.ExitCode != 0) AppLog.Warn($"Exit {p.ExitCode}: {AppLog.Command(exe, args)}\n{Tail(stderr)}");
+        return (p.ExitCode, stdout.ToArray(), stderr);
     }
 
     // ---------- probing ----------
@@ -372,14 +383,27 @@ static class Ff
         p.ErrorDataReceived += (_, e) =>
         {
             if (e.Data == null) return;
-            lock (tail) { tail.Enqueue(e.Data); if (tail.Count > 4) tail.Dequeue(); }
+            lock (tail) { tail.Enqueue(e.Data); if (tail.Count > 8) tail.Dequeue(); }
         };
+        AppLog.Info($"{stage}: {AppLog.Command(Ffmpeg, psi.ArgumentList)}");
+        var clock = Stopwatch.StartNew();
         p.Start();
         p.BeginOutputReadLine();
         p.BeginErrorReadLine();
         try { await p.WaitForExitAsync(ct); }
-        catch (OperationCanceledException) { try { p.Kill(true); } catch { } throw; }
-        if (p.ExitCode != 0) lock (tail) throw new Exception($"ffmpeg failed (code {p.ExitCode}): {string.Join(" | ", tail.TakeLast(3))}");
+        catch (OperationCanceledException)
+        {
+            // Wait for it to really end, so its half-written files can be deleted
+            try { p.Kill(true); p.WaitForExit(2000); } catch { }
+            AppLog.Info($"{stage}: cancelled after {clock.Elapsed.TotalSeconds:0.0} s");
+            throw;
+        }
+        if (p.ExitCode != 0) lock (tail)
+        {
+            AppLog.Error($"{stage}: ffmpeg exit {p.ExitCode} after {clock.Elapsed.TotalSeconds:0.0} s\n{string.Join("\n", tail)}");
+            throw new Exception($"ffmpeg failed (code {p.ExitCode}): {string.Join(" | ", tail.TakeLast(3))}");
+        }
+        AppLog.Info($"{stage}: done in {clock.Elapsed.TotalSeconds:0.0} s");
     }
 
     /// <summary>Encodes, retrying at a lower bitrate up to 3 times if the result overshoots. Returns the temp output path.</summary>
@@ -391,30 +415,39 @@ static class Ff
         var output = Path.Combine(Paths.Work, $"{id}-out.mp4");
         var passlog = Path.Combine(Paths.Work, $"{id}-pass");
 
-        var vf = new List<string>();
-        if (o.Crop != null) vf.AddRange(CropFilters(o));
-        else if (o.ScaleShortSide is { } s) vf.Add(o.Portrait ? $"scale={s}:-2" : $"scale=-2:{s}");
-        if (o.Fps is { } f) vf.Add($"fps={f}");
-        vf.Add("format=yuv420p");
         var audio = o.AudioKbps > 0 ? AudioGraph(o.Tracks, o.Start, o.Master) : null;
-        var videoGraph = $"[0:v:0]{string.Join(",", vf)}[vout]";
-        var graph = videoGraph + (audio != null ? $";{audio}" : "");
-
         string[] inputArgs = ["-ss", F3(o.Start), "-i", o.Input, "-t", F3(o.Duration)];
-        string[] common = ["-filter_complex", graph, "-map", "[vout]", "-map_metadata", "-1"];
-        // x264 pass 1 writes no audio, and ffmpeg rejects a graph with an unconnected [aout].
-        // The pass options are video-only (":v"): newer ffmpeg otherwise looks for a pass log for the audio too and fails.
-        string[] videoOnly = ["-filter_complex", videoGraph, "-map", "[vout]", "-map_metadata", "-1"];
         string[] audioOut = audio != null ? ["-map", "[aout]", "-c:a", "aac", "-b:a", $"{o.AudioKbps}k", "-ac", "2"] : ["-an"];
+        // The short side the picture would be without scaling (the crop's, when cropping)
+        var fullSide = o.Crop != null ? Math.Min(o.CropW, o.CropH) : Math.Min(o.SrcW, o.SrcH);
 
         try
         {
             var videoKbps = o.VideoKbps;
-            for (var attempt = 0; attempt < 3; attempt++)
+            var smaller = false;
+            var audioBytes = audio != null ? o.AudioKbps * 125.0 * o.Duration : 0;
+            // The previous attempt, when only its bitrate was lowered after it (0 = none to compare with)
+            int lastKbps = 0;
+            long lastSize = 0;
+            const int Attempts = 4;
+            for (var attempt = 0; attempt < Attempts; attempt++)
             {
+                // Built each attempt: a retry can make the picture smaller
+                var vf = new List<string>();
+                if (o.Crop != null) vf.AddRange(CropFilters(o));
+                else if (o.ScaleShortSide is { } s) vf.Add(o.Portrait ? $"scale={s}:-2" : $"scale=-2:{s}");
+                if (o.Fps is { } f) vf.Add($"fps={f}");
+                vf.Add("format=yuv420p");
+                var videoGraph = $"[0:v:0]{string.Join(",", vf)}[vout]";
+                var graph = videoGraph + (audio != null ? $";{audio}" : "");
+                string[] common = ["-filter_complex", graph, "-map", "[vout]", "-map_metadata", "-1"];
+                // x264 pass 1 writes no audio, and ffmpeg rejects a graph with an unconnected [aout].
+                // The pass options are video-only (":v"): newer ffmpeg otherwise looks for a pass log for the audio too and fails.
+                string[] videoOnly = ["-filter_complex", videoGraph, "-map", "[vout]", "-map_metadata", "-1"];
+
                 var t0 = Stopwatch.StartNew();
                 string[] rate = ["-b:v", $"{videoKbps}k", "-maxrate", $"{Math.Round(videoKbps * 1.5)}k", "-bufsize", $"{videoKbps * 2}k"];
-                var label = attempt > 0 ? $" (retry {attempt})" : "";
+                var label = attempt > 0 ? $" (retry {attempt}{(smaller ? $", {o.ScaleShortSide}p" : "")})" : "";
 
                 if (encoder == "nvenc")
                 {
@@ -458,10 +491,33 @@ static class Ff
                     ["seconds"] = Math.Round(t0.Elapsed.TotalSeconds, 1),
                 });
 
+                AppLog.Info($"Attempt {attempt + 1}: {videoKbps} kbps asked, {size / Planner.MB:0.00} MB made, limit {o.TargetBytes / Planner.MB:0.00} MB");
                 if (size <= o.TargetBytes) return (output, size);
-                videoKbps = Math.Max(50, (int)Math.Floor(videoKbps * ((double)o.TargetBytes / size) * 0.92));
+                if (attempt == Attempts - 1) break;
+                // Compared on the video alone: the audio comes out at its own rate whatever happens to the picture
+                var videoMade = Math.Max(1, size - audioBytes);
+                var videoBudget = Math.Max(1, o.TargetBytes - audioBytes);
+                var side = o.ScaleShortSide ?? fullSide;
+                // The last bitrate cut moved the size less than half as much as it should have
+                var stuck = lastKbps > 0 && lastSize - size < (lastSize - audioBytes) * (1 - (double)videoKbps / lastKbps) * 0.5;
+                if ((size > o.TargetBytes * 1.4 || stuck) && side > 144)
+                {
+                    // The encoder has hit its lowest quality for this many pixels and ignores a lower bitrate
+                    // (NVENC does this at very low bits per pixel). Fewer pixels is the only way down; at its floor
+                    // the size goes with the pixel count, so the side goes with the square root.
+                    var shrink = Math.Sqrt(videoBudget / videoMade) * 0.9;
+                    o.ScaleShortSide = Math.Max(144, (int)(side * shrink) / 2 * 2);
+                    smaller = true;
+                    AppLog.Warn($"{(stuck ? "Lower bitrate didn't help" : "Way over the limit")} at {side}p; trying {o.ScaleShortSide}p at {videoKbps} kbps");
+                    lastKbps = 0;
+                }
+                else
+                {
+                    (lastKbps, lastSize) = (videoKbps, size);
+                    videoKbps = Math.Max(50, (int)Math.Floor(videoKbps * (videoBudget / videoMade) * 0.92));
+                }
             }
-            throw new Exception("Couldn't get the video under the size limit. Try trimming it shorter.");
+            throw new Exception("Couldn't get the video under the size limit. Try a smaller scale, or trimming it shorter.");
         }
         catch
         {
