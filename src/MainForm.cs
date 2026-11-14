@@ -237,7 +237,8 @@ sealed class MainForm : DarkForm
         (TextBox Box, RoundBox Field) CustomField(Func<string, bool> valid)
         {
             var box = new TextBox { BackColor = Theme.Bg2, ForeColor = Theme.Text, BorderStyle = BorderStyle.None, PlaceholderText = "Custom", TextAlign = HorizontalAlignment.Center };
-            var field = new RoundBox { Margin = new Padding(0, 0, 6, 6), Cursor = Cursors.IBeam };
+            // Just wide enough for "Custom": about chip-sized, so it doesn't stand out from the row
+            var field = new RoundBox { LogicalWidth = 72, Margin = new Padding(0, 0, 6, 6), Cursor = Cursors.IBeam };
             box.GotFocus += (_, _) => field.Invalidate();
             box.LostFocus += (_, _) => field.Invalidate();
             box.Leave += (_, _) => { if (box.Text != "" && !valid(box.Text)) box.Text = ""; };
