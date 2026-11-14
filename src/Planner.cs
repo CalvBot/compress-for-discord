@@ -20,7 +20,8 @@ static class Planner
     public const double MB = 1024 * 1024;
     /// <summary>Discord's upload limits: free, Nitro Basic, Nitro (1 GB)</summary>
     public static readonly double[] LimitPresets = [10, 50, 1024];
-    public static readonly int[] Resolutions = [2160, 1440, 1080, 900, 720, 540];
+    /// <summary>Output size as a percentage of the source (a percentage still makes sense once the picture can be cropped)</summary>
+    public static readonly int[] Scales = [100, 75, 50, 33, 25];
     public static readonly int[] FrameRates = [60, 48, 30, 24, 15];
     const int MinVideoKbps = 80;
 

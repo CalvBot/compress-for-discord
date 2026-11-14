@@ -24,18 +24,6 @@ sealed record ProbeResult(double Duration, int Width, int Height, double Fps, lo
 /// <param name="Keys">volume points in source time, in order; the volume moves in straight lines between them</param>
 sealed record TrackMix(int Index, double Volume, List<(double T, double V)>? Keys = null);
 
-/// <summary>An animated image (no sound): webp, gif or apng</summary>
-sealed class AnimRequest
-{
-    public required string Input, Format;
-    public double Start, Duration;
-    public long TargetBytes;
-    /// <summary>Largest short side to use; it's shrunk further until the file fits</summary>
-    public int MaxShortSide;
-    public int Fps;
-    public bool Portrait;
-}
-
 sealed class EncodeRequest
 {
     public required string Input;
@@ -414,64 +402,6 @@ static class Ff
         finally
         {
             foreach (var f2 in Directory.EnumerateFiles(Paths.Work, $"{id}-pass*")) try { File.Delete(f2); } catch { }
-        }
-    }
-
-    /// <summary>
-    /// Makes an animated WebP, GIF or APNG that fits the target size. These formats have no bitrate setting,
-    /// so a small test encode measures how heavy the clip is, then the picture is sized to fit and shrunk
-    /// again if it still comes out too big.
-    /// </summary>
-    public static async Task<(string Path, long Size)> EncodeAnimated(AnimRequest o, IProgress<(string Stage, double Progress)> progress, CancellationToken ct)
-    {
-        Directory.CreateDirectory(Paths.Work);
-        var output = Path.Combine(Paths.Work, $"{Guid.NewGuid():N}-out.{(o.Format == "apng" ? "png" : o.Format)}");
-        const int MinSide = 96;
-
-        async Task<long> Try(int side, int quality, string stage, double from, double span)
-        {
-            var pre = $"fps={o.Fps},scale={(o.Portrait ? $"{side}:-2" : $"-2:{side}")}:flags=lanczos";
-            List<string> args = ["-ss", F3(o.Start), "-t", F3(o.Duration), "-i", o.Input, "-an", "-map_metadata", "-1"];
-            args.AddRange(o.Format switch
-            {
-                // One palette for the whole clip, and only redraw the part of each frame that changed
-                "gif" => ["-filter_complex", $"[0:v:0]{pre},split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle", "-loop", "0"],
-                "apng" => ["-vf", pre, "-plays", "0", "-f", "apng"],
-                _ => ["-vf", pre, "-c:v", "libwebp_anim", "-quality", quality.ToString(), "-compression_level", "4", "-loop", "0"],
-            });
-            args.Add(output);
-            await RunEncode(args, o.Duration, from, span, stage, progress, ct);
-            return new FileInfo(output).Length;
-        }
-
-        try
-        {
-            // File size grows slower than the pixel count (measured: 4x the pixels is about 2.7x the bytes)
-            double Fit(long size, int side, double sizeFactor = 1) => side * Math.Pow(o.TargetBytes * 0.9 / (size * sizeFactor), 1 / 1.5);
-
-            var quality = 60;
-            var testSide = Math.Min(240, o.MaxShortSide);
-            var size = await Try(testSide, quality, "Measuring", 0, 0.15);
-            if (testSide == o.MaxShortSide && size <= o.TargetBytes) return (output, size);
-
-            var side = Fit(size, testSide);
-            // WebP can trade sharpness for size; do that before the picture gets tiny
-            if (o.Format == "webp" && side < Math.Min(o.MaxShortSide, 480)) { quality = 35; side = Fit(size, testSide, 0.7); }
-
-            for (var attempt = 0; attempt < 4; attempt++)
-            {
-                var s = Math.Clamp((int)side & ~1, MinSide, o.MaxShortSide);
-                size = await Try(s, quality, attempt > 0 ? $"Compressing (retry {attempt})" : "Compressing", 0.15, 0.85);
-                if (size <= o.TargetBytes) return (output, size);
-                if (s <= MinSide) break;
-                side = Math.Min(Fit(size, s), s * 0.9);
-            }
-            throw new Exception("Couldn't get it under the size limit. Trim it shorter or lower the frame rate.");
-        }
-        catch
-        {
-            try { File.Delete(output); } catch { }
-            throw;
         }
     }
 

@@ -499,36 +499,6 @@ sealed class RoundBox : Panel
     }
 }
 
-/// <summary>A chip that shows the current choice and opens a menu to change it</summary>
-sealed class Dropdown
-{
-    public readonly Pill Button = new("");
-    readonly DarkMenu menu = new();
-    readonly List<(string Label, object Value)> items = [];
-    public object? Value { get; private set; }
-    /// <summary>The user picked something from the menu</summary>
-    public event Action<object>? Picked;
-
-    public Dropdown() => Button.Click += (_, _) => { if (items.Count > 0) menu.ShowUnder(Button, Button.Width); };
-
-    public void SetItems(IEnumerable<(string Label, object Value)> list, object? selected)
-    {
-        items.Clear();
-        items.AddRange(list);
-        menu.Items.Clear();
-        foreach (var (label, value) in items)
-            menu.Add(label.Replace("&", "&&"), "", () => { Select(value); Picked?.Invoke(value); });
-        Select(selected);
-    }
-
-    public void Select(object? value)
-    {
-        Value = value;
-        var i = items.FindIndex(x => Equals(x.Value, value));
-        Button.Text = (i >= 0 ? items[i].Label : "") + "  ▾";
-    }
-}
-
 /// <summary>
 /// One audio track drawn as a waveform with its volume line on top. Dragging up or down changes the volume;
 /// double-clicking adds a point so the volume can change over time; right-clicking a point removes it.

@@ -6,7 +6,7 @@ sealed class HelpForm : DarkForm
     static readonly (string Keys, string What)[] Hotkeys =
     [
         ("Space", "Play / pause"),
-        ("← / →", "Step a frame (Shift: 1 second)"),
+        ("← / →", "Step a frame (Shift: 5 seconds)"),
         ("Q  or  I", "Set start"),
         ("E  or  O", "Set end"),
         ("Home / End", "Jump to start / end"),
