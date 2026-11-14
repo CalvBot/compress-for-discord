@@ -883,13 +883,13 @@ sealed class VolumeLane : Control
 
 /// <summary>
 /// The video preview. With a box set, it's drawn over the frame (everything outside dimmed) and can be moved by
-/// dragging inside it and resized by its corners. The box may hang off the picture: that part comes out black.
+/// dragging inside it and resized by its corners or edges. The box may hang off the picture: that part comes out black.
 /// Moving: Ctrl snaps to the picture's edges, Shift keeps to one direction. Resizing: Shift works from the
 /// centre instead of the opposite corner, Alt lets the shape change, Ctrl snaps the dragged edges to the picture's.
 /// </summary>
 sealed class CropView : Control
 {
-    enum Grab { None, Move, TopLeft, TopRight, BottomLeft, BottomRight }
+    enum Grab { None, Move, TopLeft, TopRight, BottomLeft, BottomRight, Left, Right, Top, Bottom }
 
     Image? image;
     RectangleF? box;
@@ -950,6 +950,13 @@ sealed class CropView : Control
         if (top && right) return Grab.TopRight;
         if (bottom && left) return Grab.BottomLeft;
         if (bottom && right) return Grab.BottomRight;
+        // Edges: a narrower strip than the corners get, so the inside is still easy to grab for moving
+        var near = Px(6);
+        bool alongX = at.X > r.Left && at.X < r.Right, alongY = at.Y > r.Top && at.Y < r.Bottom;
+        if (alongY && Math.Abs(at.X - r.Left) <= near) return Grab.Left;
+        if (alongY && Math.Abs(at.X - r.Right) <= near) return Grab.Right;
+        if (alongX && Math.Abs(at.Y - r.Top) <= near) return Grab.Top;
+        if (alongX && Math.Abs(at.Y - r.Bottom) <= near) return Grab.Bottom;
         return r.Contains(at) ? Grab.Move : Grab.None;
     }
 
@@ -968,7 +975,7 @@ sealed class CropView : Control
         base.OnMouseMove(e);
         if (grab == Grab.None)
         {
-            Cursor = HitTest(e.Location) switch { Grab.TopLeft or Grab.BottomRight => Cursors.SizeNWSE, Grab.TopRight or Grab.BottomLeft => Cursors.SizeNESW, Grab.Move => Cursors.SizeAll, _ => Cursors.Default };
+            Cursor = HitTest(e.Location) switch { Grab.TopLeft or Grab.BottomRight => Cursors.SizeNWSE, Grab.TopRight or Grab.BottomLeft => Cursors.SizeNESW, Grab.Left or Grab.Right => Cursors.SizeWE, Grab.Top or Grab.Bottom => Cursors.SizeNS, Grab.Move => Cursors.SizeAll, _ => Cursors.Default };
             return;
         }
         var at = ToFrame(e.Location);
@@ -1011,6 +1018,30 @@ sealed class CropView : Control
             else if (!snapX || snapY) w = (float)Math.Max(w, h * BoxAspect);
             w = Math.Min(w, maxW);
             h = (float)(w / BoxAspect);
+        }
+        if (grab is Grab.Left or Grab.Right or Grab.Top or Grab.Bottom)
+        {
+            // An edge: that side follows the mouse and the opposite side stays put (or, with Shift, the centre
+            // does). Keeping the shape, the other two sides move in or out equally to match.
+            float midX = grabBox.X + grabBox.Width / 2, midY = grabBox.Y + grabBox.Height / 2;
+            float ew = grabBox.Width, eh = grabBox.Height;
+            if (grab is Grab.Left or Grab.Right)
+            {
+                var isLeft = grab == Grab.Left;
+                var fixedX = shift ? midX : isLeft ? grabBox.Right : grabBox.Left;
+                ew = Math.Clamp((isLeft ? fixedX - at.X : at.X - fixedX) * (shift ? 2 : 1), 0.05f, maxW);
+                if (locked) eh = (float)(ew / BoxAspect);
+                BoxChanged?.Invoke(new RectangleF(shift ? midX - ew / 2 : isLeft ? fixedX - ew : fixedX, midY - eh / 2, ew, eh));
+            }
+            else
+            {
+                var isTop = grab == Grab.Top;
+                var fixedY = shift ? midY : isTop ? grabBox.Bottom : grabBox.Top;
+                eh = Math.Clamp((isTop ? fixedY - at.Y : at.Y - fixedY) * (shift ? 2 : 1), 0.05f, maxH);
+                if (locked) { ew = (float)Math.Min(eh * BoxAspect, maxW); eh = (float)(ew / BoxAspect); }
+                BoxChanged?.Invoke(new RectangleF(midX - ew / 2, shift ? midY - eh / 2 : isTop ? fixedY - eh : fixedY, ew, eh));
+            }
+            return;
         }
         bool fromLeft = grab is Grab.TopLeft or Grab.BottomLeft, fromTop = grab is Grab.TopLeft or Grab.TopRight;
         float w, h;
@@ -1076,6 +1107,10 @@ sealed class CropView : Control
         var hs = Px(9);
         foreach (var c in new[] { new Point(r.Left, r.Top), new Point(r.Right, r.Top), new Point(r.Left, r.Bottom), new Point(r.Right, r.Bottom) })
             g.FillRectangle(Brushes.White, c.X - hs / 2, c.Y - hs / 2, hs, hs);
+        // Smaller handles halfway along each edge
+        int es = Px(6), mx = r.Left + r.Width / 2, my = r.Top + r.Height / 2;
+        foreach (var c in new[] { new Point(mx, r.Top), new Point(mx, r.Bottom), new Point(r.Left, my), new Point(r.Right, my) })
+            g.FillRectangle(Brushes.White, c.X - es / 2, c.Y - es / 2, es, es);
     }
 }
 
