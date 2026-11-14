@@ -160,11 +160,11 @@ sealed class MainForm : DarkForm
         cropMenu.Opening += (_, _) => { foreach (var (item, mode) in shapes) item.ShortcutKeyDisplayString = mode == cropMode ? "✓" : null; };
         preview.MenuRequested += at => { if (probe != null && encodeCts == null) cropMenu.Show(preview, at); };
 
-        // Its strip is as tall as a track (the 14 is the row of tabs above it); unlike the tracks it never changes height
+        // Its strip is as tall as a track; unlike the tracks it never changes height
         timeline = new Timeline { Width = ContentWidth, RowHeight = trackH, Enabled = false, Margin = Padding.Empty };
         timeline.RangeChanged += () => { UpdateTimeLabel(); UpdateSummary(); };
-        // Key points of the crop, shown only while cropping
-        // Position and scale: one track for both, or (right-click) one each
+        // Key points of the picture's position and scale, shown while Advanced is open: one track for both, or
+        // (right-click) one each
         var warm = Theme.Blend(Theme.Bg3, Theme.Warn, 0.13);
         KeyLane Lane(string label) => new() { Label = label, Back = warm, Size = new Size(ContentWidth, 56), Margin = new Padding(0, 4, 0, 0), Visible = false };
         keyLane = Lane("Position & scale");
@@ -188,7 +188,7 @@ sealed class MainForm : DarkForm
         timeline.PlayRequested += t => { if (probe != null && encodeCts == null && Environment.TickCount64 - stoppedByClick > 800) { StopPlayback(); _ = PlayFrom(t, probe.Duration); } };
 
         var timelineMenu = new DarkMenu();
-        timelineMenu.Add("Clear in and out", "", () => { timeline.Start = 0; timeline.End = timeline.Duration; timeline.Invalidate(); UpdateTimeLabel(); UpdateSummary(); });
+        timelineMenu.Add("Clear in and out", "", () => timeline.SetRange(0, timeline.Duration));
         timeline.ContextMenuStrip = timelineMenu;
 
         // Play row: Play, Preview, the current time (click to type one), the trim range, and Advanced on the right
@@ -251,7 +251,7 @@ sealed class MainForm : DarkForm
         // A row's custom box emptied with none of its chips picked: back to the first chip, so the box never
         // keeps acting on a value that's no longer shown
         bool Emptied(TextBox box, FlowLayoutPanel? row) =>
-            box.Text.Trim() == "" && row != null && !row.Controls.OfType<Pill>().Any(c => c.On);
+            box.Text.Trim() == "" && row != null && !AnyChipOn(row);
 
         (customMb, var customBox) = CustomField(t => ParseMb(t) > 0);
         foreach (var mb in Planner.LimitPresets) sizeChips.Controls.Add(Chip(Planner.FormatBytes(mb * Planner.MB), mb, sizeChips, v => { customMb.Text = ""; SetTarget((double)v!, remember: true); }));
@@ -281,7 +281,7 @@ sealed class MainForm : DarkForm
         void ShowUsed(TextBox box, FlowLayoutPanel row, int? used)
         {
             if (box.Text == "") return;
-            box.Text = row.Controls.OfType<Pill>().Any(c => c.On) ? "" : used?.ToString() ?? "";
+            box.Text = AnyChipOn(row) ? "" : used?.ToString() ?? "";
         }
 
         // Frame rate: the usual ones as chips, anything else typed in
@@ -459,7 +459,19 @@ sealed class MainForm : DarkForm
         foreach (var a in probe.AudioTracks)
             lines.Add($"Audio {a.Index + 1}:  {a.Label} · {a.Codec.ToUpperInvariant()}, {(a.Layout != "" ? a.Layout : $"{a.Channels} ch")}{(a.Language == "" ? "" : $", {a.Language}")}");
         tips.SetToolTip(subtitle, string.Join("\n", lines));
+        // Chips, tracks and the saved project all go in, then the window is laid out and drawn once
+        Batch(() => SetUp(probe, fps));
+        baseline = StateKey();
+        RequestFrame(timeline.Current);
+        _ = ResolveAutoEncoder();
+        _ = LoadThumbnails();
+#if DEBUG
+        ApplyTestState();
+#endif
+    }
 
+    void SetUp(ProbeResult probe, int fps)
+    {
         preview.FrameAspect = probe.Width / (double)probe.Height;
         timeline.Reset(probe.Duration);
         zoomBar.Duration = probe.Duration;
@@ -509,13 +521,6 @@ sealed class MainForm : DarkForm
         UpdateSummary();
         ShowStatus("", Theme.Muted);
         if (restore != null) Restore(restore);
-        baseline = StateKey();
-        RequestFrame(timeline.Current);
-        _ = ResolveAutoEncoder();
-        _ = LoadThumbnails();
-#if DEBUG
-        ApplyTestState();
-#endif
     }
 
     // ---------- recent projects ----------
@@ -588,10 +593,10 @@ sealed class MainForm : DarkForm
             }
             scalePct = p.ScalePct;
             SelectChip(resChips, scalePct);
-            if (scalePct is { } pctNow && !resChips.Controls.OfType<Pill>().Any(c => c.On)) resBox.Text = pctNow.ToString();
+            if (scalePct is { } pctNow && !AnyChipOn(resChips)) resBox.Text = pctNow.ToString();
             frameRate = p.FrameRate;
             SelectChip(fpsChips, frameRate);
-            if (frameRate is { } rate && !fpsChips.Controls.OfType<Pill>().Any(c => c.On)) fpsBox.Text = rate.ToString();
+            if (frameRate is { } rate && !AnyChipOn(fpsChips)) fpsBox.Text = rate.ToString();
 
             // The picture: its shape, then the position and scale key points
             if (posKeys.Count > 0 && scaleKeys.Count > 0)
@@ -927,12 +932,7 @@ sealed class MainForm : DarkForm
         if (start == viewStart && start + span == viewEnd) return;
         (viewStart, viewEnd) = (start, start + span);
         (timeline.ViewStart, timeline.ViewEnd) = (zoomBar.ViewStart, zoomBar.ViewEnd) = (viewStart, viewEnd);
-        foreach (var lane in KeyLanes)
-        {
-            (lane.ViewStart, lane.ViewEnd) = (viewStart, viewEnd);
-            lane.Invalidate();
-        }
-        foreach (var lane in AudioLanes)
+        foreach (var lane in AllTracks)
         {
             (lane.ViewStart, lane.ViewEnd) = (viewStart, viewEnd);
             lane.Invalidate();
@@ -944,6 +944,8 @@ sealed class MainForm : DarkForm
 
     /// <summary>Every thumbnail made so far, by the moment it shows, so zooming back out (or in again) reuses them</summary>
     readonly SortedList<double, Image> thumbCache = [];
+    /// <summary>Times in the cache whose picture is the keyframe before them, not the exact frame</summary>
+    readonly HashSet<double> roughThumbs = [];
     const int ThumbCacheMax = 400;
 
     /// <summary>The cached thumbnail closest in time to t, and its time</summary>
@@ -989,21 +991,38 @@ sealed class MainForm : DarkForm
             var (img, at) = NearestThumb(mid);
             strip[i] = img;
             // Only a thumbnail from inside this cell is the right picture; anything else is a stand-in
-            if (img == null || Math.Abs(at - mid) > cell / 2) missing.Add(i);
+            // (and one from a keyframe is only near its time: not good enough once zoomed in)
+            if (img == null || Math.Abs(at - mid) > cell / 2 || (cell < 20 && roughThumbs.Contains(at))) missing.Add(i);
         }
         (timeline.Thumbs, timeline.ThumbStart, timeline.ThumbSpan) = (strip, start, span);
         timeline.StripChanged();
         if (missing.Count == 0) return;
 
         var times = missing.Select(i => start + (i + 0.5) * cell).ToArray();
-        await Ff.Thumbnails(file, times, timeline.Height, (j, img) =>
+        // Each picture standing for 20 s or more: the keyframe just before its time is close enough, and quicker
+        var rough = cell >= 20;
+        await Ff.Thumbnails(file, times, timeline.Height, keyOnly: rough, (j, img) =>
         {
             void Keep()
             {
                 if (IsDisposed) { img.Dispose(); return; }
                 // Kept even if the view has moved on: it's likely wanted again
-                if (thumbCache.ContainsKey(times[j])) { img.Dispose(); return; }
-                thumbCache.Add(times[j], img);
+                var t = times[j];
+                if (thumbCache.TryGetValue(t, out var had))
+                {
+                    if (rough || !roughThumbs.Contains(t)) { img.Dispose(); return; }
+                    // The exact picture for a time that only had its keyframe's: it takes over, wherever that shows
+                    var shown = timeline.Thumbs;
+                    for (var i = 0; i < shown.Length; i++) if (shown[i] == had) shown[i] = img;
+                    had.Dispose();
+                    thumbCache[t] = img;
+                    roughThumbs.Remove(t);
+                }
+                else
+                {
+                    thumbCache.Add(t, img);
+                    if (rough) roughThumbs.Add(t);
+                }
                 if (timeline.Thumbs == strip) { strip[missing[j]] = img; timeline.StripChanged(); }
                 TrimThumbCache();
             }
@@ -1021,6 +1040,7 @@ sealed class MainForm : DarkForm
         {
             if (showing.Contains(img)) continue;
             thumbCache.Remove(t);
+            roughThumbs.Remove(t);
             img.Dispose();
         }
     }
@@ -1052,15 +1072,14 @@ sealed class MainForm : DarkForm
             while (!IsDisposed)
             {
                 var wanted = pendingFrame;
-                var cts = frameCts = new CancellationTokenSource();
+                using var cts = frameCts = new CancellationTokenSource();
                 var img = await GetFrame(wanted, exact: !dragging, cts.Token);
+                if (frameCts == cts) frameCts = null;
                 if (IsDisposed) { img?.Dispose(); return; }
                 if (cts.IsCancellationRequested || img == null) img?.Dispose();
                 else
                 {
-                    var old = preview.Image;
-                    preview.Image = img;
-                    old?.Dispose();
+                    ShowImage(img);
                     // Show it now: while the mouse is dragging, Windows would put the repaint off
                     preview.Update();
                 }
@@ -1071,6 +1090,16 @@ sealed class MainForm : DarkForm
             }
         }
         finally { frameBusy = false; }
+    }
+
+    static bool AnyChipOn(Control row) => row.Controls.OfType<Pill>().Any(c => c.On);
+
+    /// <summary>Puts a new frame on the preview and lets go of the one it replaces</summary>
+    void ShowImage(Image img)
+    {
+        var old = preview.Image;
+        preview.Image = img;
+        old?.Dispose();
     }
 
     /// <summary>Windows' decoder with the video kept open (opened in the background once the video is read); null until then or if it can't</summary>
@@ -1141,9 +1170,7 @@ sealed class MainForm : DarkForm
                 if (cts.IsCancellationRequested || IsDisposed) { bmp.Dispose(); return; }
                 // Playing to the out point, and it was moved in while playing: stop there now
                 if (to == null && t >= timeline.End) { bmp.Dispose(); StopPlayback(); return; }
-                var old = preview.Image;
-                preview.Image = bmp;
-                old?.Dispose();
+                ShowImage(bmp);
                 timeline.ShowTime(t);
                 UpdateTimeLabel();
             }, cts.Token);
@@ -1194,11 +1221,20 @@ sealed class MainForm : DarkForm
     void FitSubtitle()
     {
         var name = Path.GetFileName(file);
+        var room = subtitle.Width - D(12);
+        bool Fits(string s) => TextRenderer.MeasureText(s, subtitle.Font).Width <= room;
+        string Cut(int n) => name[..n].TrimEnd() + "…" + details;
         var text = name + details;
-        while (name.Length > 8 && TextRenderer.MeasureText(text, subtitle.Font).Width > subtitle.Width - D(12))
+        if (name.Length > 8 && !Fits(text))
         {
-            name = name[..^1];
-            text = name.TrimEnd() + "…" + details;
+            // The longest cut that fits, found by halving (it runs on every step of a window resize)
+            int lo = 8, hi = name.Length - 1;
+            while (lo < hi)
+            {
+                var mid = (lo + hi + 1) / 2;
+                if (Fits(Cut(mid))) lo = mid; else hi = mid - 1;
+            }
+            text = Cut(lo);
         }
         if (subtitle.Text != text) subtitle.Text = text;
     }
@@ -1234,10 +1270,10 @@ sealed class MainForm : DarkForm
             Totals[key] = (n + 1, ms + watch.Elapsed.TotalMilliseconds);
         }
     }
-#endif
 
     [DllImport("user32.dll")]
     static extern bool PostMessage(IntPtr hwnd, int msg, nint wparam, nint lparam);
+#endif
 
     [DllImport("user32.dll")]
     static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wparam, IntPtr lparam);
@@ -1299,10 +1335,6 @@ sealed class MainForm : DarkForm
         ShowCrop();
     }
 
-    /// <summary>
-    /// Closed, the box is exactly its one lane. Open, it's as tall as the grip was dragged (short to begin with)
-    /// and scrolls for the rest.
-    /// </summary>
     /// <summary>How short and how tall the open track box can be: from a sliver down to every track showing</summary>
     (int Min, int Max) TrackBoxRange()
     {
@@ -1310,6 +1342,10 @@ sealed class MainForm : DarkForm
         return (Math.Min(all, D(60)), all);
     }
 
+    /// <summary>
+    /// Closed, the box is exactly its one lane. Open, it's as tall as the grip was dragged (short to begin with)
+    /// and scrolls for the rest.
+    /// </summary>
     void SizeTracks()
     {
         var (lo, all) = TrackBoxRange();
@@ -1736,22 +1772,31 @@ sealed class MainForm : DarkForm
         preview.Box = tracksOpen || Reframed ? CropRectAt(timeline.Current) : null;
         // How far zoomed in: 0 at the widest the shape allows
         double Zoom(double w) => 1 - Math.Min(w, MaxCropW) / MaxCropW;
-        Fill(keyLane, pos, pos.Keys.Select(k => Zoom(scale.At(k.T))), t => Zoom(scale.At(t)));
-        Fill(scaleLane, scale, scale.Keys.Select(k => Zoom(k.Value)), t => Zoom(scale.At(t)));
+        // What the lanes show; only when it changes are they handed it again (this runs on every frame)
+        var h = new HashCode();
+        foreach (var k in pos.Keys) h.Add(k);
+        foreach (var k in scale.Keys) h.Add(k);
+        h.Add(MaxCropW);
+        var data = h.ToHashCode();
+        Fill(keyLane, pos, data, () => pos.Keys.Select(k => Zoom(scale.At(k.T))), t => Zoom(scale.At(t)));
+        Fill(scaleLane, scale, data, () => scale.Keys.Select(k => Zoom(k.Value)), t => Zoom(scale.At(t)));
         // Across as the main line (right = up), down as the fainter one
-        Fill(posLane, pos, pos.Keys.Select(k => k.Value.X), t => pos.At(t).X, pos.Keys.Select(k => 1 - k.Value.Y), t => 1 - pos.At(t).Y);
+        Fill(posLane, pos, data, () => pos.Keys.Select(k => k.Value.X), t => pos.At(t).X, t => 1 - pos.At(t).Y);
     }
 
-    void Fill(KeyLane lane, IKeyTrack track, IEnumerable<double> levels, Func<double, double> levelAt, IEnumerable<double>? levels2 = null, Func<double, double>? level2At = null)
+    void Fill(KeyLane lane, IKeyTrack track, int data, Func<IEnumerable<double>> levels, Func<double, double> levelAt, Func<double, double>? level2At = null)
     {
         (lane.Duration, lane.Current) = (timeline.Duration, timeline.Current);
-        // Points added or taken away shift the numbers of the rest, so a selection no longer means the same points
-        if (lane.Keys.Count != track.Count) lane.Selection.Clear();
-        lane.Keys = Enumerable.Range(0, track.Count).Select(track.TimeAt).ToList();
-        lane.Eases = Enumerable.Range(0, track.Count).Select(track.EaseAt).ToList();
-        (lane.LevelAt, lane.Level2At) = (levelAt, level2At);
-        lane.Levels = levels.ToList();
-        lane.Levels2 = levels2?.ToList() ?? [];
+        if (lane.DataVersion != data || lane.Keys.Count != track.Count)
+        {
+            // Points added or taken away shift the numbers of the rest, so a selection no longer means the same points
+            if (lane.Keys.Count != track.Count) lane.Selection.Clear();
+            lane.Keys = Enumerable.Range(0, track.Count).Select(track.TimeAt).ToList();
+            lane.Eases = Enumerable.Range(0, track.Count).Select(track.EaseAt).ToList();
+            (lane.LevelAt, lane.Level2At) = (levelAt, level2At);
+            lane.Levels = levels().ToList();
+            lane.DataVersion = data;
+        }
         if (lane.Visible) lane.Invalidate();
     }
 

@@ -6,7 +6,7 @@ using System.Text.Json.Nodes;
 
 namespace CompressForDiscord;
 
-sealed record AudioTrack(int Index, string Codec, int Channels, string Layout, string Title, string Language, bool IsDefault)
+sealed record AudioTrack(int Index, string Codec, int Channels, string Layout, string Title, string Language)
 {
     /// <summary>The track's own name ("Game", "Mic"); "Track 3" when it has none, or only its number</summary>
     public string Label => Title != "" && Title != (Index + 1).ToString() ? Title : $"Track {Index + 1}";
@@ -46,7 +46,7 @@ sealed class EncodeRequest
 static class Ff
 {
     static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
-    static string F3(double d) => d.ToString("0.000", Inv);
+    internal static string F3(double d) => d.ToString("0.000", Inv);
 
     public static string Ffmpeg = "", Ffprobe = "";
 
@@ -232,7 +232,7 @@ static class Ff
             var title = new[] { "title", "name", "handler_name" }.Select(k => Str(s["tags"]?[k]).Trim())
                 .FirstOrDefault(v => v != "" && !toolNames.Any(tool => v.Contains(tool, StringComparison.OrdinalIgnoreCase))) ?? "";
             var lang = Str(s["tags"]?["language"]);
-            return new AudioTrack(i, Str(s["codec_name"]), (int)Num(s["channels"]), Str(s["channel_layout"]), title.Trim(), lang == "und" ? "" : lang, Num(s["disposition"]?["default"]) == 1);
+            return new AudioTrack(i, Str(s["codec_name"]), (int)Num(s["channels"]), Str(s["channel_layout"]), title.Trim(), lang == "und" ? "" : lang);
         }).ToList();
 
         var duration = Num(root["format"]?["duration"]);
@@ -247,7 +247,10 @@ static class Ff
     // ---------- frames ----------
 
     /// <param name="keyOnly">the keyframe at or before the time is enough (quicker: nothing after it is decoded)</param>
-    public static async Task<Image?> Frame(string path, double time, int height, CancellationToken ct = default, bool keyOnly = false)
+    public static Task<Image?> Frame(string path, double time, int height, CancellationToken ct = default, bool keyOnly = false) =>
+        Frame(path, time, height, ct, keyOnly, retry: true);
+
+    static async Task<Image?> Frame(string path, double time, int height, CancellationToken ct, bool keyOnly, bool retry)
     {
         try
         {
@@ -256,8 +259,9 @@ static class Ff
                 "-hide_banner", "-loglevel", "error", .. seek, "-i", path, "-an", "-sn",
                 "-frames:v", "1", "-vf", $"scale=-2:{height}", "-q:v", "4", "-f", "image2pipe", "-c:v", "mjpeg", "-"
             ], ct, 20000);
-            // A seek at the very end of a short clip can land past the last frame; take an earlier one instead
-            if ((code != 0 || stdout.Length == 0) && time > 0) return await Frame(path, Math.Max(0, time - 1), height, ct, keyOnly);
+            // A seek at the very end of a short clip can land past the last frame; take an earlier one instead. Once
+            // only: a file ffmpeg can't read at all would otherwise try every second back to the start.
+            if ((code != 0 || stdout.Length == 0) && time > 0 && retry) return await Frame(path, Math.Max(0, time - 1), height, ct, keyOnly, retry: false);
             if (code != 0 || stdout.Length == 0) return null;
             using var ms = new MemoryStream(stdout);
             using var img = Image.FromStream(ms);
@@ -267,7 +271,8 @@ static class Ff
     }
 
     /// <summary>Frames at these times for the timeline, several at a time; each one is reported (by its index) as soon as it's ready.</summary>
-    public static async Task Thumbnails(string path, double[] times, int height, Action<int, Image> onFrame, CancellationToken ct)
+    /// <param name="keyOnly">the keyframe at or before each time will do (a third quicker on long recordings)</param>
+    public static async Task Thumbnails(string path, double[] times, int height, bool keyOnly, Action<int, Image> onFrame, CancellationToken ct)
     {
         var next = -1;
         var workers = Math.Clamp(Environment.ProcessorCount / 2, 4, 8);
@@ -276,7 +281,7 @@ static class Ff
             int i;
             while ((i = Interlocked.Increment(ref next)) < times.Length && !ct.IsCancellationRequested)
             {
-                var img = await Frame(path, times[i], height, ct);
+                var img = await Frame(path, times[i], height, ct, keyOnly);
                 if (img != null) onFrame(i, img);
             }
         })));
@@ -571,6 +576,8 @@ static class Log
         {
             Directory.CreateDirectory(Paths.Data);
             File.AppendAllText(Paths.Log, JsonSerializer.Serialize(entry) + "\n");
+            // Only the latest encodes count (Calibration), and the file is read each time a video opens: keep it short
+            if (new FileInfo(Paths.Log).Length > 512 * 1024) File.WriteAllLines(Paths.Log, File.ReadLines(Paths.Log).TakeLast(1000).ToList());
         }
         catch { }
     }

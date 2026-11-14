@@ -472,7 +472,7 @@ sealed class Timeline : Control
         Invalidate();
     }
 
-    void SetRange(double s, double e)
+    public void SetRange(double s, double e)
     {
         Start = s;
         End = e;
@@ -1015,11 +1015,14 @@ sealed class VolumeLane : KeyTrackLane
     int FaceKey()
     {
         var h = new HashCode();
-        foreach (var v in new[] { From, Span, Start, End, Volume, Grid, Duration }) h.Add(v);
+        h.Add(From); h.Add(Span); h.Add(Start); h.Add(End); h.Add(Volume); h.Add(Grid); h.Add(Duration);
         h.Add(Active); h.Add(Silent); h.Add(Enabled); h.Add(dragKey); h.Add(OnKey >= 0); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Sources);
         // A waveform that's still being measured redraws as each chunk comes in
-        foreach (var (w, _) in Sources) h.Add(w.Version);
-        foreach (var i in Selection.Sorted) h.Add(i);
+        for (var j = 0; j < Sources.Count; j++) h.Add(Sources[j].Wave.Version);
+        // In any order: a set's order can differ for the same points
+        var picked = 0;
+        foreach (var i in Selection.Set) picked ^= HashCode.Combine(i);
+        h.Add(picked);
         foreach (var k in Keys) { h.Add(k.T); h.Add(k.V); h.Add(k.E); }
         return h.ToHashCode();
     }
@@ -1078,12 +1081,8 @@ sealed class VolumeLane : KeyTrackLane
     /// <summary>Back to 100% throughout: no points, and the level line where it started</summary>
     public void ResetLevel()
     {
-        EndDrag();
-        Selection.Clear();
-        Keys.Clear();
         Volume = 1;
-        Invalidate();
-        Committed?.Invoke();
+        ClearKeys();
     }
 
     /// <summary>Adds a point on the line at a time (or finds the one already there); returns its index</summary>
@@ -1244,12 +1243,11 @@ sealed class VolumeLane : KeyTrackLane
         g.SetClip(shape);
 
         float mid = Height / 2f, half = Height / 2f - 2;
-        if (Sources.Count > 0)
+        var sources = Sources;
+        if (sources.Count > 0)
         {
-            using var inside = new Pen(Active ? Theme.Brand : Theme.Secondary);
-            using var outside = new Pen(Color.FromArgb(90, Active ? Theme.Brand : Theme.Secondary));
-            // Not measured yet: a faint stub on the middle line until it pops in
-            using var waiting = new Pen(Color.FromArgb(40, Theme.Text));
+            // A one-pixel column per pixel across, gathered and filled in three goes rather than drawn one by one
+            List<RectangleF> inside = [], outside = [], waiting = [];
             var step = Span / BodyW;
             for (var x = 0; x < BodyW; x++)
             {
@@ -1257,23 +1255,37 @@ sealed class VolumeLane : KeyTrackLane
                 // The loudest sample under this pixel: zoomed out, a short peak still shows
                 var peak = 0.0;
                 var measured = false;
-                foreach (var (wave, gain) in Sources)
+                for (var j = 0; j < sources.Count; j++)
                 {
+                    var (wave, gain) = sources[j];
                     var p = wave.Max(t, t + step, out var m);
                     measured |= m;
                     if (m && p > 0) peak = Math.Max(peak, p * (gain?.Invoke(t) ?? 1));
                 }
+                // Not measured yet: a faint stub on the middle line until it pops in
                 if (!measured)
                 {
-                    g.DrawLine(waiting, G + x + 0.5f, mid - Px(2), G + x + 0.5f, mid + Px(2));
+                    waiting.Add(new RectangleF(G + x, mid - Px(2), 1, 2 * Px(2)));
                     continue;
                 }
                 // A fixed scale (not scaled to the loudest), so it doesn't shift as the rest pops in and tracks compare
                 // fairly. Square root so quiet sound still shows; full scale at 100% reaches about 70%, leaving room
                 // to show a boost.
                 var h = (float)Math.Min(1, Math.Sqrt(peak * GainAt(t) / 2)) * half;
-                if (h >= 0.5f) g.DrawLine(t >= Start && t <= End ? inside : outside, G + x + 0.5f, mid - h, G + x + 0.5f, mid + h);
+                if (h >= 0.5f) (t >= Start && t <= End ? inside : outside).Add(new RectangleF(G + x, mid - h, 1, 2 * h));
             }
+            // Columns line up with pixels, so smoothing only blurs them
+            g.SmoothingMode = SmoothingMode.None;
+            void Fill(List<RectangleF> bars, Color c)
+            {
+                if (bars.Count == 0) return;
+                using var b = new SolidBrush(c);
+                g.FillRectangles(b, [.. bars]);
+            }
+            Fill(inside, Active ? Theme.Brand : Theme.Secondary);
+            Fill(outside, Color.FromArgb(90, Active ? Theme.Brand : Theme.Secondary));
+            Fill(waiting, Color.FromArgb(40, Theme.Text));
+            g.SmoothingMode = SmoothingMode.AntiAlias;
         }
 
         Tracks.DrawFrames(g, Grid, From, Span, G, BodyW, 0, Height, DeviceDpi, 28);
@@ -1641,8 +1653,8 @@ static class KeyButton
 }
 
 /// <summary>
-/// Track for the picture's position and scale. Each key point is a diamond, and the line through them shows the
-/// value (for scale, higher = closer in). Ctrl+click, or the button at the start, adds a point; dragging moves it in time,
+/// Track for the picture's position and scale. Each key point is a mark shaped by its ease (KeyIcon), and the line
+/// through them shows the value (for scale, higher = closer in). Ctrl+click, or the button at the start, adds a point; dragging moves it in time,
 /// clicking selects it and jumps to it, Del removes it. The button also takes away the point the playhead is
 /// on. What a point holds is set by the box on the preview.
 /// </summary>
@@ -1654,10 +1666,10 @@ sealed class KeyLane : KeyTrackLane
     protected override double KeyTime(int i) => Keys[i];
     /// <summary>Height of the line at each key point, 0 (bottom) to 1</summary>
     public IReadOnlyList<double> Levels = [];
-    /// <summary>A second, fainter line (position has two values: across and down); empty = none</summary>
-    public IReadOnlyList<double> Levels2 = [];
-    /// <summary>The lines at any time (they curve where points are eased)</summary>
+    /// <summary>The line at any time (it curves where points are eased), and a second, fainter one or null (position has two values: across and down)</summary>
     public Func<double, double>? LevelAt, Level2At;
+    /// <summary>Changes whenever the values behind the lines do (the window sets it), so the lane knows to redraw them</summary>
+    public int DataVersion;
     /// <summary>How the value moves next to each point; sets its shape</summary>
     public IReadOnlyList<Ease> Eases = [];
     Ease EaseOf(int i) => i < Eases.Count ? Eases[i] : Ease.Linear;
@@ -1747,9 +1759,49 @@ sealed class KeyLane : KeyTrackLane
         if (!Capture) { toggleOff = -1; dragKey = -1; }
     }
 
+    // Everything but the playhead is kept as a picture and redrawn only when it changes (as VolumeLane does):
+    // tracing the lines again for every frame while playing or scrubbing is wasted work
+    Bitmap? face;
+    int faceKey;
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) face?.Dispose();
+        base.Dispose(disposing);
+    }
+
+    int FaceKey(int onKey)
+    {
+        var h = new HashCode();
+        h.Add(From); h.Add(Span); h.Add(Grid); h.Add(Duration); h.Add(DataVersion); h.Add(onKey);
+        h.Add(Enabled); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Keys.Count);
+        // In any order: a set's order can differ for the same points
+        var picked = 0;
+        foreach (var i in Selection.Set) picked ^= HashCode.Combine(i);
+        h.Add(picked);
+        return h.ToHashCode();
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
-        var g = e.Graphics;
+        var onKey = OnKey;
+        var key = FaceKey(onKey);
+        if (face == null || face.Width != Width || face.Height != Height || key != faceKey)
+        {
+            face?.Dispose();
+            face = new Bitmap(Math.Max(1, Width), Math.Max(1, Height), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            using var fg = Graphics.FromImage(face);
+            Render(fg, onKey);
+            faceKey = key;
+        }
+        e.Graphics.DrawImageUnscaled(face, 0, 0);
+        var x = X(Current);
+        if (x >= G && x <= Width)
+            using (var head = new Pen(Color.FromArgb(160, Color.White))) e.Graphics.DrawLine(head, x, 1, x, Height - 2);
+    }
+
+    void Render(Graphics g, int onKey)
+    {
         g.Clear(Parent?.BackColor ?? Theme.Bg);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         using var track = Theme.Round(new RectangleF(G, 0, BodyW - 1, Height - 1), Px(6));
@@ -1764,18 +1816,17 @@ sealed class KeyLane : KeyTrackLane
             for (var x = 0; x <= BodyW; x++) pts[x] = new PointF(G + x, Y(at(From + x / (double)BodyW * Span)));
             return pts;
         }
-        if (Keys.Count > 0 && Levels2.Count == Keys.Count && Level2At != null)
+        if (Keys.Count > 0 && Level2At != null)
             using (var faint = new Pen(Color.FromArgb(110, Theme.Brand), Math.Max(1f, Px(1)))) g.DrawLines(faint, Trace(Level2At));
         if (Keys.Count > 0 && LevelAt != null)
             using (var line = new Pen(Color.FromArgb(200, Theme.Brand), Math.Max(1.5f, Px(2)))) g.DrawLines(line, Trace(LevelAt));
-        using (var head = new Pen(Color.FromArgb(160, Color.White))) g.DrawLine(head, X(Current), 0, X(Current), Height);
         float d = Px(6);
         for (var i = 0; i < Keys.Count; i++)
         {
             float x = X(Keys[i]), y = Y(Level(i));
             // White when the playhead is on it: that's the point the box on the preview edits. Ringed when selected.
             // Its shape says how the value moves next to it.
-            using var fill = new SolidBrush(Math.Abs(Keys[i] - Current) <= Near ? Color.White : Theme.Brand);
+            using var fill = new SolidBrush(i == onKey ? Color.White : Theme.Brand);
             using (var icon = KeyIcon.Shape(EaseOf(i), x, y, d)) g.FillPath(fill, icon);
             if (Selection.Contains(i))
             {
@@ -1786,7 +1837,7 @@ sealed class KeyLane : KeyTrackLane
         }
         g.ResetClip();
 
-        KeyButton.Draw(g, AddButton, Enabled, OnKey >= 0);
+        KeyButton.Draw(g, AddButton, Enabled, onKey >= 0);
         DrawBadge(g, Label, Theme.Text);
     }
 }

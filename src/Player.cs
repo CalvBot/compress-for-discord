@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Drawing.Imaging;
-using System.Globalization;
 using System.Media;
 using System.Runtime.InteropServices;
 
@@ -15,8 +14,6 @@ static class Player
     /// <summary>Longest stretch played in one go (keeps the in-memory audio small)</summary>
     const double MaxSpan = 180;
 
-    static string S(double d) => d.ToString("0.000", CultureInfo.InvariantCulture);
-
     /// <summary>Plays [from, to) at this many frames a second. onFrame gets each frame and its time; returns when done or cancelled.</summary>
     public static async Task Play(string path, double from, double to, List<TrackMix> tracks, TrackMix? master, Size box, double srcW, double srcH, double fps,
         Action<Bitmap, double> onFrame, CancellationToken ct)
@@ -30,22 +27,21 @@ static class Player
         int w = Math.Max(2, (int)(srcW * scale) & ~1), h = Math.Max(2, (int)(srcH * scale) & ~1);
         if (fps <= 0) fps = 30;
 
-        // Audio first: mixed exactly like the encode will mix it
-        MemoryStream? wav = null;
-        if (Ff.AudioGraph(tracks, from, master) is { } graph)
-        {
-            var (code, bytes, _) = await Ff.Run(Ff.Ffmpeg, ["-hide_banner", "-loglevel", "error", "-ss", S(from), "-t", S(span), "-i", path,
-                "-filter_complex", graph, "-map", "[aout]", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-f", "wav", "-"], ct);
-            if (code == 0 && bytes.Length > 44) wav = new MemoryStream(FixWavSizes(bytes));
-        }
-        ct.ThrowIfCancellationRequested();
+        // The sound, mixed exactly like the encode will mix it. It's made while the picture starts decoding, not
+        // before: playing starts once both are ready, rather than after one and then the other.
+        var mixing = Ff.AudioGraph(tracks, from, master) is { } graph
+            ? Ff.Run(Ff.Ffmpeg, ["-hide_banner", "-loglevel", "error", "-ss", Ff.F3(from), "-t", Ff.F3(span), "-i", path,
+                "-filter_complex", graph, "-map", "[aout]", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-f", "wav", "-"], ct)
+            : null;
 
         var psi = new ProcessStartInfo(Ff.Ffmpeg) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (var a in new[] { "-hide_banner", "-loglevel", "error", "-ss", S(from), "-t", S(span), "-i", path, "-an", "-sn",
-            "-vf", $"fps={S(fps)},scale={w}:{h}", "-pix_fmt", "bgra", "-f", "rawvideo", "-" }) psi.ArgumentList.Add(a);
-        using var p = Process.Start(psi)!;
+        foreach (var a in new[] { "-hide_banner", "-loglevel", "error", "-ss", Ff.F3(from), "-t", Ff.F3(span), "-i", path, "-an", "-sn",
+            "-vf", $"fps={Ff.F3(fps)},scale={w}:{h}", "-pix_fmt", "bgra", "-f", "rawvideo", "-" }) psi.ArgumentList.Add(a);
+        Process p;
+        try { p = Process.Start(psi)!; }
+        catch { _ = mixing?.ContinueWith(t => _ = t.Exception); throw; }
+        using var _p = p;
         _ = p.StandardError.ReadToEndAsync();
-        using var sound = wav != null ? new SoundPlayer(wav) : null;
         using var reg = ct.Register(() => { try { p.Kill(true); } catch { } });
 
         var stdout = p.StandardOutput.BaseStream;
@@ -53,8 +49,15 @@ static class Player
         var buf = new byte[frameBytes];
         var clock = new Stopwatch();
         var shown = 0.0;
+        SoundPlayer? sound = null;
         try
         {
+            if (mixing != null)
+            {
+                var (code, bytes, _) = await mixing;
+                if (code == 0 && bytes.Length > 44) sound = new SoundPlayer(new MemoryStream(FixWavSizes(bytes)));
+            }
+            ct.ThrowIfCancellationRequested();
             for (var i = 0; ; i++)
             {
                 if (!await ReadFull(stdout, buf, ct)) break;
@@ -81,6 +84,7 @@ static class Player
         finally
         {
             sound?.Stop();
+            sound?.Dispose();
             try { if (!p.HasExited) p.Kill(true); } catch { }
         }
     }

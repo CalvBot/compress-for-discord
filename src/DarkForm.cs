@@ -77,8 +77,8 @@ class DarkForm : Form
     public static Label Heading(string text) =>
         new() { Text = text, AutoSize = true, ForeColor = Theme.Header, Font = new Font("Segoe UI Semibold", 15f), Margin = new Padding(0, 0, 0, 2) };
 
-    public static Label Muted(string text, int maxWidth = 0) =>
-        new() { Text = text, UseMnemonic = false, AutoSize = true, ForeColor = Theme.Muted, MaximumSize = new Size(maxWidth, 0), Margin = new Padding(0, 0, 0, 8) };
+    public static Label Muted(string text) =>
+        new() { Text = text, UseMnemonic = false, AutoSize = true, ForeColor = Theme.Muted, Margin = new Padding(0, 0, 0, 8) };
 
     public static LinkLabel Link(string text, Action onClick)
     {
