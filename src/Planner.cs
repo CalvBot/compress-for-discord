@@ -22,7 +22,7 @@ static class Planner
     public static readonly double[] LimitPresets = [10, 50, 1024];
     /// <summary>Output size as a percentage of the source (a percentage still makes sense once the picture can be cropped)</summary>
     public static readonly int[] Scales = [100, 75, 50, 33, 25];
-    public static readonly int[] FrameRates = [60, 48, 30, 24, 15];
+    public static readonly int[] FrameRates = [60, 48, 30, 24];
     const int MinVideoKbps = 80;
 
     /// <param name="resolution">output short side, null = keep the source's</param>

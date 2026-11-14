@@ -500,8 +500,9 @@ sealed class RoundBox : Panel
 }
 
 /// <summary>
-/// One audio track drawn as a waveform with its volume line on top. Dragging up or down changes the volume;
-/// double-clicking adds a point so the volume can change over time; right-clicking a point removes it.
+/// One audio track drawn as a waveform with its volume line on top. Dragging up or down changes the volume.
+/// Alt+click, or the button at the start of the lane, adds a point so the volume can change over time;
+/// right-clicking a point removes it.
 /// </summary>
 sealed class VolumeLane : Control
 {
@@ -542,7 +543,7 @@ sealed class VolumeLane : Control
     public int PixelWidth { get => pixelWidth; set { pixelWidth = value; Fit(); } }
 
     int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
-    void Fit() => Size = new Size(pixelWidth, Px(34));
+    void Fit() => Size = new Size(pixelWidth, Px(56));
     protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
     protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
     protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
@@ -575,12 +576,31 @@ sealed class VolumeLane : Control
     }
 
     string BadgeText => Label + (Silent ? " · silent" : "");
-    Rectangle Badge => new(Px(4), Px(4), Px(22) + TextRenderer.MeasureText(BadgeText, Small, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
+    Rectangle AddButton => new(Px(4), Px(4), Px(18), Px(18));
+    Rectangle Badge => new(Px(26), Px(4), Px(22) + TextRenderer.MeasureText(BadgeText, Small, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
+
+    /// <summary>Adds a point on the line at a time (or finds the one already there); returns its index</summary>
+    int AddKey(double t)
+    {
+        var near = Keys.FindIndex(k => Math.Abs(k.T - t) < 0.05);
+        if (near >= 0) return near;
+        var after = Keys.FindIndex(k => k.T > t);
+        var at = after < 0 ? Keys.Count : after;
+        Keys.Insert(at, (t, GainAt(t)));
+        Invalidate();
+        return at;
+    }
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
         if (!Enabled) return;
+        if (e.Button == MouseButtons.Left && AddButton.Contains(e.Location))
+        {
+            AddKey(Current);
+            Committed?.Invoke();
+            return;
+        }
         if (e.Button == MouseButtons.Left && Badge.Contains(e.Location))
         {
             Active = !Active;
@@ -597,6 +617,8 @@ sealed class VolumeLane : Control
         }
         else if (e.Button == MouseButtons.Left)
         {
+            // Alt+click puts a new point under the mouse, already held so it can be dragged into place
+            if (k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) k = AddKey(T(e.X));
             dragKey = k;
             dragFlat = k < 0 && Keys.Count == 0;
             grabY = e.Y;
@@ -621,7 +643,7 @@ sealed class VolumeLane : Control
             Volume = Snap(grabVolume + (grabY - e.Y) / (double)Math.Max(1, Height - 2 * Pad) * 2);
             Invalidate();
         }
-        else Cursor = Badge.Contains(e.Location) ? Cursors.Hand : HitKey(e.Location) >= 0 ? Cursors.SizeAll : Keys.Count == 0 ? Cursors.SizeNS : Cursors.Default;
+        else Cursor = Badge.Contains(e.Location) || AddButton.Contains(e.Location) ? Cursors.Hand : HitKey(e.Location) >= 0 ? Cursors.SizeAll : Keys.Count == 0 ? Cursors.SizeNS : Cursors.Default;
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -631,17 +653,6 @@ sealed class VolumeLane : Control
         dragKey = -1;
         dragFlat = false;
         if (changed) Committed?.Invoke();
-    }
-
-    protected override void OnMouseDoubleClick(MouseEventArgs e)
-    {
-        base.OnMouseDoubleClick(e);
-        if (!Enabled || e.Button != MouseButtons.Left || HitKey(e.Location) >= 0 || Badge.Contains(e.Location)) return;
-        var t = T(e.X);
-        var i = Keys.FindIndex(k => k.T > t);
-        Keys.Insert(i < 0 ? Keys.Count : i, (t, GainAt(t)));
-        Invalidate();
-        Committed?.Invoke();
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -680,6 +691,7 @@ sealed class VolumeLane : Control
         using (var head = new Pen(Color.FromArgb(160, Color.White))) g.DrawLine(head, X(Current), 0, X(Current), Height);
         g.ResetClip();
 
+        KeyButton.Draw(g, AddButton, Enabled);
         // Badge: speaker (struck through when muted) and the track's name. Click it to mute or unmute.
         var badge = Badge;
         using (var back = Theme.Round(badge, Px(4)))
@@ -714,6 +726,9 @@ sealed class CropView : Control
     public RectangleF? Box { get => box; set { box = value; Invalidate(); } }
     /// <summary>Width / height the box must keep, in those same fractions; 0 = any shape</summary>
     public double BoxAspect;
+    bool showResult;
+    /// <summary>Show what the video will look like (just the inside of the box, filling the view) instead of the box over the whole frame</summary>
+    public bool ShowResult { get => showResult; set { showResult = value; Invalidate(); } }
     /// <summary>The box is being dragged to this</summary>
     public event Action<RectangleF>? BoxChanged;
     /// <summary>The drag ended</summary>
@@ -748,7 +763,7 @@ sealed class CropView : Control
 
     Grab HitTest(Point at)
     {
-        if (box is not { } b || !Enabled) return Grab.None;
+        if (box is not { } b || !Enabled || showResult) return Grab.None;
         var r = ToScreen(b);
         var reach = Px(10);
         bool left = Math.Abs(at.X - r.Left) <= reach, right = Math.Abs(at.X - r.Right) <= reach, top = Math.Abs(at.Y - r.Top) <= reach, bottom = Math.Abs(at.Y - r.Bottom) <= reach;
@@ -812,6 +827,17 @@ sealed class CropView : Control
     {
         var g = e.Graphics;
         g.Clear(Color.Black);
+        if (showResult && image != null && box is { } shown)
+        {
+            // The inside of the box, as large as fits
+            var shape = shown.Width / shown.Height * FrameAspect;
+            var fit = Math.Min(Width / shape, Height);
+            float w = (float)(fit * shape), h = (float)fit;
+            g.InterpolationMode = InterpolationMode.Bilinear;
+            g.DrawImage(image, new RectangleF((Width - w) / 2, (Height - h) / 2, w, h),
+                new RectangleF(shown.X * image.Width, shown.Y * image.Height, shown.Width * image.Width, shown.Height * image.Height), GraphicsUnit.Pixel);
+            return;
+        }
         var pic = Picture;
         if (image != null)
         {
@@ -835,20 +861,38 @@ sealed class CropView : Control
     }
 }
 
+/// <summary>The small "add a key point here" button at the start of each track</summary>
+static class KeyButton
+{
+    public static void Draw(Graphics g, Rectangle r, bool enabled)
+    {
+        using (var back = Theme.Round(r, r.Height / 4f))
+        using (var fill = new SolidBrush(Color.FromArgb(215, Theme.Bg2))) g.FillPath(fill, back);
+        float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f, d = r.Height * 0.28f;
+        using var ink = new SolidBrush(enabled ? Theme.Text : Theme.Muted);
+        g.FillPolygon(ink, [new PointF(cx, cy - d), new PointF(cx + d, cy), new PointF(cx, cy + d), new PointF(cx - d, cy)]);
+    }
+}
+
 /// <summary>
-/// Thin track under the timeline showing the crop's key points as diamonds. Double-click adds one, dragging
-/// moves it in time, right-click removes it, clicking jumps to it.
+/// Track for the picture's position and scale. Each key point is a diamond, and the line through them shows the
+/// zoom (higher = closer in). Alt+click, or the button at the start, adds a point; dragging moves it in time,
+/// right-click removes it, clicking jumps to it. What a point holds is set by the box on the preview.
 /// </summary>
 sealed class KeyLane : Control
 {
+    static readonly Font SmallFont = new("Segoe UI", 8f);
+
     public double Duration = 1, Current;
     /// <summary>Times of the key points, in order</summary>
     public IReadOnlyList<double> Keys = [];
+    /// <summary>Zoom at each key point, 0 (the widest) to 1, for the line</summary>
+    public IReadOnlyList<double> Levels = [];
+    /// <summary>A point wanted at this time</summary>
     public event Action<double>? AddRequested;
     public event Action<int>? RemoveRequested, Picked;
     public event Action<int, double>? MoveRequested;
 
-    static readonly Font SmallFont = new("Segoe UI", 8f);
     int dragKey = -1;
     bool moved;
 
@@ -859,13 +903,16 @@ sealed class KeyLane : Control
     }
 
     int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
-    void Fit() => Height = Px(18);
+    void Fit() => Height = Px(44);
     protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
     protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
     protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
 
+    Rectangle AddButton => new(Px(4), Px(4), Px(18), Px(18));
     float X(double t) => (float)(t / Duration * Width);
     double T(int x) => Math.Clamp(x / (double)Math.Max(1, Width) * Duration, 0, Duration);
+    float Y(double level) => Height - Px(9) - (float)(Math.Clamp(level, 0, 1) * (Height - Px(18)));
+    double Level(int i) => i < Levels.Count ? Levels[i] : 0;
 
     int HitKey(int x)
     {
@@ -877,15 +924,17 @@ sealed class KeyLane : Control
     {
         base.OnMouseDown(e);
         if (!Enabled) return;
+        if (e.Button == MouseButtons.Left && AddButton.Contains(e.Location)) { AddRequested?.Invoke(Current); return; }
         var k = HitKey(e.X);
         if (e.Button == MouseButtons.Right && k >= 0) RemoveRequested?.Invoke(k);
+        else if (e.Button == MouseButtons.Left && k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) AddRequested?.Invoke(T(e.X));
         else if (e.Button == MouseButtons.Left) { dragKey = k; moved = false; }
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        if (dragKey < 0) { Cursor = HitKey(e.X) >= 0 ? Cursors.SizeWE : Cursors.Default; return; }
+        if (dragKey < 0) { Cursor = AddButton.Contains(e.Location) ? Cursors.Hand : HitKey(e.X) >= 0 ? Cursors.SizeWE : Cursors.Default; return; }
         moved = true;
         MoveRequested?.Invoke(dragKey, T(e.X));
     }
@@ -897,30 +946,40 @@ sealed class KeyLane : Control
         dragKey = -1;
     }
 
-    protected override void OnMouseDoubleClick(MouseEventArgs e)
-    {
-        base.OnMouseDoubleClick(e);
-        if (Enabled && e.Button == MouseButtons.Left && HitKey(e.X) < 0) AddRequested?.Invoke(T(e.X));
-    }
-
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.Clear(Parent?.BackColor ?? Theme.Bg);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using (var track = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), Px(5)))
+        using var track = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), Px(6));
         using (var bg = new SolidBrush(Theme.Bg3)) g.FillPath(bg, track);
-        float mid = Height / 2f, d = Height / 2f - Px(2);
-        TextRenderer.DrawText(g, "Crop", SmallFont, new Rectangle(Px(6), 0, Width, Height), Theme.Muted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
-        if (Keys.Count > 1)
-            using (var line = new Pen(Color.FromArgb(150, Theme.Brand), Math.Max(1, Px(2)))) g.DrawLine(line, X(Keys[0]), mid, X(Keys[^1]), mid);
-        using (var head = new Pen(Color.FromArgb(160, Color.White))) g.DrawLine(head, X(Current), 0, X(Current), Height);
-        foreach (var t in Keys)
+        g.SetClip(track);
+
+        // The zoom over time: flat before the first point and after the last
+        if (Keys.Count > 0)
         {
-            var x = Math.Clamp(X(t), d, Width - d);
-            // White when the playhead is on it: that's the point the box on the preview edits
-            using var fill = new SolidBrush(Math.Abs(t - Current) < 0.02 ? Color.White : Theme.Brand);
-            g.FillPolygon(fill, [new PointF(x, mid - d), new PointF(x + d, mid), new PointF(x, mid + d), new PointF(x - d, mid)]);
+            var pts = new List<PointF> { new(0, Y(Level(0))) };
+            for (var i = 0; i < Keys.Count; i++) pts.Add(new PointF(X(Keys[i]), Y(Level(i))));
+            pts.Add(new PointF(Width, Y(Level(Keys.Count - 1))));
+            using var line = new Pen(Color.FromArgb(200, Theme.Brand), Math.Max(1.5f, Px(2)));
+            g.DrawLines(line, pts.ToArray());
         }
+        using (var head = new Pen(Color.FromArgb(160, Color.White))) g.DrawLine(head, X(Current), 0, X(Current), Height);
+        float d = Px(6);
+        for (var i = 0; i < Keys.Count; i++)
+        {
+            float x = X(Keys[i]), y = Y(Level(i));
+            // White when the playhead is on it: that's the point the box on the preview edits
+            using var fill = new SolidBrush(Math.Abs(Keys[i] - Current) < 0.02 ? Color.White : Theme.Brand);
+            g.FillPolygon(fill, [new PointF(x, y - d), new PointF(x + d, y), new PointF(x, y + d), new PointF(x - d, y)]);
+        }
+        g.ResetClip();
+
+        KeyButton.Draw(g, AddButton, Enabled);
+        const string name = "Position & scale";
+        var badge = new Rectangle(Px(26), Px(4), Px(10) + TextRenderer.MeasureText(name, SmallFont, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
+        using (var back = Theme.Round(badge, Px(4)))
+        using (var fill = new SolidBrush(Color.FromArgb(215, Theme.Bg2))) g.FillPath(fill, back);
+        TextRenderer.DrawText(g, name, SmallFont, new Rectangle(badge.X + Px(5), badge.Y, badge.Width, badge.Height), Theme.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
     }
 }
