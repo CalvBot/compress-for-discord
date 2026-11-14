@@ -36,7 +36,7 @@ static class Player
         {
             var (code, bytes, _) = await Ff.Run(Ff.Ffmpeg, ["-hide_banner", "-loglevel", "error", "-ss", S(from), "-t", S(span), "-i", path,
                 "-filter_complex", graph, "-map", "[aout]", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-f", "wav", "-"], ct);
-            if (code == 0 && bytes.Length > 44) wav = new MemoryStream(bytes);
+            if (code == 0 && bytes.Length > 44) wav = new MemoryStream(FixWavSizes(bytes));
         }
         ct.ThrowIfCancellationRequested();
 
@@ -79,6 +79,27 @@ static class Player
             sound?.Stop();
             try { if (!p.HasExited) p.Kill(true); } catch { }
         }
+    }
+
+    /// <summary>
+    /// ffmpeg can't go back and fill in the lengths when it writes a WAV to a pipe, so it leaves them as
+    /// "unknown" (0xFFFFFFFF). Windows then plays nothing at all, so write the real lengths in.
+    /// </summary>
+    static byte[] FixWavSizes(byte[] wav)
+    {
+        BitConverter.GetBytes((uint)(wav.Length - 8)).CopyTo(wav, 4);
+        for (var i = 12; i + 8 <= wav.Length;)
+        {
+            var size = BitConverter.ToUInt32(wav, i + 4);
+            if (wav.AsSpan(i, 4).SequenceEqual("data"u8))
+            {
+                BitConverter.GetBytes((uint)(wav.Length - i - 8)).CopyTo(wav, i + 4);
+                break;
+            }
+            if (size > int.MaxValue) break;
+            i += 8 + (int)size;
+        }
+        return wav;
     }
 
     static async Task<bool> ReadFull(Stream s, byte[] buf, CancellationToken ct)

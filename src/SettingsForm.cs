@@ -1,15 +1,19 @@
 namespace CompressForDiscord;
 
-/// <summary>ffmpeg location, desktop shortcut and updates</summary>
+/// <summary>ffmpeg location, desktop shortcut, done sound and updates. Everything applies as soon as it's changed.</summary>
 sealed class SettingsForm : DarkForm
 {
-    const int W = 480;
+    const int W = 580;
     readonly AppConfig cfg = AppConfig.Current;
     readonly Label ffmpegStatus, updateStatus;
-    readonly Pill chooseBtn, autoBtn, downloadBtn, checkBtn, installBtn;
+    readonly TextBox pathBox;
+    readonly Pill browseBtn, openBtn, installBtn;
+    readonly LinkLabel downloadLink, checkLink;
     readonly Bar bar;
     CancellationTokenSource? download;
     Release? release;
+    /// <summary>The path box is being filled in by code, not typed in</summary>
+    bool settingPath;
 
     /// <summary>ffmpeg was found, changed or downloaded</summary>
     public event Action? FfmpegChanged;
@@ -21,23 +25,43 @@ sealed class SettingsForm : DarkForm
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
 
-        var root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, Location = new Point(20, 14), Margin = Padding.Empty };
-        root.Controls.Add(Heading("Settings"));
+        var root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, Location = new Point(20, 6), Margin = Padding.Empty };
 
-        // ffmpeg
+        // ffmpeg: a folder you can type or paste, Browse, and Open folder. Empty = found automatically.
         root.Controls.Add(Section("ffmpeg"));
-        ffmpegStatus = Muted("", W);
-        ffmpegStatus.AutoEllipsis = true;
-        bar = new Bar { Size = new Size(W, 8), Visible = false, Margin = new Padding(0, 0, 0, 8) };
-        chooseBtn = new Pill("Choose folder…", PillKind.Secondary) { Margin = new Padding(0, 0, 8, 0) };
-        autoBtn = new Pill("Find automatically", PillKind.Secondary) { Margin = new Padding(0, 0, 8, 0) };
-        downloadBtn = new Pill("Download", PillKind.Secondary) { Margin = Padding.Empty };
-        chooseBtn.Click += (_, _) => ChooseFfmpeg();
-        autoBtn.Click += (_, _) => { cfg.FfmpegPath = ""; cfg.Save(); RefreshFfmpeg(); };
-        downloadBtn.Click += (_, _) => DownloadFfmpeg();
-        root.Controls.Add(ffmpegStatus);
+        pathBox = new TextBox { BackColor = Theme.Bg3, ForeColor = Theme.Text, BorderStyle = BorderStyle.None, Text = cfg.FfmpegPath };
+        var pathField = new RoundBox { LogicalWidth = 0, LogicalHeight = 38, Radius = 8, Fill = Theme.Bg3, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 8, 0), Cursor = Cursors.IBeam };
+        pathField.Controls.Add(pathBox);
+        pathField.Click += (_, _) => pathBox.Focus();
+        pathBox.GotFocus += (_, _) => pathField.Invalidate();
+        pathBox.LostFocus += (_, _) => pathField.Invalidate();
+        pathBox.TextChanged += (_, _) =>
+        {
+            if (settingPath) return;
+            // Pasted paths often come quoted, or point at ffmpeg.exe itself; both are fine
+            cfg.FfmpegPath = pathBox.Text.Trim().Trim('"');
+            cfg.Save();
+            RefreshFfmpeg();
+        };
+        browseBtn = new Pill("Browse…", PillKind.Secondary) { MinWidth = 80, Margin = new Padding(0, 0, 8, 0) };
+        openBtn = new Pill("Open folder", PillKind.Secondary) { MinWidth = 80, Margin = Padding.Empty };
+        browseBtn.Click += (_, _) => ChooseFfmpeg();
+        openBtn.Click += (_, _) => { if (Ff.Ffmpeg != "") Updater.Open(Path.GetDirectoryName(Ff.Ffmpeg)!); };
+        var pathRow = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, MinimumSize = new Size(W, 0), MaximumSize = new Size(W, 0), Margin = new Padding(0, 0, 0, 6) };
+        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        pathRow.Controls.Add(pathField, 0, 0);
+        pathRow.Controls.Add(browseBtn, 1, 0);
+        pathRow.Controls.Add(openBtn, 2, 0);
+        root.Controls.Add(pathRow);
+
+        ffmpegStatus = Muted("");
+        ffmpegStatus.Margin = new Padding(0, 0, 10, 0);
+        downloadLink = Link("Download ffmpeg", DownloadFfmpeg);
+        root.Controls.Add(Row(ffmpegStatus, downloadLink));
+        bar = new Bar { Size = new Size(W, 8), Visible = false, Margin = new Padding(0, 8, 0, 0) };
         root.Controls.Add(bar);
-        root.Controls.Add(Row(chooseBtn, autoBtn, downloadBtn));
 
         // General
         root.Controls.Add(Section("General"));
@@ -57,25 +81,29 @@ sealed class SettingsForm : DarkForm
         var auto = Check("Check for updates automatically", cfg.CheckForUpdates);
         auto.CheckedChanged += (_, _) => { cfg.CheckForUpdates = auto.Checked; cfg.Save(); };
         root.Controls.Add(auto);
-        updateStatus = Muted($"You have version {Updater.Current}.", W);
-        root.Controls.Add(updateStatus);
-        checkBtn = new Pill("Check now", PillKind.Secondary) { Margin = new Padding(0, 0, 8, 0) };
-        installBtn = new Pill("Install update", PillKind.Primary) { Visible = false, Margin = Padding.Empty };
-        checkBtn.Click += (_, _) => CheckNow();
+        updateStatus = Muted($"Version {Updater.Current}");
+        updateStatus.Margin = new Padding(0, 0, 10, 0);
+        checkLink = Link("Check now", CheckNow);
+        root.Controls.Add(Row(updateStatus, checkLink));
+        installBtn = new Pill("Install update", PillKind.Primary) { Visible = false, Margin = new Padding(0, 10, 0, 0) };
         installBtn.Click += (_, _) => InstallUpdate();
-        root.Controls.Add(Row(checkBtn, installBtn));
+        root.Controls.Add(installBtn);
 
-        var close = new Pill("Done", PillKind.Primary) { Dock = DockStyle.Right };
-        close.Click += (_, _) => Close();
-        var bottom = new Panel { Size = new Size(W, 38), Margin = new Padding(0, 18, 0, 0) };
-        bottom.Controls.Add(close);
-        root.Controls.Add(bottom);
+        // No Done button: every change is saved as it's made. Esc or the X closes.
+        root.Controls.Add(new Panel { Size = new Size(W, 12), Margin = Padding.Empty });
         Controls.Add(root);
         RefreshFfmpeg();
     }
 
+    // Don't start with the cursor in the path box: an empty box shows where ffmpeg was found, but only while it isn't focused
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        ActiveControl = null;
+    }
+
     static Label Section(string text) =>
-        new() { Text = text.ToUpperInvariant(), AutoSize = true, ForeColor = Theme.Muted, Font = new Font("Segoe UI Semibold", 8.5f), Margin = new Padding(0, 14, 0, 6) };
+        new() { Text = text.ToUpperInvariant(), AutoSize = true, ForeColor = Theme.Muted, Font = new Font("Segoe UI Semibold", 8.5f), Margin = new Padding(0, 14, 0, 8) };
 
     static FlowLayoutPanel Row(params Control[] items)
     {
@@ -88,24 +116,32 @@ sealed class SettingsForm : DarkForm
 
     void RefreshFfmpeg()
     {
-        if (Ff.Locate(cfg.FfmpegPath) == null)
-        {
-            ffmpegStatus.Text = "Using " + Ff.Ffmpeg + (cfg.FfmpegPath != "" ? "  (chosen folder)" : "");
-            ffmpegStatus.ForeColor = Theme.Muted;
-            FfmpegChanged?.Invoke();
-        }
-        else
-        {
-            ffmpegStatus.Text = cfg.FfmpegPath != "" ? $"ffmpeg isn't in {cfg.FfmpegPath}." : "ffmpeg wasn't found. Download it or choose its folder.";
-            ffmpegStatus.ForeColor = Theme.Danger;
-        }
+        var custom = cfg.FfmpegPath != "";
+        var found = Ff.Locate(cfg.FfmpegPath) == null;
+        // With nothing typed, the box shows where it was found
+        pathBox.PlaceholderText = found && !custom ? Path.GetDirectoryName(Ff.Ffmpeg) ?? "" : "Folder with ffmpeg.exe";
+        // A folder that doesn't have it still falls back to an automatic find, so check it's really the typed one
+        var usingTyped = found && custom && Ff.Ffmpeg.StartsWith(cfg.FfmpegPath.TrimEnd('\\', '/').Replace('/', '\\'), StringComparison.OrdinalIgnoreCase);
+        (ffmpegStatus.Text, ffmpegStatus.ForeColor) =
+            custom && !usingTyped ? ("ffmpeg.exe isn't in that folder.", Theme.Danger)
+            : found ? (custom ? "Using this folder." : "Found automatically.", Theme.Muted)
+            : ("Not found. Download it, or paste its folder above.", Theme.Danger);
+        openBtn.Enabled = found;
+        if (found) FfmpegChanged?.Invoke();
     }
 
     void ChooseFfmpeg()
     {
         using var dlg = new FolderBrowserDialog { Description = "Folder containing ffmpeg.exe and ffprobe.exe", UseDescriptionForTitle = true };
-        if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        cfg.FfmpegPath = dlg.SelectedPath;
+        if (dlg.ShowDialog(this) == DialogResult.OK) pathBox.Text = dlg.SelectedPath;
+    }
+
+    void SetPath(string path)
+    {
+        settingPath = true;
+        pathBox.Text = path;
+        settingPath = false;
+        cfg.FfmpegPath = path;
         cfg.Save();
         RefreshFfmpeg();
     }
@@ -114,16 +150,14 @@ sealed class SettingsForm : DarkForm
     {
         if (download != null) return;
         download = new CancellationTokenSource();
-        chooseBtn.Enabled = autoBtn.Enabled = downloadBtn.Enabled = false;
+        pathBox.Enabled = browseBtn.Enabled = downloadLink.Enabled = false;
         bar.Value = 0;
         bar.Visible = true;
         var progress = new Progress<double>(p => { ffmpegStatus.Text = $"Downloading ffmpeg · {p * 100:0}%"; ffmpegStatus.ForeColor = Theme.Text; bar.Value = p; });
         try
         {
             await Task.Run(() => Ff.DownloadFfmpeg(progress, download.Token));
-            cfg.FfmpegPath = ""; // the download is found automatically
-            cfg.Save();
-            RefreshFfmpeg();
+            SetPath(""); // the download is found automatically
         }
         catch (OperationCanceledException) { RefreshFfmpeg(); }
         catch (Exception ex) { ffmpegStatus.Text = "Download failed: " + ex.Message; ffmpegStatus.ForeColor = Theme.Danger; }
@@ -131,13 +165,13 @@ sealed class SettingsForm : DarkForm
         {
             download = null;
             bar.Visible = false;
-            chooseBtn.Enabled = autoBtn.Enabled = downloadBtn.Enabled = true;
+            pathBox.Enabled = browseBtn.Enabled = downloadLink.Enabled = true;
         }
     }
 
     async void CheckNow()
     {
-        checkBtn.Enabled = false;
+        checkLink.Enabled = false;
         updateStatus.Text = "Checking…";
         updateStatus.ForeColor = Theme.Muted;
         try
@@ -145,7 +179,7 @@ sealed class SettingsForm : DarkForm
             release = await Updater.Check();
             cfg.LastUpdateCheck = DateTime.UtcNow;
             cfg.Save();
-            updateStatus.Text = release == null ? $"You're up to date (version {Updater.Current})." : $"Version {release.Version} is available (you have {Updater.Current}).";
+            updateStatus.Text = release == null ? $"Version {Updater.Current} is the latest." : $"Version {release.Version} is available (you have {Updater.Current}).";
             updateStatus.ForeColor = release == null ? Theme.Muted : Theme.Green;
             installBtn.Visible = release != null;
         }
@@ -154,13 +188,13 @@ sealed class SettingsForm : DarkForm
             updateStatus.Text = "Couldn't check for updates. Are you online?";
             updateStatus.ForeColor = Theme.Danger;
         }
-        checkBtn.Enabled = true;
+        checkLink.Enabled = true;
     }
 
     async void InstallUpdate()
     {
         if (release == null) return;
-        installBtn.Enabled = checkBtn.Enabled = false;
+        installBtn.Enabled = checkLink.Enabled = false;
         updateStatus.Text = "Downloading the update…";
         try
         {
@@ -171,7 +205,7 @@ sealed class SettingsForm : DarkForm
         {
             updateStatus.Text = "Update failed: " + ex.Message;
             updateStatus.ForeColor = Theme.Danger;
-            installBtn.Enabled = checkBtn.Enabled = true;
+            installBtn.Enabled = checkLink.Enabled = true;
         }
     }
 

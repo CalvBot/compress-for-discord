@@ -462,8 +462,17 @@ sealed class RoundBox : Panel
         Fit();
     }
 
+    // Sizes in 96-dpi pixels. Width 0 = the layout decides the width (docked or anchored).
+    readonly int logicalWidth = 96, logicalHeight = 28;
+    public int LogicalWidth { get => logicalWidth; init { logicalWidth = value; Fit(); } }
+    public int LogicalHeight { get => logicalHeight; init { logicalHeight = value; Fit(); } }
+    /// <summary>Corner radius; 0 = fully rounded ends, like a chip</summary>
+    public int Radius { get; init; }
+    /// <summary>Filled with this colour (a text field); otherwise just an outline</summary>
+    public Color? Fill { get; init; }
+
     int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
-    void Fit() => Size = new Size(Px(96), Px(28));
+    void Fit() => Size = new Size(logicalWidth > 0 ? Px(logicalWidth) : Width, Px(logicalHeight));
     protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
     protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
     protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
@@ -482,7 +491,8 @@ sealed class RoundBox : Panel
         var g = e.Graphics;
         g.Clear(Parent?.BackColor ?? Theme.Bg2);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var path = Theme.Round(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), Height / 2f);
+        using var path = Theme.Round(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), Radius > 0 ? Px(Radius) : Height / 2f);
+        if (Fill is { } fill) using (var b = new SolidBrush(fill)) g.FillPath(b, path);
         var focused = Controls.Count > 0 && Controls[0].Focused;
         using var pen = new Pen(focused ? Theme.Brand : Theme.Secondary);
         g.DrawPath(pen, path);

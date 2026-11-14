@@ -334,6 +334,7 @@ sealed class MainForm : DarkForm
                     }
                     break;
                 case "fmtmenu": BeginInvoke(() => formatDrop.Button.GetType().GetMethod("OnClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(formatDrop.Button, [EventArgs.Empty])); break;
+                case "settings": BeginInvoke(ShowSettings); break;
                 case "menu": BeginInvoke(() => moreBtn.GetType().GetMethod("OnClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(moreBtn, [EventArgs.Empty])); break;
                 case "save": BeginInvoke(() => Go(save: true, value)); break;
             }
