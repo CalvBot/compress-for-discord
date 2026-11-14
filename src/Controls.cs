@@ -260,6 +260,8 @@ sealed class Timeline : Control
     public event Action? RangeChanged;
     /// <summary>The playhead moved; the form shows that frame</summary>
     public event Action<double>? Seeked;
+    /// <summary>The strip was double-clicked at this time; the form plays from there, trimmed or not</summary>
+    public event Action<double>? PlayRequested;
 
     DragKind drag;
     double grabOffset, length;
@@ -358,6 +360,12 @@ sealed class Timeline : Control
                 break;
             default: Seek(t); break;
         }
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        base.OnMouseDoubleClick(e);
+        if (Enabled && e.Button == MouseButtons.Left && HitTest(e.Location) == DragKind.Seek) PlayRequested?.Invoke(T(e.X));
     }
 
     double SnapToPlayhead(double t, int x) => Math.Abs(x - X(Current)) <= Px(7) ? Current : t;

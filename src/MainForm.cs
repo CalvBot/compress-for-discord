@@ -32,9 +32,11 @@ sealed class MainForm : DarkForm
     readonly CancellationTokenSource lifetime = new();
     readonly System.Windows.Forms.Timer frameTimer = new() { Interval = 50 };
     double pendingFrame;
+    /// <summary>Where the current playback stops when it isn't the end of the trim (double-click play)</summary>
+    double? playTo;
     string? outPath;
 
-    readonly Label subtitle, timeLabel, summary, status, laneHint;
+    readonly Label subtitle, timeLabel, summary, status;
     readonly PictureBox preview;
     readonly Timeline timeline;
     readonly LinkLabel resetLink;
@@ -89,6 +91,8 @@ sealed class MainForm : DarkForm
         timeline = new Timeline { Size = new Size(ContentWidth, 68), Enabled = false, Margin = Padding.Empty };
         timeline.RangeChanged += () => { UpdateTimeLabel(); UpdateSummary(); };
         timeline.Seeked += t => { StopPlayback(); RequestFrame(t); };
+        // Double-click plays from that spot to the end of the video, so you can watch what's outside the trim
+        timeline.PlayRequested += t => { if (probe != null && encodeCts == null) { StopPlayback(); _ = PlayFrom(t, probe.Duration); } };
 
         timeRow = new Panel { Size = new Size(ContentWidth, 30), Margin = new Padding(0, 6, 0, 10) };
         playBtn = new Pill("▶  Play") { Dock = DockStyle.Left, Enabled = false };
@@ -146,9 +150,6 @@ sealed class MainForm : DarkForm
         audioLabel = OptLabel("Audio");
         encLabel = OptLabel("Encoder");
         formatLabel = OptLabel("Format");
-        laneHint = Muted("Drag the line for volume · double-click adds a point · right-click removes it");
-        laneHint.Font = new Font("Segoe UI", 8.5f);
-        laneHint.Margin = new Padding(0, 0, 0, 4);
         // Dropping the audio frees its bitrate for the video, which can be what makes a clip fit
         audioChips = ChipRow();
         audioChips.Controls.Add(Chip("On", true, audioChips, v => SetAudio((bool)v!)));
@@ -279,7 +280,6 @@ sealed class MainForm : DarkForm
             audioPanel.Controls.Add(row);
             trackUi.Add((t, box, lane, row));
         }
-        audioPanel.Controls.Add(laneHint);
         LayoutLanes();
         audioLabel.Visible = audioChips.Visible = true;
         SetAudio(def != null);
@@ -413,18 +413,20 @@ sealed class MainForm : DarkForm
         if (playCts == null) return;
         var t = timeline.Current;
         StopPlayback();
-        _ = PlayFrom(t);
+        _ = PlayFrom(t, playTo);
     }
 
-    async Task PlayFrom(double from)
+    /// <param name="to">where to stop; the end of the trim unless given</param>
+    async Task PlayFrom(double from, double? to = null)
     {
+        playTo = to;
         var cts = playCts = new CancellationTokenSource();
         frameTimer.Stop();
         frameCts?.Cancel();
         playBtn.Text = "❚❚  Pause";
         try
         {
-            await Player.Play(file, from, timeline.End, Mix(), preview.ClientSize, probe!.Width, probe.Height, probe.Fps, (bmp, t) =>
+            await Player.Play(file, from, to ?? timeline.End, Mix(), preview.ClientSize, probe!.Width, probe.Height, probe.Fps, (bmp, t) =>
             {
                 if (cts.IsCancellationRequested || IsDisposed) { bmp.Dispose(); return; }
                 var old = preview.Image;
