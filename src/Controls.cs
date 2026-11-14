@@ -728,71 +728,47 @@ sealed class RoundBox : Panel
 }
 
 /// <summary>
-/// One audio track drawn as a waveform with its volume line on top. Dragging up or down changes the volume.
-/// To its left are two buttons: mute, and add a point at the playhead so the volume can change over time
-/// (Ctrl+click adds one under the mouse), or removes the one the playhead is on. Clicking a point selects it
-/// and Del removes it. Holding Shift while dragging a point keeps its value, and a level stretch between two
-/// points at the same value drags as one.
+/// What every keyframable track shares (audio volume, position and scale): the zoomed view of time, the frame
+/// grid, selecting key points, the wheel shortcuts and the name badge.
 /// </summary>
-sealed class VolumeLane : Control
+abstract class KeyTrackLane : Control
 {
-    static readonly Font Small = new("Segoe UI", 8f);
+    protected static readonly Font Small = new("Segoe UI", 8f);
 
-    /// <summary>Loudest sample in each slice of the track, 0..1; null until measured</summary>
-    public float[]? Peaks;
-    // The loudest slice of Peaks, worked out once per waveform rather than every paint
-    float[]? loudestOf;
-    float loudest = 1;
-    public double Duration = 1, Start, End = 1, Current;
-    /// <summary>False for a muted track (drawn grey, left out of the mix)</summary>
-    public bool Active = true;
-    /// <summary>Background of the lane. The result (master) lane has its own, so it stands apart from the tracks.</summary>
+    public double Duration = 1, Current;
+    /// <summary>Background of the lane</summary>
     public Color Back = Theme.Bg3;
     /// <summary>The track's name, shown at the top left of the lane</summary>
     public string Label = "";
-    /// <summary>Nothing audible in this track; said on the badge</summary>
-    public bool Silent;
-    /// <summary>The mute button was clicked: Active has flipped</summary>
-    public event Action? MuteToggled;
-    /// <summary>Volume while there are no points: 1 = unchanged, 0 = silent, 2 = double</summary>
-    public double Volume = 1;
-    /// <summary>Volume points in time order; empty = the same volume throughout</summary>
-    public readonly List<(double T, double V, Ease E)> Keys = [];
-
-    /// <summary>Changes how the volume moves next to a point</summary>
-    /// <summary>Changes several points at once, committing once (so playback restarts once, not per point)</summary>
-    public void SetEase(IEnumerable<int> ids, Ease ease)
-    {
-        foreach (var i in ids)
-            if (i >= 0 && i < Keys.Count) Keys[i] = (Keys[i].T, Keys[i].V, ease);
-        Invalidate();
-        Committed?.Invoke();
-    }
-    /// <summary>The volume changed and the mouse was let go</summary>
-    public event Action? Committed;
     /// <summary>Right-clicked somewhere that isn't a point</summary>
     public event Action<Point>? MenuRequested;
     /// <summary>Shift + wheel: make the tracks taller (+1) or shorter (-1)</summary>
     public event Action<int>? HeightRequested;
     /// <summary>Alt + wheel: zoom the timeline by this factor around this time</summary>
     public event Action<double, double>? ZoomRequested;
-    public IEnumerable<double> KeyTimes => Keys.Select(k => k.T);
+    /// <summary>A key point on this track was selected (so any selected on another track can be let go)</summary>
+    public event Action? KeySelected;
+
+    /// <summary>How many key points there are, and when each one is</summary>
+    protected abstract int KeyCount { get; }
+    protected abstract double KeyTime(int i);
+    public IEnumerable<double> KeyTimes => Enumerable.Range(0, KeyCount).Select(KeyTime);
+    /// <summary>Removes the selected key points</summary>
+    public abstract void DeleteSelected();
 
     /// <summary>Length of one frame at the chosen frame rate, in seconds. Frames are marked once zoomed in far enough.</summary>
     public double Grid;
     /// <summary>Where a point goes when it's moved or Ctrl+clicked in: onto a frame of the chosen frame rate</summary>
-    double OnFrame(double t) => Grid > 0 ? Math.Clamp(Math.Round(t / Grid) * Grid, 0, Duration) : t;
-    int grabX;
-    double grabT;
+    protected double OnFrame(double t) => Grid > 0 ? Math.Clamp(Math.Round(t / Grid) * Grid, 0, Duration) : t;
     /// <summary>The key points that are selected (Del removes them, dragging one moves them all)</summary>
     public KeySelection Selection { get; } = new();
     /// <summary>The selected point clicked last; -1 = none</summary>
     public int SelectedKey => Selection.Primary;
-    /// <summary>A key point on this track was selected (so any selected on another track can be let go)</summary>
-    public event Action? KeySelected;
-    /// <summary>A Shift+click on a point that was already selected: let go of it if the mouse comes up without dragging</summary>
-    int toggleOff = -1;
-    bool moved;
+
+    // A press on a point: where it began, whether it has dragged yet, and a Shift+click on a point that was
+    // already selected (let go of it if the mouse comes up without dragging)
+    protected int grabX, toggleOff = -1;
+    protected bool moved;
 
     public void Select(int index)
     {
@@ -805,10 +781,135 @@ sealed class VolumeLane : Control
     public void SelectTimes(IEnumerable<double> times)
     {
         var ts = times.ToList();
-        Selection.SetMany(Enumerable.Range(0, Keys.Count).Where(i => ts.Any(t => Math.Abs(Keys[i].T - t) < Interp.Same)));
+        Selection.SetMany(Enumerable.Range(0, KeyCount).Where(i => ts.Any(t => Math.Abs(KeyTime(i) - t) < Interp.Same)));
         Invalidate();
         if (Selection.Count > 0) KeySelected?.Invoke();
     }
+
+    /// <summary>
+    /// A left press on a point (or on nothing, k = -1) sets the selection: Shift+click adds a point to it (or,
+    /// without a drag, takes it away again); a plain click on a selected point keeps it so they can all be dragged
+    /// </summary>
+    protected void PressSelect(int k, bool shift)
+    {
+        toggleOff = -1;
+        moved = false;
+        if (k >= 0 && shift)
+        {
+            if (Selection.Contains(k)) toggleOff = k;
+            else { Selection.Add(k); Invalidate(); KeySelected?.Invoke(); }
+        }
+        else if (k < 0) { if (!shift) Select(-1); }
+        else if (!Selection.Contains(k)) Select(k);
+    }
+
+    /// <summary>A right press: a point that's part of the selection keeps it, so the menu's ease goes to all of them</summary>
+    protected void ShowMenu(int k, Point at)
+    {
+        if (k >= 0 && !Selection.Contains(k)) Select(k);
+        MenuRequested?.Invoke(at);
+    }
+
+    /// <summary>How close the playhead has to be to a key point to count as on it: within half a frame</summary>
+    protected double Near => Grid > 0 ? Grid / 2 : 0.02;
+    /// <summary>The key point under the playhead, or -1</summary>
+    protected int OnKey
+    {
+        get
+        {
+            for (var i = 0; i < KeyCount; i++) if (Math.Abs(KeyTime(i) - Current) <= Near) return i;
+            return -1;
+        }
+    }
+
+    int rowHeight = 56;
+    /// <summary>Height in 96-dpi pixels; every keyframable track shares it</summary>
+    public int RowHeight { get => rowHeight; set { rowHeight = value; Fit(); } }
+
+    protected KeyTrackLane()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, false);
+    }
+
+    protected int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
+    /// <summary>Sets the size for the row height (and, for a lane that's told its width, that too)</summary>
+    protected virtual void Fit() => Height = Px(rowHeight);
+    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
+    protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
+    protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
+
+    /// <summary>Room at the left for the buttons; the lane itself starts after it, in line with the timeline</summary>
+    protected int G => Px(Tracks.Gutter);
+    protected int BodyW => Math.Max(1, Width - G);
+    /// <summary>The part of the video on screen (the timeline's zoom). End at or before start = all of it.</summary>
+    public double ViewStart, ViewEnd;
+    protected double From => ViewEnd > ViewStart ? ViewStart : 0;
+    protected double Span => ViewEnd > ViewStart ? ViewEnd - ViewStart : Duration;
+    protected float X(double t) => G + (float)((t - From) / Span * BodyW);
+    protected double T(int x) => Math.Clamp(From + (x - G) / (double)BodyW * Span, 0, Duration);
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift)) HeightRequested?.Invoke(Math.Sign(e.Delta));
+        else if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) ZoomRequested?.Invoke(e.Delta > 0 ? 0.75 : 1 / 0.75, T(e.X));
+        else { base.OnMouseWheel(e); return; } // on to the box, which scrolls
+        if (e is HandledMouseEventArgs h) h.Handled = true;
+    }
+
+    /// <summary>The name badge at the top left of the lane</summary>
+    protected Rectangle BadgeFor(string text) =>
+        new(G + Px(5), Px(4), Px(10) + TextRenderer.MeasureText(text, Small, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
+
+    protected void DrawBadge(Graphics g, string text, Color ink)
+    {
+        var badge = BadgeFor(text);
+        using (var back = Theme.Round(badge, Px(4)))
+        using (var fill = new SolidBrush(Color.FromArgb(215, Theme.Bg2))) g.FillPath(fill, back);
+        TextRenderer.DrawText(g, text, Small, new Rectangle(badge.X + Px(5), badge.Y, badge.Width, badge.Height), ink, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+    }
+}
+
+/// <summary>
+/// One audio track drawn as a waveform with its volume line on top. Dragging up or down changes the volume.
+/// To its left are two buttons: mute, and add a point at the playhead so the volume can change over time
+/// (Ctrl+click adds one under the mouse), or removes the one the playhead is on. Clicking a point selects it
+/// and Del removes it. Holding Shift while dragging a point keeps its value, and a level stretch between two
+/// points at the same value drags as one.
+/// </summary>
+sealed class VolumeLane : KeyTrackLane
+{
+    /// <summary>
+    /// The waveforms drawn on this lane, each at a gain over time (null = as it is): a track's own, or for the
+    /// result lane every unmuted track's at its volume. The loudest of them is drawn at each moment.
+    /// </summary>
+    public IReadOnlyList<(Waveform Wave, Func<double, double>? Gain)> Sources = [];
+    public double Start, End = 1;
+    /// <summary>False for a muted track (drawn grey, left out of the mix)</summary>
+    public bool Active = true;
+    /// <summary>Nothing audible in this track; said on the badge</summary>
+    public bool Silent;
+    /// <summary>The mute button was clicked: Active has flipped</summary>
+    public event Action? MuteToggled;
+    /// <summary>Volume while there are no points: 1 = unchanged, 0 = silent, 2 = double</summary>
+    public double Volume = 1;
+    /// <summary>Volume points in time order; empty = the same volume throughout</summary>
+    public readonly List<(double T, double V, Ease E)> Keys = [];
+    protected override int KeyCount => Keys.Count;
+    protected override double KeyTime(int i) => Keys[i].T;
+
+    /// <summary>Changes how the volume moves next to several points at once, committing once (so playback restarts once, not per point)</summary>
+    public void SetEase(IEnumerable<int> ids, Ease ease)
+    {
+        foreach (var i in ids)
+            if (i >= 0 && i < Keys.Count) Keys[i] = (Keys[i].T, Keys[i].V, ease);
+        Invalidate();
+        Committed?.Invoke();
+    }
+    /// <summary>The volume changed and the mouse was let go</summary>
+    public event Action? Committed;
+
+    double grabT;
 
     /// <summary>Pasted points: each replaces one already at its time, or goes in between. Then they're selected.</summary>
     public void Paste(IEnumerable<(double T, double V, Ease E)> points)
@@ -831,12 +932,7 @@ sealed class VolumeLane : Control
         Committed?.Invoke();
     }
 
-    /// <summary>How close the playhead has to be to a key point to count as on it: within half a frame</summary>
-    double Near => Grid > 0 ? Grid / 2 : 0.02;
-    /// <summary>The key point under the playhead, or -1</summary>
-    int OnKey => Keys.FindIndex(k => Math.Abs(k.T - Current) <= Near);
-
-    public void DeleteSelected()
+    public override void DeleteSelected()
     {
         if (Selection.Count == 0) return;
         EndDrag();
@@ -847,9 +943,6 @@ sealed class VolumeLane : Control
         Committed?.Invoke();
     }
 
-    int rowHeight = 56;
-    /// <summary>Height in 96-dpi pixels; every keyframable track shares it</summary>
-    public int RowHeight { get => rowHeight; set { rowHeight = value; Fit(); } }
     /// <summary>First of two neighbouring points being dragged together (a level stretch); -1 = none</summary>
     int dragStretch = -1;
 
@@ -868,7 +961,9 @@ sealed class VolumeLane : Control
     {
         var h = new HashCode();
         foreach (var v in new[] { From, Span, Start, End, Volume, Grid, Duration }) h.Add(v);
-        h.Add(Active); h.Add(Silent); h.Add(Enabled); h.Add(dragKey); h.Add(OnKey >= 0); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Peaks);
+        h.Add(Active); h.Add(Silent); h.Add(Enabled); h.Add(dragKey); h.Add(OnKey >= 0); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Sources);
+        // A waveform that's still being measured redraws as each chunk comes in
+        foreach (var (w, _) in Sources) h.Add(w.Version);
         foreach (var i in Selection.Sorted) h.Add(i);
         foreach (var k in Keys) { h.Add(k.T); h.Add(k.V); h.Add(k.E); }
         return h.ToHashCode();
@@ -880,31 +975,13 @@ sealed class VolumeLane : Control
     double grabVolume;
     int pixelWidth = 300;
 
-    public VolumeLane()
-    {
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        SetStyle(ControlStyles.Selectable, false);
-        Cursor = Cursors.SizeNS;
-    }
+    public VolumeLane() => Cursor = Cursors.SizeNS;
 
     /// <summary>Width in real pixels (the form decides it from the room it has); the height follows the display scaling like Pill</summary>
     public int PixelWidth { get => pixelWidth; set { pixelWidth = value; Fit(); } }
 
-    int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
-    void Fit() => Size = new Size(pixelWidth, Px(rowHeight));
-    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
-    protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
-    protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
+    protected override void Fit() => Size = new Size(pixelWidth, Px(RowHeight));
     int Pad => Px(4);
-    /// <summary>Room at the left for the buttons; the lane itself starts after it, in line with the timeline</summary>
-    int G => Px(Tracks.Gutter);
-    int BodyW => Math.Max(1, Width - G);
-    /// <summary>The part of the video on screen (the timeline's zoom). End at or before start = all of it.</summary>
-    public double ViewStart, ViewEnd;
-    double From => ViewEnd > ViewStart ? ViewStart : 0;
-    double Span => ViewEnd > ViewStart ? ViewEnd - ViewStart : Duration;
-    float X(double t) => G + (float)((t - From) / Span * BodyW);
-    double T(int x) => Math.Clamp(From + (x - G) / (double)BodyW * Span, 0, Duration);
     float Y(double v) => Pad + (float)((2 - v) / 2 * (Height - 2 * Pad));
     // Sticks to 100% when close, so "unchanged" is easy to hit
     static double Snap(double v) { v = Math.Clamp(v, 0, 2); return Math.Abs(v - 1) < 0.06 ? 1 : Math.Round(v, 2); }
@@ -925,7 +1002,6 @@ sealed class VolumeLane : Control
     string BadgeText => Label + (Silent ? " · silent" : "");
     Rectangle MuteButton => Tracks.Button(this, 0, 2);
     Rectangle AddButton => Tracks.Button(this, 1, 2);
-    Rectangle Badge => new(G + Px(5), Px(4), Px(10) + TextRenderer.MeasureText(BadgeText, Small, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
 
     /// <summary>The level stretch under the mouse: two neighbouring points at the same value, with the line between them</summary>
     int HitStretch(Point p)
@@ -953,14 +1029,6 @@ sealed class VolumeLane : Control
         Volume = 1;
         Invalidate();
         Committed?.Invoke();
-    }
-
-    protected override void OnMouseWheel(MouseEventArgs e)
-    {
-        if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift)) HeightRequested?.Invoke(Math.Sign(e.Delta));
-        else if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) ZoomRequested?.Invoke(e.Delta > 0 ? 0.75 : 1 / 0.75, T(e.X));
-        else { base.OnMouseWheel(e); return; } // on to the box, which scrolls
-        if (e is HandledMouseEventArgs h) h.Handled = true;
     }
 
     /// <summary>Adds a point on the line at a time (or finds the one already there); returns its index</summary>
@@ -1003,29 +1071,13 @@ sealed class VolumeLane : Control
         }
         if (e.X < G) return;
         var k = HitKey(e.Location);
-        if (e.Button == MouseButtons.Right)
-        {
-            // A point that's part of the selection keeps it, so the menu's ease goes to all of them
-            if (k >= 0 && !Selection.Contains(k)) Select(k);
-            MenuRequested?.Invoke(e.Location);
-        }
+        if (e.Button == MouseButtons.Right) ShowMenu(k, e.Location);
         else if (e.Button == MouseButtons.Left)
         {
-            var shift = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift);
             // Ctrl+click puts a new point under the mouse, already held so it can be dragged into place
             added = false;
             if (k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) k = AddKey(OnFrame(T(e.X)));
-            toggleOff = -1;
-            moved = false;
-            // Shift+click adds a point to the selection (or, without a drag, takes it away again);
-            // a plain click on a selected point keeps the selection so they can all be dragged
-            if (k >= 0 && shift)
-            {
-                if (Selection.Contains(k)) toggleOff = k;
-                else { Selection.Add(k); Invalidate(); KeySelected?.Invoke(); }
-            }
-            else if (k < 0) { if (!shift) Select(-1); }
-            else if (!Selection.Contains(k)) Select(k);
+            PressSelect(k, ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift));
             dragKey = k;
             grabX = e.X;
             grabT = k >= 0 ? Keys[k].T : 0;
@@ -1137,19 +1189,32 @@ sealed class VolumeLane : Control
         g.SetClip(shape);
 
         float mid = Height / 2f, half = Height / 2f - 2;
-        if (Peaks is { Length: > 0 } peaks)
+        if (Sources.Count > 0)
         {
-            if (peaks != loudestOf) (loudestOf, loudest) = (peaks, Math.Max(peaks.Max(), 0.02f));
+            // Scaled to the loudest measured so far, so it may grow a little as the rest comes in
+            var loudest = Math.Max(0.02f, Sources.Max(s => s.Wave.Loudest));
             using var inside = new Pen(Active ? Theme.Brand : Theme.Secondary);
             using var outside = new Pen(Color.FromArgb(90, Active ? Theme.Brand : Theme.Secondary));
+            // Not measured yet: a faint stub on the middle line until it pops in
+            using var waiting = new Pen(Color.FromArgb(40, Theme.Text));
+            var step = Span / BodyW;
             for (var x = 0; x < BodyW; x++)
             {
-                var t = From + x / (double)BodyW * Span;
-                // The loudest of every slice under this pixel: zoomed out, a short peak still shows
-                var i0 = Math.Clamp((int)(t / Duration * peaks.Length), 0, peaks.Length - 1);
-                var i1 = Math.Clamp((int)((t + Span / BodyW) / Duration * peaks.Length), i0 + 1, peaks.Length);
-                var peak = 0f;
-                for (var i = i0; i < i1; i++) peak = Math.Max(peak, peaks[i]);
+                var t = From + x * step;
+                // The loudest sample under this pixel: zoomed out, a short peak still shows
+                var peak = 0.0;
+                var measured = false;
+                foreach (var (wave, gain) in Sources)
+                {
+                    var p = wave.Max(t, t + step, out var m);
+                    measured |= m;
+                    if (m && p > 0) peak = Math.Max(peak, p * (gain?.Invoke(t) ?? 1));
+                }
+                if (!measured)
+                {
+                    g.DrawLine(waiting, G + x + 0.5f, mid - Px(2), G + x + 0.5f, mid + Px(2));
+                    continue;
+                }
                 // Half height at 100% so there's room to show a boost
                 var h = (float)Math.Min(1, peak / loudest * 0.5 * GainAt(t)) * half;
                 if (h >= 0.5f) g.DrawLine(t >= Start && t <= End ? inside : outside, G + x + 0.5f, mid - h, G + x + 0.5f, mid + h);
@@ -1187,10 +1252,7 @@ sealed class VolumeLane : Control
         KeyButton.Draw(g, AddButton, Enabled, OnKey >= 0);
 
         // The track's name on the lane
-        var badge = Badge;
-        using (var back = Theme.Round(badge, Px(4)))
-        using (var fill = new SolidBrush(Color.FromArgb(215, Theme.Bg2))) g.FillPath(fill, back);
-        TextRenderer.DrawText(g, BadgeText, Small, new Rectangle(badge.X + Px(5), badge.Y, badge.Width, badge.Height), ink, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        DrawBadge(g, BadgeText, ink);
 
         var label = dragKey >= 0 ? $"{Keys[dragKey].V * 100:0}%" : Keys.Count == 0 ? $"{Volume * 100:0}%" : "";
         TextRenderer.DrawText(g, label, Small, new Rectangle(0, Px(2), Width - Px(6), Height), Theme.Muted, TextFormatFlags.Right | TextFormatFlags.Top | TextFormatFlags.NoPrefix);
@@ -1528,13 +1590,12 @@ static class KeyButton
 /// clicking selects it and jumps to it, Del removes it. The button also takes away the point the playhead is
 /// on. What a point holds is set by the box on the preview.
 /// </summary>
-sealed class KeyLane : Control
+sealed class KeyLane : KeyTrackLane
 {
-    static readonly Font SmallFont = new("Segoe UI", 8f);
-
-    public double Duration = 1, Current;
     /// <summary>Times of the key points, in order</summary>
     public IReadOnlyList<double> Keys = [];
+    protected override int KeyCount => Keys.Count;
+    protected override double KeyTime(int i) => Keys[i];
     /// <summary>Height of the line at each key point, 0 (bottom) to 1</summary>
     public IReadOnlyList<double> Levels = [];
     /// <summary>A second, fainter line (position has two values: across and down); empty = none</summary>
@@ -1544,49 +1605,11 @@ sealed class KeyLane : Control
     /// <summary>How the value moves next to each point; sets its shape</summary>
     public IReadOnlyList<Ease> Eases = [];
     Ease EaseOf(int i) => i < Eases.Count ? Eases[i] : Ease.Linear;
-    public string Label = "Position & scale";
-    public Color Back = Theme.Bg3;
-    /// <summary>Right-clicked somewhere that isn't a key point</summary>
-    public event Action<Point>? MenuRequested;
-    /// <summary>Shift + wheel: make the tracks taller (+1) or shorter (-1)</summary>
-    public event Action<int>? HeightRequested;
-    /// <summary>Alt + wheel: zoom the timeline by this factor around this time</summary>
-    public event Action<double, double>? ZoomRequested;
-    public IEnumerable<double> KeyTimes => Keys;
-
-    /// <summary>Length of one frame at the chosen frame rate, in seconds. Frames are marked once zoomed in far enough.</summary>
-    public double Grid;
-    double OnFrame(double t) => Grid > 0 ? Math.Clamp(Math.Round(t / Grid) * Grid, 0, Duration) : t;
-    /// <summary>The key points that are selected (Del removes them, dragging one moves them all)</summary>
-    public KeySelection Selection { get; } = new();
-    /// <summary>The selected point clicked last; -1 = none</summary>
-    public int SelectedKey => Selection.Primary;
-    /// <summary>A key point on this track was selected (so any selected on another track can be let go)</summary>
-    public event Action? KeySelected;
-    int toggleOff = -1;
     bool shiftClick;
 
-    public void Select(int index)
-    {
-        if (!Selection.Only(index)) return;
-        Invalidate();
-        if (index >= 0) KeySelected?.Invoke();
-    }
+    public KeyLane() => Label = "Position & scale";
 
-    /// <summary>Selects the points at these times (the ones just pasted)</summary>
-    public void SelectTimes(IEnumerable<double> times)
-    {
-        var ts = times.ToList();
-        Selection.SetMany(Enumerable.Range(0, Keys.Count).Where(i => ts.Any(t => Math.Abs(Keys[i] - t) < Interp.Same)));
-        Invalidate();
-        if (Selection.Count > 0) KeySelected?.Invoke();
-    }
-
-    /// <summary>How close the playhead has to be to a key point to count as on it: within half a frame</summary>
-    double Near => Grid > 0 ? Grid / 2 : 0.02;
-    int OnKey { get { for (var i = 0; i < Keys.Count; i++) if (Math.Abs(Keys[i] - Current) <= Near) return i; return -1; } }
-
-    public void DeleteSelected()
+    public override void DeleteSelected()
     {
         if (Selection.Count == 0) return;
         dragKey = -1;
@@ -1595,17 +1618,6 @@ sealed class KeyLane : Control
         RemoveRequested?.Invoke(gone);
     }
 
-    int rowHeight = 56;
-    /// <summary>Height in 96-dpi pixels; every keyframable track shares it</summary>
-    public int RowHeight { get => rowHeight; set { rowHeight = value; Fit(); } }
-
-    protected override void OnMouseWheel(MouseEventArgs e)
-    {
-        if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift)) HeightRequested?.Invoke(Math.Sign(e.Delta));
-        else if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) ZoomRequested?.Invoke(e.Delta > 0 ? 0.75 : 1 / 0.75, T(e.X));
-        else { base.OnMouseWheel(e); return; } // on to the box, which scrolls
-        if (e is HandledMouseEventArgs h) h.Handled = true;
-    }
     /// <summary>A point wanted at this time</summary>
     public event Action<double>? AddRequested;
     public event Action<int[]>? RemoveRequested;
@@ -1614,29 +1626,8 @@ sealed class KeyLane : Control
     public event Action<IReadOnlySet<int>, double>? ShiftRequested;
 
     int dragKey = -1;
-    bool moved;
-
-    public KeyLane()
-    {
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        SetStyle(ControlStyles.Selectable, false);
-    }
-
-    int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
-    void Fit() => Height = Px(rowHeight);
-    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
-    protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
-    protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
 
     Rectangle AddButton => Tracks.Button(this, 0, 1);
-    int G => Px(Tracks.Gutter);
-    int BodyW => Math.Max(1, Width - G);
-    /// <summary>The part of the video on screen (the timeline's zoom). End at or before start = all of it.</summary>
-    public double ViewStart, ViewEnd;
-    double From => ViewEnd > ViewStart ? ViewStart : 0;
-    double Span => ViewEnd > ViewStart ? ViewEnd - ViewStart : Duration;
-    float X(double t) => G + (float)((t - From) / Span * BodyW);
-    double T(int x) => Math.Clamp(From + (x - G) / (double)BodyW * Span, 0, Duration);
     float Y(double level) => Height - Px(9) - (float)(Math.Clamp(level, 0, 1) * (Height - Px(18)));
     double Level(int i) => i < Levels.Count ? Levels[i] : 0;
 
@@ -1659,33 +1650,16 @@ sealed class KeyLane : Control
         }
         if (e.X < G) return;
         var k = HitKey(e.X);
-        if (e.Button == MouseButtons.Right)
-        {
-            // A point that's part of the selection keeps it, so the menu's ease goes to all of them
-            if (k >= 0 && !Selection.Contains(k)) Select(k);
-            MenuRequested?.Invoke(e.Location);
-        }
+        if (e.Button == MouseButtons.Right) ShowMenu(k, e.Location);
         else if (e.Button == MouseButtons.Left && k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) AddRequested?.Invoke(OnFrame(T(e.X)));
         else if (e.Button == MouseButtons.Left)
         {
-            // Shift+click adds a point to the selection (or, without a drag, takes it away again);
-            // a plain click on a selected point keeps the selection so they can all be dragged
             shiftClick = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift);
-            toggleOff = -1;
-            if (k >= 0 && shiftClick)
-            {
-                if (Selection.Contains(k)) toggleOff = k;
-                else { Selection.Add(k); Invalidate(); KeySelected?.Invoke(); }
-            }
-            else if (k < 0) { if (!shiftClick) Select(-1); }
-            else if (!Selection.Contains(k)) Select(k);
+            PressSelect(k, shiftClick);
             dragKey = k;
             grabX = e.X;
-            moved = false;
         }
     }
-
-    int grabX;
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
@@ -1757,11 +1731,7 @@ sealed class KeyLane : Control
         g.ResetClip();
 
         KeyButton.Draw(g, AddButton, Enabled, OnKey >= 0);
-        var name = Label;
-        var badge = new Rectangle(G + Px(5), Px(4), Px(10) + TextRenderer.MeasureText(name, SmallFont, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
-        using (var back = Theme.Round(badge, Px(4)))
-        using (var fill = new SolidBrush(Color.FromArgb(215, Theme.Bg2))) g.FillPath(fill, back);
-        TextRenderer.DrawText(g, name, SmallFont, new Rectangle(badge.X + Px(5), badge.Y, badge.Width, badge.Height), Theme.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        DrawBadge(g, Label, Theme.Text);
     }
 }
 

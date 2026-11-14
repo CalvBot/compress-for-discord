@@ -68,7 +68,7 @@ sealed class MainForm : DarkForm
     /// <summary>Height of every keyframable track, in 96-dpi pixels (Shift + wheel over a track changes it)</summary>
     int trackH = 56;
     /// <summary>The track the mouse is over: the arrow keys then jump between its key points</summary>
-    Control? hoverTrack;
+    KeyTrackLane? hoverTrack;
     /// <summary>Height of the track box while Advanced is open; the grip under it changes it</summary>
     int tracksHeight, grabHeight;
     readonly ZoomBar zoomBar;
@@ -500,7 +500,7 @@ sealed class MainForm : DarkForm
         (masterLane.Duration, masterLane.End) = (probe.Duration, probe.Duration);
         LayoutLanes();
         ShowTracks();
-        _ = LoadPeaks();
+        LoadPeaks();
 
         UpdateTimeLabel();
         UpdateSummary();
@@ -1034,18 +1034,9 @@ sealed class MainForm : DarkForm
     /// <summary>The master lane's waveform: the loudest unmuted track at each moment, at its volume</summary>
     void UpdateMasterPeaks()
     {
-        var live = trackUi.Where(t => t.Lane.Active && t.Lane.Peaks != null).Select(t => t.Lane).ToList();
-        if (live.Count == 0) masterLane.Peaks = null;
-        else
-        {
-            var mix = new float[live[0].Peaks!.Length];
-            for (var i = 0; i < mix.Length; i++)
-            {
-                var t = (i + 0.5) / mix.Length * timeline.Duration;
-                mix[i] = live.Max(l => i < l.Peaks!.Length ? (float)(l.Peaks[i] * l.GainAt(t)) : 0);
-            }
-            masterLane.Peaks = mix;
-        }
+        // A new list each time: the lane redraws when it's handed a different one
+        masterLane.Sources = [.. trackUi.Where(t => t.Lane.Active && t.Lane.Sources.Count > 0)
+            .Select(t => (t.Lane.Sources[0].Wave, (Func<double, double>?)t.Lane.GainAt))];
         masterLane.Invalidate();
     }
 
@@ -1195,37 +1186,18 @@ sealed class MainForm : DarkForm
     }
 
     /// <summary>What every keyframable track shares: its right-click menu, the wheel shortcuts, and knowing the mouse is over it</summary>
-    void HookTrack(Control track)
+    void HookTrack(KeyTrackLane track)
     {
         track.MouseEnter += (_, _) => hoverTrack = track;
         track.MouseLeave += (_, _) => { if (hoverTrack == track) hoverTrack = null; };
-        void Taller(int by) => SetTrackHeight(trackH + by * 14);
-        // One selected key point at a time, across all the tracks
-        void LetGoOthers()
-        {
-            foreach (var other in AllTracks.Where(t => t != track))
-            {
-                if (other is VolumeLane a) a.Select(-1);
-                else if (other is KeyLane b) b.Select(-1);
-            }
-        }
-        if (track is VolumeLane v)
-        {
-            v.KeySelected += LetGoOthers;
-            v.HeightRequested += Taller;
-            v.ZoomRequested += ZoomBy;
-            v.MenuRequested += at => ShowTrackMenu(track, at);
-        }
-        else if (track is KeyLane k)
-        {
-            k.KeySelected += LetGoOthers;
-            k.HeightRequested += Taller;
-            k.ZoomRequested += ZoomBy;
-            k.MenuRequested += at => ShowTrackMenu(track, at);
-        }
+        // One track's selected key points at a time
+        track.KeySelected += () => { foreach (var other in AllTracks.Where(t => t != track)) other.Select(-1); };
+        track.HeightRequested += by => SetTrackHeight(trackH + by * 14);
+        track.ZoomRequested += ZoomBy;
+        track.MenuRequested += at => ShowTrackMenu(track, at);
     }
 
-    void ShowTrackMenu(Control track, Point at)
+    void ShowTrackMenu(KeyTrackLane track, Point at)
     {
         if (probe == null || encodeCts != null) return;
         trackMenu.Items.Clear();
@@ -1249,7 +1221,7 @@ sealed class MainForm : DarkForm
     }
 
     /// <summary>Sets how the value moves next to a point; when it's one of several selected, next to all of them</summary>
-    void SetEase(Control track, int index, Ease ease)
+    void SetEase(KeyTrackLane track, int index, Ease ease)
     {
         if (track is VolumeLane v)
         {
@@ -1269,7 +1241,7 @@ sealed class MainForm : DarkForm
     /// <summary>Copied key points, timed from the first: audio levels, or position and/or scale</summary>
     sealed record KeyClip(bool Audio, List<(double Dt, double V, (double X, double Y)? P, double? S, Ease E)> Points);
     KeyClip? keyClip;
-    Control? clipFrom;
+    KeyTrackLane? clipFrom;
 
     /// <summary>Ctrl+C: the selected key points, on whichever track they are. False if none are selected.</summary>
     bool CopyKeys()
@@ -1311,7 +1283,7 @@ sealed class MainForm : DarkForm
     bool PasteKeys()
     {
         if (keyClip is not { } clip || probe == null) return false;
-        bool Takes(Control? t) => t is { Visible: true } && (clip.Audio
+        bool Takes(KeyTrackLane? t) => t is { Visible: true } && (clip.Audio
             ? t is VolumeLane
             : t == keyLane || (t == posLane && clip.Points.Any(p => p.P != null)) || (t == scaleLane && clip.Points.Any(p => p.S != null)));
         var target = Takes(hoverTrack) ? hoverTrack : Takes(clipFrom) ? clipFrom : !clip.Audio && Takes(keyLane) ? keyLane : null;
@@ -1339,7 +1311,7 @@ sealed class MainForm : DarkForm
     }
 
     /// <summary>Back to no key points. For audio that's a level volume line; for position and scale, the whole frame.</summary>
-    void ClearKeys(Control track)
+    void ClearKeys(KeyTrackLane track)
     {
         if (track is VolumeLane v) { v.ClearKeys(); return; }
         if (track != scaleLane) pos.Reset((0.5, 0.5));
@@ -1352,22 +1324,17 @@ sealed class MainForm : DarkForm
     KeyLane[] KeyLanes => [keyLane, posLane, scaleLane];
     /// <summary>Every audio track's lane, then the result audio's</summary>
     IEnumerable<VolumeLane> AudioLanes => trackUi.Select(t => t.Lane).Append(masterLane);
-    IEnumerable<Control> AllTracks => new Control[] { keyLane, posLane, scaleLane, masterLane }.Concat(trackUi.Select(t => t.Lane));
+    IEnumerable<KeyTrackLane> AllTracks => new KeyTrackLane[] { keyLane, posLane, scaleLane, masterLane }.Concat(trackUi.Select(t => t.Lane));
     /// <summary>The tracks on screen: Del and Ctrl+C never act on a hidden one's leftover selection</summary>
-    IEnumerable<Control> ShownTracks => AllTracks.Where(t => t.Visible);
+    IEnumerable<KeyTrackLane> ShownTracks => AllTracks.Where(t => t.Visible);
 
     /// <summary>Del: removes the selected key point, whichever track it's on. False if none is selected.</summary>
     bool DeleteSelectedKey()
     {
-        foreach (var track in ShownTracks)
-        {
-            if (track is VolumeLane { SelectedKey: >= 0 } a) { a.DeleteSelected(); return true; }
-            if (track is KeyLane { SelectedKey: >= 0 } b) { b.DeleteSelected(); return true; }
-        }
-        return false;
+        if (ShownTracks.FirstOrDefault(t => t.SelectedKey >= 0) is not { } track) return false;
+        track.DeleteSelected();
+        return true;
     }
-
-    IEnumerable<double> KeyTimesOf(Control track) => track is VolumeLane v ? v.KeyTimes : track is KeyLane k ? k.KeyTimes : [];
 
     void SetTrackHeight(int height)
     {
@@ -1450,24 +1417,46 @@ sealed class MainForm : DarkForm
         return total;
     }
 
-    /// <summary>Measures each track for its waveform and marks the silent ones</summary>
-    async Task LoadPeaks()
+    /// <summary>
+    /// Measures every track's waveform at once, in the background, the part on screen first. A timer redraws the
+    /// lanes as chunks come in and marks the silent tracks once a track is done.
+    /// </summary>
+    void LoadPeaks()
     {
         foreach (var (track, lane) in trackUi)
         {
-            float[]? peaks;
-            // 100 slices a second (10 ms), so the waveform still has detail zoomed right in
-            var slices = (int)Math.Clamp(timeline.Duration * 100, 1200, 400_000);
+            var wave = new Waveform(timeline.Duration);
+            lane.Sources = [(wave, null)];
+            var path = file;
             // One track that can't be decoded mustn't cost the others their waveforms
-            try { peaks = await Ff.Peaks(file, track.Index, slices, lifetime.Token); }
-            catch when (!lifetime.IsCancellationRequested) { continue; }
-            catch { return; }
-            if (IsDisposed) return;
-            lane.Peaks = peaks;
-            lane.Silent = peaks != null && peaks.Max() < 0.01f;
-            lane.Invalidate();
-            UpdateMasterPeaks();
+            _ = Task.Run(async () =>
+            {
+                try { await wave.Load(path, track.Index, () => (viewStart, viewEnd), lifetime.Token); }
+                catch (OperationCanceledException) { }
+                catch (Exception ex) { AppLog.Error($"Waveform of audio track {track.Index + 1}", ex); }
+            });
         }
+        UpdateMasterPeaks();
+        if (trackUi.Count == 0) return;
+        var seen = -1;
+        var timer = new System.Windows.Forms.Timer { Interval = 100 };
+        timer.Tick += (_, _) =>
+        {
+            var lanes = trackUi.Select(t => t.Lane).ToList();
+            var version = lanes.Sum(l => l.Sources[0].Wave.Version);
+            if (version == seen) return;
+            seen = version;
+            foreach (var lane in lanes)
+            {
+                var wave = lane.Sources[0].Wave;
+                lane.Silent = wave.Complete && !wave.Failed && wave.Loudest < 0.01f;
+                lane.Invalidate();
+            }
+            masterLane.Invalidate();
+            if (lanes.All(l => l.Sources[0].Wave.Complete)) timer.Dispose();
+        };
+        timer.Start();
+        Disposed += (_, _) => timer.Dispose();
     }
 
     /// <summary>Overall volume from the master lane, applied after the tracks are mixed</summary>
@@ -2033,7 +2022,7 @@ sealed class MainForm : DarkForm
         {
             case Keys.Space: TogglePlay(); break;
             // Over a track with key points, the arrows go from one to the next
-            case Keys.Left or Keys.Right when mods == Keys.None && hoverTrack is { Visible: true } && KeyTimesOf(hoverTrack).ToList() is { Count: > 0 } times:
+            case Keys.Left or Keys.Right when mods == Keys.None && hoverTrack is { Visible: true } && hoverTrack.KeyTimes.ToList() is { Count: > 0 } times:
                 var back = key == Keys.Left;
                 var to = back ? times.Where(t => t < timeline.Current - near).Select(t => (double?)t).LastOrDefault() : times.Where(t => t > timeline.Current + near).Select(t => (double?)t).FirstOrDefault();
                 if (to is { } there) timeline.Seek(there);

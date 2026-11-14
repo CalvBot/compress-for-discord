@@ -202,6 +202,9 @@ static class Ff
         return 0;
     }
 
+    /// <summary>Longest source the app opens. Long recordings (a whole evening) are fine to clip from; past this, something's off.</summary>
+    public const int MaxHours = 10;
+
     public static async Task<ProbeResult> Probe(string path)
     {
         var (code, stdout, _) = await Run(Ffprobe, ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", path]);
@@ -237,6 +240,7 @@ static class Ff
         // A still image, or a file whose length isn't stored (some browser recordings): nothing sensible to compress
         if (!(duration > 0)) throw new Exception("Couldn't tell how long this video is. Try remuxing it first, or it may be an image.");
         if (w <= 0 || h <= 0) throw new Exception("Couldn't read this video's picture size.");
+        if (duration > MaxHours * 3600) throw new Exception($"This video is over {MaxHours} hours long. Cut it into shorter parts first.");
         return new ProbeResult(duration, swap ? h : w, swap ? w : h, fps, (long)Num(root["format"]?["bit_rate"]), (long)Num(v["bit_rate"]), Str(v["codec_name"]), audio);
     }
 
@@ -274,24 +278,6 @@ static class Ff
                 if (img != null) onFrame(i, img);
             }
         })));
-    }
-
-    // ---------- waveforms ----------
-
-    /// <summary>Loudest sample (0..1) in each of `buckets` equal slices of an audio track, for drawing its waveform</summary>
-    public static async Task<float[]?> Peaks(string path, int track, int buckets, CancellationToken ct)
-    {
-        var (code, pcm, _) = await Run(Ffmpeg, ["-hide_banner", "-loglevel", "error", "-i", path, "-map", $"0:a:{track}", "-ac", "1", "-ar", "4000", "-f", "s16le", "-"], ct).ConfigureAwait(false);
-        var n = pcm.Length / 2;
-        if (code != 0 || n == 0) return null;
-        var peaks = new float[buckets];
-        for (var i = 0; i < n; i++)
-        {
-            var v = Math.Abs((float)BitConverter.ToInt16(pcm, i * 2)) / 32768f;
-            var b = (int)((long)i * buckets / n);
-            if (v > peaks[b]) peaks[b] = v;
-        }
-        return peaks;
     }
 
     /// <summary>
