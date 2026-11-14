@@ -15,8 +15,11 @@ sealed record AudioTrack(int Index, string Codec, int Channels, string Layout, s
 sealed record ProbeResult(double Duration, int Width, int Height, double Fps, long Bitrate, long VideoBitrate, string VideoCodec, List<AudioTrack> AudioTracks);
 
 /// <param name="Volume">1 = unchanged; used when there are no Keys</param>
-/// <param name="Keys">volume points in source time, in order; the volume moves in straight lines between them</param>
-sealed record TrackMix(int Index, double Volume, List<(double T, double V)>? Keys = null);
+/// <param name="Keys">volume points in source time, in order; the volume moves between them the way each point's Ease says</param>
+sealed record TrackMix(int Index, double Volume, List<(double T, double V, Ease E)>? Keys = null);
+
+/// <summary>The picture's path in source pixels: its centre across, its centre down and its width, each with its own key points</summary>
+sealed record CropPath(List<(double T, double V, Ease E)> X, List<(double T, double V, Ease E)> Y, List<(double T, double V, Ease E)> W);
 
 sealed class EncodeRequest
 {
@@ -32,8 +35,8 @@ sealed class EncodeRequest
     public TrackMix? Master;
     public bool CappedBySource;
     public double Calibration;
-    /// <summary>Crop box in source pixels (left, top, width) at each key time; null = whole frame. Every box has the shape CropW:CropH.</summary>
-    public List<(double T, double X, double Y, double W)>? Crop;
+    /// <summary>Where the picture is over time; null = whole frame. The box always has the shape CropW:CropH.</summary>
+    public CropPath? Crop;
     /// <summary>Size of the smallest crop box. The output is this (times the scale), so nothing is ever enlarged.</summary>
     public int CropW, CropH;
     /// <summary>Size of the source frame, to tell when the box hangs off it</summary>
@@ -270,18 +273,19 @@ static class Ff
     }
 
     /// <summary>
-    /// ffmpeg expression for a value that moves in straight lines between points over time (and holds before the
-    /// first and after the last). Seeking with -ss restarts the filter clock at 0, so the offset is added back
-    /// to get source time.
+    /// ffmpeg expression for a value that moves between points over time, each stretch curved the way its points'
+    /// Ease says (and holds before the first and after the last). Seeking with -ss restarts the filter clock at 0,
+    /// so the offset is added back to get source time.
     /// </summary>
-    static string Ramp(IReadOnlyList<(double T, double V)> k, double offset)
+    static string Ramp(IReadOnlyList<(double T, double V, Ease E)> k, double offset)
     {
         var time = $"(t+{F3(offset)})";
         var expr = F3(k[^1].V);
         for (var i = k.Count - 1; i >= 1; i--)
         {
             var (a, b) = (k[i - 1], k[i]);
-            var ramp = b.T - a.T < 0.001 ? F3(b.V) : $"{F3(a.V)}+({F3(b.V - a.V)})*({time}-{F3(a.T)})/{F3(b.T - a.T)}";
+            var curve = Interp.CurveExpr(a.E, b.E, $"(({time}-{F3(a.T)})/{F3(b.T - a.T)})");
+            var ramp = b.T - a.T < 0.001 ? F3(b.V) : curve == null ? F3(a.V) : $"{F3(a.V)}+({F3(b.V - a.V)})*({curve})";
             expr = $"if(lt({time},{F3(b.T)}),{ramp},{expr})";
         }
         return $"if(lt({time},{F3(k[0].T)}),{F3(k[0].V)},{expr})";
@@ -299,29 +303,45 @@ static class Ff
     static IEnumerable<string> CropFilters(EncodeRequest o)
     {
         var c = o.Crop!;
-        // The box may hang off the frame. Pad the frame with black by as far as it ever does, and shift the box to match.
+        double Tall(double w) => w * o.CropH / o.CropW;
+        // The box (left, top, width) at a time
+        (double X, double Y, double W) Box(double t)
+        {
+            var w = Interp.At(c.W, t);
+            return (Interp.At(c.X, t) - w / 2, Interp.At(c.Y, t) - Tall(w) / 2, w);
+        }
+        var times = c.X.Concat(c.Y).Concat(c.W).Select(k => k.T).ToList();
+        double first = times.Min(), last = times.Max();
+        // The box may hang off the frame. Pad the frame with black by as far as it ever does, and shift the box to
+        // match. Eased stretches can reach a little past the key points' boxes, so look in between them too.
+        var boxes = times.Concat(Enumerable.Range(0, 401).Select(i => first + (last - first) * i / 400)).Select(Box).ToList();
+        double left = 0, top = 0;
         if (o.SrcW > 0 && o.SrcH > 0)
         {
             static int Even(double v) => (int)Math.Ceiling(Math.Max(0, v) / 2) * 2;
-            double Height(double w) => w * o.CropH / o.CropW;
-            int left = Even(-c.Min(k => k.X)), top = Even(-c.Min(k => k.Y));
-            int right = Even(c.Max(k => k.X + k.W) - o.SrcW), bottom = Even(c.Max(k => k.Y + Height(k.W)) - o.SrcH);
-            if (left + top + right + bottom > 0)
+            int l = Even(-boxes.Min(b => b.X)), t = Even(-boxes.Min(b => b.Y));
+            int r = Even(boxes.Max(b => b.X + b.W) - o.SrcW), btm = Even(boxes.Max(b => b.Y + Tall(b.W)) - o.SrcH);
+            if (l + t + r + btm > 0)
             {
-                yield return $"pad={o.SrcW + left + right}:{o.SrcH + top + bottom}:{left}:{top}:black";
-                c = c.Select(k => (k.T, k.X + left, k.Y + top, k.W)).ToList();
+                yield return $"pad={o.SrcW + l + r}:{o.SrcH + t + btm}:{l}:{t}:black";
+                (left, top) = (l, t);
             }
         }
         // Output size: the smallest box, times the chosen scale, kept even for H.264
         var f = o.ScaleShortSide is { } s ? s / (double)Math.Min(o.CropW, o.CropH) : 1;
         int outW = Math.Max(2, (int)Math.Round(o.CropW * f) & ~1), outH = Math.Max(2, (int)Math.Round(o.CropH * f) & ~1);
-        if (c.All(k => Math.Abs(k.X - c[0].X) < 0.5 && Math.Abs(k.Y - c[0].Y) < 0.5 && Math.Abs(k.W - c[0].W) < 0.5))
+        static bool Still(List<(double T, double V, Ease E)> k) => k.All(p => Math.Abs(p.V - k[0].V) < 0.5);
+        if (Still(c.X) && Still(c.Y) && Still(c.W))
         {
-            yield return $"crop={o.CropW}:{o.CropH}:{(int)c[0].X}:{(int)c[0].Y}";
+            var b = Box(first);
+            yield return $"crop={o.CropW}:{o.CropH}:{(int)(b.X + left)}:{(int)(b.Y + top)}";
             if (f != 1) yield return $"scale={outW}:{outH}";
             yield break;
         }
-        string w = Ramp(c.Select(k => (k.T, k.W)).ToList(), o.Start), x = Ramp(c.Select(k => (k.T, k.X)).ToList(), o.Start), y = Ramp(c.Select(k => (k.T, k.Y)).ToList(), o.Start);
+        static List<(double T, double V, Ease E)> Shift(List<(double T, double V, Ease E)> k, double by) => k.Select(p => (p.T, p.V + by, p.E)).ToList();
+        var w = Ramp(c.W, o.Start);
+        var x = $"({Ramp(Shift(c.X, left), o.Start)})-({w})/2";
+        var y = $"({Ramp(Shift(c.Y, top), o.Start)})-({w})*{o.CropH}/{o.CropW}/2";
         // Rounded up to even so the scaled frame is never a pixel smaller than the crop taken from it
         yield return $"scale=w='ceil(iw*{outW}/({w})/2)*2':h='ceil(ih*{outW}/({w})/2)*2':eval=frame";
         yield return $"crop={outW}:{outH}:x='({x})*{outW}/({w})':y='({y})*{outW}/({w})'";
@@ -373,7 +393,7 @@ static class Ff
         var passlog = Path.Combine(Paths.Work, $"{id}-pass");
 
         var vf = new List<string>();
-        if (o.Crop is { Count: > 0 }) vf.AddRange(CropFilters(o));
+        if (o.Crop != null) vf.AddRange(CropFilters(o));
         else if (o.ScaleShortSide is { } s) vf.Add(o.Portrait ? $"scale={s}:-2" : $"scale=-2:{s}");
         if (o.Fps is { } f) vf.Add($"fps={f}");
         vf.Add("format=yuv420p");

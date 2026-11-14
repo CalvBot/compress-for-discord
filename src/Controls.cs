@@ -267,6 +267,14 @@ sealed class DarkMenu : ContextMenuStrip
         protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
         {
             var shortcut = e.Text != e.Item.Text;
+            if (!shortcut && e.Item.Tag is Ease ease)
+            {
+                var dpi = e.Item.Owner!.DeviceDpi / 96f;
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                using var icon = KeyIcon.Shape(ease, e.TextRectangle.X + 8 * dpi, e.Item.Height / 2f, 5.5f * dpi);
+                using var ink = new SolidBrush(e.Item.Selected ? Color.White : Theme.Brand);
+                e.Graphics.FillPath(ink, icon);
+            }
             var r = new Rectangle(e.TextRectangle.X, 0, e.TextRectangle.Width, e.Item.Height);
             TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, r, e.Item.Selected ? Color.White : shortcut ? Theme.Muted : Theme.Text,
                 TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | (shortcut ? TextFormatFlags.Right : TextFormatFlags.Left));
@@ -372,7 +380,13 @@ sealed class Timeline : Control
     /// <summary>Mouse wheel: scroll by this fraction of what's on screen</summary>
     public event Action<double>? PanRequested;
 
-    /// <summary>Empty strip at the left, so the timeline lines up with the tracks below and their buttons</summary>
+    /// <summary>The playhead (and the start and end) only stop on frames of the chosen frame rate. The button at the left toggles it.</summary>
+    public bool FrameLock = true;
+    public event Action? FrameLockToggled;
+    Rectangle LockButton { get { var size = Px(24); return new Rectangle(0, TabH + (Height - TabH - size) / 2, size, size); } }
+    double Snap(double t) => FrameLock && Grid > 0 ? Math.Clamp(Math.Round(t / Grid) * Grid, 0, Duration) : t;
+
+    /// <summary>Strip at the left, so the timeline lines up with the tracks below and their buttons. It holds the frame lock button.</summary>
     int G => Px(Tracks.Gutter);
     float X(double t) => G + (float)((t - From) / Span * (Width - G));
     double T(int x) => Math.Clamp(From + (x - G) / (double)Math.Max(1, Width - G) * Span, 0, Duration);
@@ -412,13 +426,13 @@ sealed class Timeline : Control
 
     public void Seek(double t)
     {
-        Current = Math.Clamp(t, 0, Duration);
+        Current = Math.Clamp(Snap(t), 0, Duration);
         Invalidate();
         Seeked?.Invoke(Current);
     }
 
-    public void SetStart(double t) => SetRange(Math.Min(Math.Clamp(t, 0, Duration), End - MinClip), End);
-    public void SetEnd(double t) => SetRange(Start, Math.Max(Math.Clamp(t, 0, Duration), Start + MinClip));
+    public void SetStart(double t) => SetRange(Math.Min(Math.Clamp(Snap(t), 0, Duration), End - MinClip), End);
+    public void SetEnd(double t) => SetRange(Start, Math.Max(Math.Clamp(Snap(t), 0, Duration), Start + MinClip));
 
     DragKind HitTest(Point p)
     {
@@ -436,6 +450,14 @@ sealed class Timeline : Control
     {
         base.OnMouseDown(e);
         if (!Enabled || e.Button != MouseButtons.Left) return;
+        if (e.X < G)
+        {
+            if (!LockButton.Contains(e.Location)) return;
+            FrameLock = !FrameLock;
+            Invalidate();
+            FrameLockToggled?.Invoke();
+            return;
+        }
         Focus();
         var t = T(e.X);
         drag = HitTest(e.Location);
@@ -448,6 +470,7 @@ sealed class Timeline : Control
         base.OnMouseMove(e);
         if (drag == DragKind.None)
         {
+            if (e.X < G) { Cursor = LockButton.Contains(e.Location) ? Cursors.Hand : Cursors.Default; return; }
             Cursor = HitTest(e.Location) switch { DragKind.Start or DragKind.End => Cursors.SizeWE, DragKind.Range => Cursors.SizeAll, DragKind.Seek => Cursors.Hand, _ => Cursors.Default };
             return;
         }
@@ -461,7 +484,7 @@ sealed class Timeline : Control
             case DragKind.Start: SetStart(t); Seek(Start); break;
             case DragKind.End: SetEnd(t); Seek(End); break;
             case DragKind.Range:
-                var s = Math.Clamp(t - grabOffset, 0, Duration - length);
+                var s = Math.Clamp(Snap(t - grabOffset), 0, Duration - length);
                 SetRange(s, s + length);
                 Seek(s);
                 break;
@@ -472,7 +495,7 @@ sealed class Timeline : Control
     protected override void OnMouseDoubleClick(MouseEventArgs e)
     {
         base.OnMouseDoubleClick(e);
-        if (Enabled && e.Button == MouseButtons.Left && HitTest(e.Location) == DragKind.Seek) PlayRequested?.Invoke(T(e.X));
+        if (Enabled && e.Button == MouseButtons.Left && e.X >= G && HitTest(e.Location) == DragKind.Seek) PlayRequested?.Invoke(Snap(T(e.X)));
     }
 
     double SnapToPlayhead(double t, int x) => Math.Abs(x - X(Current)) <= Px(7) ? Current : t;
@@ -495,7 +518,7 @@ sealed class Timeline : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        var key = HashCode.Combine(HashCode.Combine(From, Span, Start, End, Enabled, Focused, Grid), ThumbStart, ThumbSpan, stripVersion, Thumbs);
+        var key = HashCode.Combine(HashCode.Combine(From, Span, Start, End, Enabled, Focused, Grid), ThumbStart, ThumbSpan, stripVersion, Thumbs, FrameLock);
         if (strip == null || strip.Width != Width || strip.Height != Height || key != stripKey)
         {
             strip?.Dispose();
@@ -576,6 +599,21 @@ sealed class Timeline : Control
         if (Focused)
             using (var focus = new Pen(Color.FromArgb(120, Theme.Brand), 2))
                 g.DrawRectangle(focus, left + 1, top + 1, bodyW - 2, bodyH - 2);
+
+        // Frame lock button: a playhead between two frame marks, lit up while it's on
+        g.ResetClip();
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var lb = LockButton;
+        using (var back = Theme.Round(lb, lb.Height / 4f))
+        using (var fill = new SolidBrush(FrameLock ? Theme.Brand : Theme.Bg3)) g.FillPath(fill, back);
+        float cx = lb.X + lb.Width / 2f, cy = lb.Y + lb.Height / 2f, u = lb.Height / 24f;
+        var ink = FrameLock ? Color.White : Enabled ? Theme.Text : Theme.Muted;
+        using (var tick = new Pen(Color.FromArgb(FrameLock ? 200 : 150, ink), Math.Max(1f, 1.5f * u)))
+            foreach (var dx in new[] { -6.5f, 6.5f }) g.DrawLine(tick, cx + dx * u, cy - 4 * u, cx + dx * u, cy + 6 * u);
+        using (var head = new Pen(ink, Math.Max(1.5f, 2 * u))) g.DrawLine(head, cx, cy - 3 * u, cx, cy + 7 * u);
+        using (var cap = new SolidBrush(ink))
+            g.FillPolygon(cap, [new PointF(cx - 3.5f * u, cy - 7 * u), new PointF(cx + 3.5f * u, cy - 7 * u), new PointF(cx, cy - 2.5f * u)]);
+        g.SmoothingMode = SmoothingMode.None;
     }
 }
 
@@ -656,7 +694,16 @@ sealed class VolumeLane : Control
     /// <summary>Volume while there are no points: 1 = unchanged, 0 = silent, 2 = double</summary>
     public double Volume = 1;
     /// <summary>Volume points in time order; empty = the same volume throughout</summary>
-    public readonly List<(double T, double V)> Keys = [];
+    public readonly List<(double T, double V, Ease E)> Keys = [];
+
+    /// <summary>Changes how the volume moves next to a point</summary>
+    public void SetEase(int i, Ease ease)
+    {
+        if (i < 0 || i >= Keys.Count) return;
+        Keys[i] = (Keys[i].T, Keys[i].V, ease);
+        Invalidate();
+        Committed?.Invoke();
+    }
     /// <summary>The volume changed and the mouse was let go</summary>
     public event Action? Committed;
     /// <summary>Right-clicked somewhere that isn't a point</summary>
@@ -722,7 +769,7 @@ sealed class VolumeLane : Control
         var h = new HashCode();
         foreach (var v in new[] { From, Span, Start, End, Volume, Grid, Duration }) h.Add(v);
         h.Add(Active); h.Add(Silent); h.Add(Enabled); h.Add(dragKey); h.Add(SelectedKey); h.Add(OnKey >= 0); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Peaks);
-        foreach (var k in Keys) { h.Add(k.T); h.Add(k.V); }
+        foreach (var k in Keys) { h.Add(k.T); h.Add(k.V); h.Add(k.E); }
         return h.ToHashCode();
     }
 
@@ -764,15 +811,7 @@ sealed class VolumeLane : Control
 
     public double GainAt(double t)
     {
-        if (Keys.Count == 0) return Volume;
-        if (t <= Keys[0].T) return Keys[0].V;
-        for (var i = 1; i < Keys.Count; i++)
-            if (t < Keys[i].T)
-            {
-                var (a, b) = (Keys[i - 1], Keys[i]);
-                return a.V + (b.V - a.V) * (t - a.T) / Math.Max(0.001, b.T - a.T);
-            }
-        return Keys[^1].V;
+        return Keys.Count == 0 ? Volume : Interp.At(Keys, t);
     }
 
     int HitKey(Point p)
@@ -828,7 +867,7 @@ sealed class VolumeLane : Control
         if (near >= 0) return near;
         var after = Keys.FindIndex(k => k.T > t);
         var at = after < 0 ? Keys.Count : after;
-        Keys.Insert(at, (t, GainAt(t)));
+        Keys.Insert(at, (t, GainAt(t), Ease.Linear));
         Invalidate();
         return at;
     }
@@ -891,14 +930,14 @@ sealed class VolumeLane : Control
             // A point can sit between frames (after the frame rate was lowered, say) and stays there while only its
             // value is dragged. Once it's moved sideways it lands on a frame.
             var t = Math.Abs(e.X - grabX) <= Px(3) ? grabT : OnFrame(T(e.X));
-            Keys[dragKey] = (Math.Clamp(t, lo, Math.Max(lo, hi)), ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift) ? Keys[dragKey].V : V(e.Y));
+            Keys[dragKey] = (Math.Clamp(t, lo, Math.Max(lo, hi)), ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift) ? Keys[dragKey].V : V(e.Y), Keys[dragKey].E);
             Invalidate();
         }
         else if (dragStretch >= 0)
         {
             var v = Snap(grabVolume + (grabY - e.Y) / (double)Math.Max(1, Height - 2 * Pad) * 2);
-            Keys[dragStretch] = (Keys[dragStretch].T, v);
-            Keys[dragStretch + 1] = (Keys[dragStretch + 1].T, v);
+            Keys[dragStretch] = (Keys[dragStretch].T, v, Keys[dragStretch].E);
+            Keys[dragStretch + 1] = (Keys[dragStretch + 1].T, v, Keys[dragStretch + 1].E);
             Invalidate();
         }
         else if (dragFlat)
@@ -963,15 +1002,18 @@ sealed class VolumeLane : Control
 
         // Volume line and its points
         var line = Color.FromArgb(Active ? 235 : 110, Color.White);
-        var pts = new List<PointF> { new(X(0), Y(GainAt(0))) };
-        pts.AddRange(Keys.Select(k => new PointF(X(k.T), Y(k.V))));
-        pts.Add(new PointF(X(Duration), Y(GainAt(Duration))));
-        using (var pen = new Pen(line, 1.5f)) g.DrawLines(pen, pts.ToArray());
+        // Traced a pixel at a time so eased stretches curve
+        var pts = new PointF[BodyW + 1];
+        for (var x = 0; x <= BodyW; x++) pts[x] = new PointF(G + x, Y(GainAt(From + x / (double)BodyW * Span)));
+        using (var pen = new Pen(line, 1.5f)) g.DrawLines(pen, pts);
+        // Each point's shape says how the volume moves next to it
         using (var dot = new SolidBrush(line))
-            foreach (var k in Keys) g.FillEllipse(dot, X(k.T) - Px(4), Y(k.V) - Px(4), Px(8), Px(8));
+            foreach (var k in Keys)
+                using (var icon = KeyIcon.Shape(k.E, X(k.T), Y(k.V), Px(5))) g.FillPath(dot, icon);
         if (SelectedKey >= 0 && SelectedKey < Keys.Count)
             using (var ring = new Pen(Theme.Warn, Math.Max(1.5f, Px(2))))
-                g.DrawEllipse(ring, X(Keys[SelectedKey].T) - Px(6), Y(Keys[SelectedKey].V) - Px(6), Px(12), Px(12));
+            using (var around = KeyIcon.Shape(Keys[SelectedKey].E, X(Keys[SelectedKey].T), Y(Keys[SelectedKey].V), Px(8)))
+                g.DrawPath(ring, around);
 
         g.ResetClip();
 
@@ -1265,6 +1307,46 @@ static class Tracks
 }
 
 /// <summary>
+/// The shape of a key point, which says how the value moves next to it: a diamond for linear, a circle for
+/// smooth, half round on the slowed side for ease in (arriving, the left) or ease out (leaving, the right), and
+/// a square for hold.
+/// </summary>
+static class KeyIcon
+{
+    public static GraphicsPath Shape(Ease ease, float x, float y, float d)
+    {
+        var p = new GraphicsPath();
+        var r = d * 0.85f;
+        switch (ease)
+        {
+            case Ease.Smooth:
+                p.AddEllipse(x - r, y - r, 2 * r, 2 * r);
+                break;
+            case Ease.Hold:
+                var h = d * 0.72f;
+                p.AddRectangle(new RectangleF(x - h, y - h, 2 * h, 2 * h));
+                break;
+            case Ease.EaseIn:
+                p.AddArc(x - r, y - r, 2 * r, 2 * r, 90, 180);
+                p.AddLine(x, y - r, x + d, y);
+                p.AddLine(x + d, y, x, y + r);
+                p.CloseFigure();
+                break;
+            case Ease.EaseOut:
+                p.AddArc(x - r, y - r, 2 * r, 2 * r, 270, 180);
+                p.AddLine(x, y + r, x - d, y);
+                p.AddLine(x - d, y, x, y - r);
+                p.CloseFigure();
+                break;
+            default:
+                p.AddPolygon([new PointF(x, y - d), new PointF(x + d, y), new PointF(x, y + d), new PointF(x - d, y)]);
+                break;
+        }
+        return p;
+    }
+}
+
+/// <summary>
 /// The key point button each track has. It adds a point at the playhead; when the playhead is already on one it
 /// turns orange, and then takes that point away.
 /// </summary>
@@ -1296,6 +1378,11 @@ sealed class KeyLane : Control
     public IReadOnlyList<double> Levels = [];
     /// <summary>A second, fainter line (position has two values: across and down); empty = none</summary>
     public IReadOnlyList<double> Levels2 = [];
+    /// <summary>The lines at any time (they curve where points are eased)</summary>
+    public Func<double, double>? LevelAt, Level2At;
+    /// <summary>How the value moves next to each point; sets its shape</summary>
+    public IReadOnlyList<Ease> Eases = [];
+    Ease EaseOf(int i) => i < Eases.Count ? Eases[i] : Ease.Linear;
     public string Label = "Position & scale";
     public Color Back = Theme.Bg3;
     /// <summary>Right-clicked somewhere that isn't a key point</summary>
@@ -1431,36 +1518,31 @@ sealed class KeyLane : Control
         g.SetClip(track);
 
         Tracks.DrawFrames(g, Grid, From, Span, G, BodyW, 0, Height, DeviceDpi, 28);
-        if (Keys.Count > 0 && Levels2.Count == Keys.Count)
+        // The values over time, traced a pixel at a time so eased stretches curve
+        PointF[] Trace(Func<double, double> at)
         {
-            var second = new List<PointF> { new(X(0), Y(Levels2[0])) };
-            for (var i = 0; i < Keys.Count; i++) second.Add(new PointF(X(Keys[i]), Y(Levels2[i])));
-            second.Add(new PointF(X(Duration), Y(Levels2[^1])));
-            using var faint = new Pen(Color.FromArgb(110, Theme.Brand), Math.Max(1f, Px(1)));
-            g.DrawLines(faint, second.ToArray());
+            var pts = new PointF[BodyW + 1];
+            for (var x = 0; x <= BodyW; x++) pts[x] = new PointF(G + x, Y(at(From + x / (double)BodyW * Span)));
+            return pts;
         }
-        // The value over time: flat before the first point and after the last
-        if (Keys.Count > 0)
-        {
-            var pts = new List<PointF> { new(X(0), Y(Level(0))) };
-            for (var i = 0; i < Keys.Count; i++) pts.Add(new PointF(X(Keys[i]), Y(Level(i))));
-            pts.Add(new PointF(X(Duration), Y(Level(Keys.Count - 1))));
-            using var line = new Pen(Color.FromArgb(200, Theme.Brand), Math.Max(1.5f, Px(2)));
-            g.DrawLines(line, pts.ToArray());
-        }
+        if (Keys.Count > 0 && Levels2.Count == Keys.Count && Level2At != null)
+            using (var faint = new Pen(Color.FromArgb(110, Theme.Brand), Math.Max(1f, Px(1)))) g.DrawLines(faint, Trace(Level2At));
+        if (Keys.Count > 0 && LevelAt != null)
+            using (var line = new Pen(Color.FromArgb(200, Theme.Brand), Math.Max(1.5f, Px(2)))) g.DrawLines(line, Trace(LevelAt));
         using (var head = new Pen(Color.FromArgb(160, Color.White))) g.DrawLine(head, X(Current), 0, X(Current), Height);
         float d = Px(6);
         for (var i = 0; i < Keys.Count; i++)
         {
             float x = X(Keys[i]), y = Y(Level(i));
             // White when the playhead is on it: that's the point the box on the preview edits. Ringed when selected.
+            // Its shape says how the value moves next to it.
             using var fill = new SolidBrush(Math.Abs(Keys[i] - Current) <= Near ? Color.White : Theme.Brand);
-            g.FillPolygon(fill, [new PointF(x, y - d), new PointF(x + d, y), new PointF(x, y + d), new PointF(x - d, y)]);
+            using (var icon = KeyIcon.Shape(EaseOf(i), x, y, d)) g.FillPath(fill, icon);
             if (i == SelectedKey)
             {
-                var r = d + Px(3);
                 using var ring = new Pen(Theme.Warn, Math.Max(1.5f, Px(2)));
-                g.DrawPolygon(ring, [new PointF(x, y - r), new PointF(x + r, y), new PointF(x, y + r), new PointF(x - r, y)]);
+                using var around = KeyIcon.Shape(EaseOf(i), x, y, d + Px(3));
+                g.DrawPath(ring, around);
             }
         }
         g.ResetClip();

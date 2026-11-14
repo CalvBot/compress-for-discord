@@ -60,8 +60,10 @@ sealed class MainForm : DarkForm
     int holdFit;
     // What position and scale's own key points were before they were combined, and what combining made of them,
     // so that separating again brings the originals back if nothing was changed in between
-    List<(double T, (double X, double Y) Value)>? keptPos, bakedPos;
-    List<(double T, double Value)>? keptScale, bakedScale;
+    List<(double T, (double X, double Y) Value, Ease E)>? keptPos, bakedPos;
+    List<(double T, double Value, Ease E)>? keptScale, bakedScale;
+    /// <summary>The values behind each position / scale track on screen</summary>
+    readonly Dictionary<KeyLane, Func<IKeyTrack[]>> keyTracks = [];
     readonly DarkMenu trackMenu = new(), cropMenu = new();
     /// <summary>Height of every keyframable track, in 96-dpi pixels (Shift + wheel over a track changes it)</summary>
     int trackH = 56;
@@ -141,7 +143,7 @@ sealed class MainForm : DarkForm
         };
         preview.BoxChanged += EditCrop;
         preview.BoxCommitted += () => UpdateSummary();
-        preview.Stepped += by => { if (probe != null && encodeCts == null) timeline!.Seek(timeline.Current + by / (probe.Fps > 0 ? probe.Fps : 30)); };
+        preview.Stepped += by => { if (probe != null && encodeCts == null) timeline!.Seek(timeline.Current + by * StepLength); };
         // Right-click: reset the picture, or change its shape
         cropMenu.Add("Reset crop", "", ResetCrop);
         cropMenu.Items.Add(new ToolStripSeparator());
@@ -165,6 +167,13 @@ sealed class MainForm : DarkForm
         Wire(scaleLane, () => [scale]);
 
         // Clicking or dragging on the strip: stop if it's playing, and show that frame
+        timeline.FrameLock = cfg.FrameLock;
+        timeline.FrameLockToggled += () =>
+        {
+            cfg.FrameLock = timeline.FrameLock;
+            cfg.Save();
+            if (timeline.FrameLock && probe != null) timeline.Seek(timeline.Current);
+        };
         timeline.Seeked += t => { if (playCts != null) stoppedByClick = Environment.TickCount64; StopPlayback(); RequestFrame(t); };
         // Double-click plays from that spot to the end of the video, so you can watch what's outside the trim.
         // Not when the first click of the two was what stopped it playing: then it just stays stopped there.
@@ -436,6 +445,17 @@ sealed class MainForm : DarkForm
                 case "separate": SetSeparate(true); break;
                 case "select": keyLane.Select(int.Parse(value)); break;
                 case "del": DeleteSelectedKey(); break;
+                case "ease":
+                    // Every key point on every track
+                    var ease = Enum.Parse<Ease>(value);
+                    foreach (var (_, lane) in trackUi) for (var i = 0; i < lane.Keys.Count; i++) lane.SetEase(i, ease);
+                    for (var i = 0; i < pos.Count; i++) pos.SetEase(i, ease);
+                    for (var i = 0; i < scale.Count; i++) scale.SetEase(i, ease);
+                    ShowCrop();
+                    UpdateMasterPeaks();
+                    break;
+                case "keymenu": ShowTrackMenu(keyLane, new Point(keyLane.Width / 2, keyLane.Height / 2)); break;
+                case "lock": timeline.FrameLock = value == "1"; timeline.Invalidate(); break;
                 case "gripspam":
                     // Drag the track box's grip up and down fast, as a quick hand would
                     BeginInvoke(() =>
@@ -472,8 +492,8 @@ sealed class MainForm : DarkForm
                     // A zoom: the full box at 20% of the way in, half the width and off-centre by 60%
                     pos.Keys.Clear();
                     scale.Keys.Clear();
-                    pos.Keys.AddRange([(probe!.Duration * 0.2, (0.5, 0.5)), (probe.Duration * 0.6, (0.62, 0.45))]);
-                    scale.Keys.AddRange([(probe.Duration * 0.2, MaxCropW), (probe.Duration * 0.6, MaxCropW * 0.5)]);
+                    pos.Keys.AddRange([(probe!.Duration * 0.2, (0.5, 0.5), Ease.Linear), (probe.Duration * 0.6, (0.62, 0.45), Ease.Linear)]);
+                    scale.Keys.AddRange([(probe.Duration * 0.2, MaxCropW, Ease.Linear), (probe.Duration * 0.6, MaxCropW * 0.5, Ease.Linear)]);
                     timeline.Seek(probe.Duration * 0.4);
                     ShowCrop();
                     UpdateSummary();
@@ -483,7 +503,7 @@ sealed class MainForm : DarkForm
                 case "keys":
                     foreach (var (_, lane) in trackUi.Take(3))
                     {
-                        lane.Keys.AddRange([(probe!.Duration * 0.2, 1), (probe.Duration * 0.4, 0.3), (probe.Duration * 0.7, 1.6)]);
+                        lane.Keys.AddRange([(probe!.Duration * 0.2, 1, Ease.Linear), (probe.Duration * 0.4, 0.3, Ease.Linear), (probe.Duration * 0.7, 1.6, Ease.Linear)]);
                         lane.Active = true;
                         lane.Invalidate();
                     }
@@ -834,6 +854,7 @@ sealed class MainForm : DarkForm
     /// <summary>Connects a key-point track on screen to the values it edits (one, or both for the shared track)</summary>
     void Wire(KeyLane lane, Func<IKeyTrack[]> tracks)
     {
+        keyTracks[lane] = tracks;
         lane.AddRequested += t =>
         {
             if (!Cropping) return;
@@ -882,10 +903,37 @@ sealed class MainForm : DarkForm
     {
         if (probe == null || encodeCts != null) return;
         trackMenu.Items.Clear();
+        // A selected key point: how the value moves next to it
+        var (selected, current) = track switch
+        {
+            VolumeLane { SelectedKey: >= 0 and var i } a when i < a.Keys.Count => (i, a.Keys[i].E),
+            KeyLane { SelectedKey: >= 0 and var i } b when i < b.Keys.Count => (i, i < b.Eases.Count ? b.Eases[i] : Ease.Linear),
+            _ => (-1, Ease.Linear),
+        };
+        if (selected >= 0)
+        {
+            foreach (var (ease, name) in Interp.Kinds)
+                trackMenu.Add("       " + name, ease == current ? "current" : "", () => SetEase(track, selected, ease)).Tag = ease;
+            trackMenu.Items.Add(new ToolStripSeparator());
+        }
         trackMenu.Add("Clear keyframes", "", () => ClearKeys(track));
         if (track is VolumeLane audio) trackMenu.Add("Reset audio level", "", () => { audio.ResetLevel(); if (audio != masterLane) UpdateMasterPeaks(); });
         if (track is KeyLane) trackMenu.Add(separate ? "Combine position and scale" : "Separate position and scale", "", () => SetSeparate(!separate));
         trackMenu.Show(track, at);
+    }
+
+    void SetEase(Control track, int index, Ease ease)
+    {
+        if (track is VolumeLane v)
+        {
+            v.SetEase(index, ease);
+            if (v != masterLane) UpdateMasterPeaks();
+        }
+        else if (track is KeyLane k && keyTracks.TryGetValue(k, out var tracks))
+        {
+            foreach (var t in tracks()) if (index < t.Count) t.SetEase(index, ease);
+            ShowCrop();
+        }
     }
 
     /// <summary>Back to no key points. For audio that's a level volume line; for position and scale, the whole frame.</summary>
@@ -1030,7 +1078,7 @@ sealed class MainForm : DarkForm
 
     void ClampCropWidths()
     {
-        for (var i = 0; i < scale.Keys.Count; i++) scale.Keys[i] = (scale.Keys[i].T, Math.Min(scale.Keys[i].Value, MaxCropW));
+        for (var i = 0; i < scale.Keys.Count; i++) scale.Keys[i] = (scale.Keys[i].T, Math.Min(scale.Keys[i].Value, MaxCropW), scale.Keys[i].E);
     }
 
     void SetCrop(string mode)
@@ -1062,16 +1110,18 @@ sealed class MainForm : DarkForm
         preview.Box = tracksOpen || Reframed ? CropRectAt(timeline.Current) : null;
         // How far zoomed in: 0 at the widest the shape allows
         double Zoom(double w) => 1 - Math.Min(w, MaxCropW) / MaxCropW;
-        Fill(keyLane, pos, pos.Keys.Select(k => Zoom(scale.At(k.T))));
-        Fill(scaleLane, scale, scale.Keys.Select(k => Zoom(k.Value)));
+        Fill(keyLane, pos, pos.Keys.Select(k => Zoom(scale.At(k.T))), t => Zoom(scale.At(t)));
+        Fill(scaleLane, scale, scale.Keys.Select(k => Zoom(k.Value)), t => Zoom(scale.At(t)));
         // Across as the main line (right = up), down as the fainter one
-        Fill(posLane, pos, pos.Keys.Select(k => k.Value.X), pos.Keys.Select(k => 1 - k.Value.Y));
+        Fill(posLane, pos, pos.Keys.Select(k => k.Value.X), t => pos.At(t).X, pos.Keys.Select(k => 1 - k.Value.Y), t => 1 - pos.At(t).Y);
     }
 
-    void Fill(KeyLane lane, IKeyTrack track, IEnumerable<double> levels, IEnumerable<double>? levels2 = null)
+    void Fill(KeyLane lane, IKeyTrack track, IEnumerable<double> levels, Func<double, double> levelAt, IEnumerable<double>? levels2 = null, Func<double, double>? level2At = null)
     {
         (lane.Duration, lane.Current) = (timeline.Duration, timeline.Current);
         lane.Keys = Enumerable.Range(0, track.Count).Select(track.TimeAt).ToList();
+        lane.Eases = Enumerable.Range(0, track.Count).Select(track.EaseAt).ToList();
+        (lane.LevelAt, lane.Level2At) = (levelAt, level2At);
         lane.Levels = levels.ToList();
         lane.Levels2 = levels2?.ToList() ?? [];
         if (lane.Visible) lane.Invalidate();
@@ -1114,9 +1164,16 @@ sealed class MainForm : DarkForm
         }
     }
 
-    /// <summary>The picture in source pixels (left, top, width) at every key time, for the encoder</summary>
-    List<(double T, double X, double Y, double W)>? CropForEncode() => !Reframed ? null
-        : KeyTimes.Select(t => { var r = CropRectAt(t); return (t, (double)r.X * probe!.Width, (double)r.Y * probe.Height, (double)r.Width * probe.Width); }).ToList();
+    /// <summary>The picture's centre and width in source pixels, with their key points and eases, for the encoder</summary>
+    CropPath? CropForEncode()
+    {
+        if (!Reframed) return null;
+        double w = probe!.Width, h = probe.Height;
+        return new CropPath(
+            [.. pos.Keys.Select(k => (k.T, Math.Clamp(k.Value.X, 0, 1) * w, k.E))],
+            [.. pos.Keys.Select(k => (k.T, Math.Clamp(k.Value.Y, 0, 1) * h, k.E))],
+            [.. scale.Keys.Select(k => (k.T, Math.Min(k.Value, MaxCropW) * w, k.E))]);
+    }
 
     // ---------- window size ----------
 
@@ -1236,6 +1293,8 @@ sealed class MainForm : DarkForm
 
     /// <summary>One frame at the chosen frame rate, in seconds: what's marked on the timeline and what moved key points land on</summary>
     double FrameLength => probe == null ? 0 : 1.0 / (frameRate ?? (probe.Fps > 0 ? probe.Fps : 30));
+    /// <summary>One step of the arrow keys or the wheel over the preview: a frame at the chosen rate with frame lock on, else a source frame</summary>
+    double StepLength => timeline.FrameLock ? FrameLength : 1.0 / (probe!.Fps > 0 ? probe.Fps : 30);
 
     void ApplyFrameGrid()
     {
@@ -1501,14 +1560,16 @@ sealed class MainForm : DarkForm
         var key = keyData & Keys.KeyCode;
         var mods = keyData & Keys.Modifiers;
         if (mods != Keys.None && !(mods == Keys.Shift && key is Keys.Left or Keys.Right)) return false;
-        var step = mods == Keys.Shift ? 5 : 1 / (probe.Fps > 0 ? probe.Fps : 30);
+        var step = mods == Keys.Shift ? 5 : StepLength;
+        // Close enough to count as being on a key point (with frame lock, the playhead can only get within half a frame)
+        var near = Math.Max(0.01, timeline.FrameLock ? FrameLength / 2 : 0);
         switch (key)
         {
             case Keys.Space: TogglePlay(); break;
             // Over a track with key points, the arrows go from one to the next
             case Keys.Left or Keys.Right when mods == Keys.None && hoverTrack is { Visible: true } && KeyTimesOf(hoverTrack).ToList() is { Count: > 0 } times:
                 var back = key == Keys.Left;
-                var to = back ? times.Where(t => t < timeline.Current - 0.01).Select(t => (double?)t).LastOrDefault() : times.Where(t => t > timeline.Current + 0.01).Select(t => (double?)t).FirstOrDefault();
+                var to = back ? times.Where(t => t < timeline.Current - near).Select(t => (double?)t).LastOrDefault() : times.Where(t => t > timeline.Current + near).Select(t => (double?)t).FirstOrDefault();
                 if (to is { } there) timeline.Seek(there);
                 break;
             case Keys.Left: timeline.Seek(timeline.Current - step); break;

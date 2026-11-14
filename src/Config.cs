@@ -66,6 +66,8 @@ sealed class AppConfig
     public bool CheckForUpdates { get; set; } = true;
     /// <summary>Chime when a compress finishes</summary>
     public bool PlaySound { get; set; } = true;
+    /// <summary>The playhead only stops on frames of the chosen frame rate</summary>
+    public bool FrameLock { get; set; } = true;
     public DateTime LastUpdateCheck { get; set; }
     /// <summary>Folder last saved to with "Compress & save"</summary>
     public string SaveFolder { get; set; } = "";
