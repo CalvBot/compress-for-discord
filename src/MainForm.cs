@@ -105,7 +105,8 @@ sealed class MainForm : DarkForm
         // Opens at its smallest size; drag an edge for a longer timeline and bigger preview
         FormBorderStyle = FormBorderStyle.Sizable;
 
-        root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, Location = new Point(18, 14), Margin = Padding.Empty };
+        // GrowAndShrink: it must get smaller again when something inside does, or the window is left too tall
+        root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Location = new Point(18, 14), Margin = Padding.Empty };
 
         // Top row: the file's details on the left; update link, Settings and Help on the right
         titleRow = new Panel { Size = new Size(ContentWidth, 36), Margin = new Padding(0, 0, 0, 6) };
@@ -258,7 +259,7 @@ sealed class MainForm : DarkForm
         scroller = new TrackScroller { Size = new Size(ContentWidth, 0), Margin = Padding.Empty };
         grip = new SizeGrip { Size = new Size(ContentWidth, 10), Margin = Padding.Empty, Visible = false };
         grip.DragStarted += () => grabHeight = scroller.Height;
-        grip.Dragged += by => { tracksHeight = Math.Max(D(60), grabHeight + by); SizeTracks(); };
+        grip.Dragged += by => DragTracks(grabHeight + by);
         // Tracks get their real height once they exist on screen, so measure again whenever the content changes
         scroller.Content.SizeChanged += (_, _) => { if (probe != null && holdFit == 0) SizeTracks(); };
         // The finished sound, always in view under the timeline: its mute button turns the audio off, and its
@@ -433,6 +434,21 @@ sealed class MainForm : DarkForm
                 case "crop": SetCrop(value); break;
                 case "rate": fpsBox.Text = value; break;
                 case "separate": SetSeparate(true); break;
+                case "gripspam":
+                    // Drag the track box's grip up and down fast, as a quick hand would
+                    BeginInvoke(() =>
+                    {
+                        var start = scroller.Height;
+                        for (var i = 0; i < int.Parse(value); i++)
+                        {
+                            DragTracks(start + (int)(Math.Sin(i * 0.9) * 260) + 200);
+                            Application.DoEvents();
+                        }
+                        DragTracks(start);
+                        var c = Controls[0];
+                        Text = $"GRIP client {ClientSize.Width}x{ClientSize.Height} content {c.Right + c.Left}x{c.Bottom + c.Top} box {scroller.Height}";
+                    });
+                    break;
                 case "spam":
                     // Toggle Advanced over and over and report how long each took
                     BeginInvoke(() =>
@@ -774,6 +790,17 @@ sealed class MainForm : DarkForm
         scroller.Height = open ? Math.Clamp(tracksHeight, Math.Min(all, D(60)), all) : all;
         scroller.Scrolls = open && scroller.Height < all;
         grip.Visible = open && all > D(60);
+    }
+
+    /// <summary>The grip under the track box was dragged: make the box this tall (within what it holds)</summary>
+    void DragTracks(int height)
+    {
+        var all = scroller.Content.GetPreferredSize(Size.Empty).Height;
+        height = Math.Clamp(height, Math.Min(all, D(60)), all);
+        if (height == scroller.Height) return;
+        tracksHeight = height;
+        // One layout, one fit, one paint per step: a fast drag otherwise piles up resizes and leaves the window torn
+        Batch(SizeTracks);
     }
 
     void SetSeparate(bool on)
