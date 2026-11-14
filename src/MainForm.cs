@@ -889,6 +889,17 @@ sealed class MainForm : DarkForm
                     if (int.TryParse(value, out var playIn)) _ = Task.Delay(playIn).ContinueWith(_ => BeginInvoke(TogglePlay));
                     else TogglePlay();
                     break;
+                // zoomsim: Alt + wheel in, 40 notches past the limit, then out; logs where the view and playhead sit
+                case "zoomsim":
+                    timeline.Seek(timeline.Duration * 0.3);
+                    for (var n = 0; n < 40; n++)
+                    {
+                        ZoomBy(0.75, timeline.Duration * 0.9);
+                        if (n % 8 == 7 || n >= 36) AppLog.Info($"Zoomsim in {n + 1}: {viewStart:0.000}-{viewEnd:0.000}, playhead {(timeline.Current - viewStart) / (viewEnd - viewStart):P1} across");
+                    }
+                    for (var n = 0; n < 40; n++) ZoomBy(1 / 0.75, timeline.Duration * 0.9);
+                    AppLog.Info($"Zoomsim out: {viewStart:0.000}-{viewEnd:0.000} of {timeline.Duration:0.000}");
+                    break;
                 case "goto": timeBox.Text = value; if (ParseTime(value) is { } go) timeline.Seek(go); break;
                 case "cropkeys":
                     // A zoom: the full box at 20% of the way in, half the width and off-centre by 60%
@@ -1687,10 +1698,22 @@ sealed class MainForm : DarkForm
     }
 
     /// <summary>Zooms the timeline in or out, keeping the moment under the mouse where it is</summary>
-    void ZoomBy(double factor, double around)
+    /// <summary>
+    /// Alt + wheel: zooms around the playhead (keeping it where it is on screen, or bringing it to the middle if it's
+    /// off screen). With Shift too, around the mouse (at time cursor) instead.
+    /// </summary>
+    void ZoomBy(double factor, double cursor)
     {
-        var start = around - (around - viewStart) * factor;
-        SetView(start, start + (viewEnd - viewStart) * factor);
+        if (probe == null) return;
+        var span = viewEnd - viewStart;
+        // Clamped here rather than in SetView, so at the limit nothing moves (it used to keep scrolling)
+        var newSpan = Math.Clamp(span * factor, zoomBar.MinSpan, timeline.Duration);
+        if (Math.Abs(newSpan - span) < 1e-9) return;
+        var around = ModifierKeys.HasFlag(Keys.Shift) ? cursor : timeline.Current;
+        // Where it sits across the view, 0..1
+        var at = around >= viewStart && around <= viewEnd ? (around - viewStart) / span : 0.5;
+        var start = around - at * newSpan;
+        SetView(start, start + newSpan);
     }
 
     /// <summary>The whole frame again, in its own shape. While the picture is animated, that's a key point at the playhead.</summary>

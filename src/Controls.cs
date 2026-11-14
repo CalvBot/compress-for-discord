@@ -910,8 +910,9 @@ abstract class KeyTrackLane : Control
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
-        if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift)) HeightRequested?.Invoke(Math.Sign(e.Delta));
-        else if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) ZoomRequested?.Invoke(e.Delta > 0 ? 0.75 : 1 / 0.75, T(e.X));
+        // Alt first: Alt + Shift is zooming around the mouse, Shift alone is the lane's height
+        if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) ZoomRequested?.Invoke(e.Delta > 0 ? 0.75 : 1 / 0.75, T(e.X));
+        else if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift)) HeightRequested?.Invoke(Math.Sign(e.Delta));
         else { base.OnMouseWheel(e); return; } // on to the box, which scrolls
         if (e is HandledMouseEventArgs h) h.Handled = true;
     }
