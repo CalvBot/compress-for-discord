@@ -51,10 +51,13 @@ static class Updater
         catch { return null; }
     }
 
-    /// <summary>Downloads the new MSI, starts it and returns; the caller then exits so the files can be replaced.</summary>
-    public static async Task Install(Release r)
+    /// <summary>
+    /// Downloads the new MSI, starts it and returns true; the caller then exits so the files can be replaced. A
+    /// release without an MSI opens its page instead and returns false (nothing to exit for).
+    /// </summary>
+    public static async Task<bool> Install(Release r)
     {
-        if (r.MsiUrl == null) { Open(r.PageUrl); return; }
+        if (r.MsiUrl == null) { Open(r.PageUrl); return false; }
         Directory.CreateDirectory(Paths.Work);
         var msi = Path.Combine(Paths.Work, $"CompressForDiscord-{r.Version}.msi");
         using (var http = Http())
@@ -63,6 +66,7 @@ static class Updater
             await File.WriteAllBytesAsync(msi, await http.GetByteArrayAsync(r.MsiUrl));
         }
         Process.Start(new ProcessStartInfo("msiexec.exe", $"/i \"{msi}\" /passive") { UseShellExecute = true });
+        return true;
     }
 
     public static void Open(string url) => Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });

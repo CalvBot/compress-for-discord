@@ -376,7 +376,7 @@ sealed class Timeline : Control
     const double MinClip = 0.1;
     enum DragKind { None, Start, End, Range, Seek }
 
-    public double Duration = 1, Fps = 30;
+    public double Duration = 1;
     public double Start, End, Current;
     public Image?[] Thumbs = new Image?[16];
     /// <summary>Start or End changed</summary>
@@ -557,6 +557,8 @@ sealed class Timeline : Control
     double SnapToPlayhead(double t, int x) => Math.Abs(x - X(Current)) <= Px(7) ? Current : t;
 
     protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); drag = DragKind.None; }
+    // The mouse was taken away mid-drag (Alt+Tab, a popup): no MouseUp will come, so let go here
+    protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) drag = DragKind.None; }
 
     protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
     protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
@@ -758,8 +760,6 @@ sealed class VolumeLane : Control
     public readonly List<(double T, double V, Ease E)> Keys = [];
 
     /// <summary>Changes how the volume moves next to a point</summary>
-    public void SetEase(int i, Ease ease) => SetEase([i], ease);
-
     /// <summary>Changes several points at once, committing once (so playback restarts once, not per point)</summary>
     public void SetEase(IEnumerable<int> ids, Ease ease)
     {
@@ -1379,9 +1379,12 @@ sealed class CropView : Control
         BoxChanged?.Invoke(new RectangleF(fromLeft ? ax - w : ax, fromTop ? ay - h : ay, w, h));
     }
 
-    protected override void OnMouseUp(MouseEventArgs e)
+    protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); LetGo(); }
+    // The mouse was taken away mid-drag (Alt+Tab, a popup): no MouseUp will come, so finish the drag here
+    protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) LetGo(); }
+
+    void LetGo()
     {
-        base.OnMouseUp(e);
         if (grab == Grab.None) return;
         grab = Grab.None;
         BoxCommitted?.Invoke();
@@ -1839,6 +1842,7 @@ sealed class ZoomBar : Control
     }
 
     protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); grab = Grab.None; }
+    protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) grab = Grab.None; }
 
     protected override void OnMouseDoubleClick(MouseEventArgs e)
     {
@@ -1895,6 +1899,7 @@ sealed class TrackScroller : Panel
         thumb.MouseDown += (_, e) => { dragging = e.Button == MouseButtons.Left; grabY = Cursor.Position.Y; grabOffset = offset; };
         thumb.MouseMove += (_, _) => { if (dragging) ScrollTo(grabOffset + (int)((Cursor.Position.Y - grabY) * (Content.Height / (double)Math.Max(1, Height)))); };
         thumb.MouseUp += (_, _) => dragging = false;
+        thumb.MouseCaptureChanged += (_, _) => { if (!thumb.Capture) dragging = false; };
     }
 
     int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
@@ -1980,6 +1985,7 @@ sealed class SizeGrip : Control
     // Screen position, not the mouse event's: the grip itself moves as the box changes height
     protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); if (dragging) Dragged?.Invoke(Cursor.Position.Y - grabY); }
     protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); dragging = false; }
+    protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) dragging = false; }
 
     protected override void OnPaint(PaintEventArgs e)
     {

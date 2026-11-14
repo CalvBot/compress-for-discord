@@ -16,7 +16,7 @@ static class AppLog
     public static void Warn(string message) => Write("WARN", message);
 
     public static void Error(string message, Exception? ex = null) =>
-        Write("ERROR", ex == null ? message : $"{message}: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+        Write("ERROR", ex == null ? message : $"{message}: {ex}");
 
     /// <summary>An ffmpeg command line as it could be pasted into a terminal</summary>
     public static string Command(string exe, IEnumerable<string> args) =>
@@ -33,7 +33,17 @@ static class AppLog
                 var info = new FileInfo(Paths.AppLog);
                 if (info.Exists && info.Length > 1024 * 1024)
                     File.Move(Paths.AppLog, Path.Combine(Paths.Data, "app.old.log"), true);
-                File.AppendAllText(Paths.AppLog, line);
+                // Every right-click opens its own process, so another may be writing too: share the file, and
+                // wait a moment rather than lose the line when it's busy
+                var bytes = System.Text.Encoding.UTF8.GetBytes(line);
+                for (var attempt = 0; ; attempt++)
+                    try
+                    {
+                        using var f = new FileStream(Paths.AppLog, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+                        f.Write(bytes);
+                        break;
+                    }
+                    catch (IOException) when (attempt < 5) { Thread.Sleep(10); }
             }
 #if DEBUG
             Debug.Write(line);

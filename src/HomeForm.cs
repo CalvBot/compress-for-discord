@@ -28,7 +28,7 @@ sealed class HomeForm : DarkForm
             form.ShowDialog(this);
             if (form.OpenProject is { } p) Program.OpenVideo(p.File, this, p);
         };
-        help.Click += (_, _) => new HelpForm().ShowDialog(this);
+        help.Click += (_, _) => ShowHelp();
         var tips = new ToolTip();
         tips.SetToolTip(settings, "Settings");
         tips.SetToolTip(help, "Help and shortcuts (F1)");
@@ -50,6 +50,9 @@ sealed class HomeForm : DarkForm
 #endif
     }
 
+    // A dialog isn't disposed when it closes, unlike a normal window
+    void ShowHelp() { using var help = new HelpForm(); help.ShowDialog(this); }
+
     void PickVideo()
     {
         using var dlg = new OpenFileDialog { Title = "Choose a video to compress", Filter = Program.VideoFilter };
@@ -62,7 +65,7 @@ sealed class HomeForm : DarkForm
         {
             case Keys.Escape: Close(); return true;
             case Keys.Control | Keys.O: case Keys.Enter: PickVideo(); return true;
-            case Keys.F1: new HelpForm().ShowDialog(this); return true;
+            case Keys.F1: ShowHelp(); return true;
         }
         return base.ProcessCmdKey(ref msg, keyData);
     }

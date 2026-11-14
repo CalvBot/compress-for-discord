@@ -96,7 +96,11 @@ class DarkForm : Form
         {
             if (release == null) return;
             link.Text = "Downloading update…";
-            try { await Updater.Install(release); Application.Exit(); }
+            try
+            {
+                if (await Updater.Install(release)) Application.Exit();
+                else link.Text = $"Update to {release.Version}";
+            }
             catch { link.Text = "Update failed, try Settings"; }
         });
         link.Visible = false;

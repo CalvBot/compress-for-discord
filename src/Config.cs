@@ -58,7 +58,7 @@ sealed class AppConfig
     public static AppConfig Current { get; } = Load();
 
     /// <summary>Last chosen size limit, remembered between runs</summary>
-    public double TargetMb { get; set; } = 10;
+    public double TargetMb { get; set; } = 20;
     /// <summary>auto (GPU if there is one), x264, or a specific GPU encoder: nvenc, amf</summary>
     public string Encoder { get; set; } = "auto";
     /// <summary>Folder with ffmpeg.exe and ffprobe.exe; empty = find automatically</summary>
@@ -78,7 +78,14 @@ sealed class AppConfig
 
     static AppConfig Load()
     {
-        try { return JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(Paths.Config)) ?? new(); }
+        try
+        {
+            var cfg = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(Paths.Config)) ?? new();
+            // 10 was the free-account chip before Discord raised that limit to 20
+            if (cfg.TargetMb == 10) cfg.TargetMb = 20;
+            if (!(cfg.TargetMb > 0) || !double.IsFinite(cfg.TargetMb)) cfg.TargetMb = 20;
+            return cfg;
+        }
         catch { return new(); }
     }
 

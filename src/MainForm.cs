@@ -254,7 +254,7 @@ sealed class MainForm : DarkForm
             box.Text.Trim() == "" && row != null && !row.Controls.OfType<Pill>().Any(c => c.On);
 
         (customMb, var customBox) = CustomField(t => ParseMb(t) > 0);
-        foreach (var mb in Planner.LimitPresets) sizeChips.Controls.Add(Chip(Planner.FormatBytes(mb * Planner.MB), mb, sizeChips, v => { customMb.Text = ""; SetTarget((double)v!); }));
+        foreach (var mb in Planner.LimitPresets) sizeChips.Controls.Add(Chip(Planner.FormatBytes(mb * Planner.MB), mb, sizeChips, v => { customMb.Text = ""; SetTarget((double)v!, remember: true); }));
         sizeChips.Controls.Add(customBox);
         if (!Planner.LimitPresets.Contains(targetMb)) customMb.Text = targetMb.ToString("0.##");
         SelectChip(sizeChips, targetMb);
@@ -264,14 +264,25 @@ sealed class MainForm : DarkForm
             {
                 var mb = Planner.LimitPresets[0];
                 SelectChip(sizeChips, mb);
-                SetTarget(mb);
+                SetTarget(mb, remember: false);
                 return;
             }
             var n = ParseMb(customMb.Text);
             if (n <= 0) return;
             SelectChip(sizeChips, null);
-            SetTarget(n);
+            SetTarget(n, remember: false);
+            typedSize |= customMb.Focused;
         };
+        // Typed into and left: that size is the one for next time (not one opened with a project)
+        customMb.Leave += (_, _) => { if (typedSize) RememberTarget(); typedSize = false; };
+
+        // Each custom box shows the value really in use once left: cleared when that's a chip's, else the number
+        // after it was held to the source ("60" on a 30 fps video is the source rate, a too-small scale goes up)
+        void ShowUsed(TextBox box, FlowLayoutPanel row, int? used)
+        {
+            if (box.Text == "") return;
+            box.Text = row.Controls.OfType<Pill>().Any(c => c.On) ? "" : used?.ToString() ?? "";
+        }
 
         // Frame rate: the usual ones as chips, anything else typed in
         (fpsBox, fpsField) = CustomField(t => int.TryParse(t, out var n) && n > 0);
@@ -284,6 +295,7 @@ sealed class MainForm : DarkForm
             SelectChip(fpsChips!, frameRate);
             UpdateSummary();
         };
+        fpsBox.Leave += (_, _) => { if (probe != null) ShowUsed(fpsBox, fpsChips!, frameRate); };
 
         // Scale: 100, 75 and 50% as chips, any other percentage typed in
         (resBox, resField) = CustomField(t => int.TryParse(t.Trim().TrimEnd('%'), out var n) && n > 0);
@@ -298,6 +310,7 @@ sealed class MainForm : DarkForm
             SelectChip(resChips!, scalePct);
             UpdateSummary();
         };
+        resBox.Leave += (_, _) => { if (probe != null) ShowUsed(resBox, resChips!, scalePct); };
 
         resChips = ChipRow();
         fpsChips = ChipRow();
@@ -378,21 +391,33 @@ sealed class MainForm : DarkForm
         base.OnShown(e);
         CaptureBase();
         _ = Task.Run(Paths.CleanupStale);
-        _ = Task.Run(Log.Calibration).ContinueWith(t => BeginInvoke(() => { calibration = t.Result; UpdateSummary(); }), TaskScheduler.Default);
+        _ = Task.Run(Log.Calibration).ContinueWith(t =>
+        {
+            // The window may have been closed while the log was read
+            try { BeginInvoke(() => { calibration = t.Result; UpdateSummary(); }); } catch (InvalidOperationException) { }
+        }, TaskScheduler.Default);
         await LoadVideo();
     }
 
 
     async Task LoadVideo()
     {
-        // Already loaded, or being read (Settings re-reports ffmpeg, maybe while the first read is still going)
-        if (probe != null || loading) return;
+        // Already loaded, or being read (Settings re-reports ffmpeg, maybe while the first read is still going).
+        // A request during a read is kept: if that read fails (likely, with the ffmpeg just replaced), try again.
+        if (probe != null) return;
+        if (loading) { reloadWanted = true; return; }
         loading = true;
-        try { await ReadVideo(); }
+        try
+        {
+            do { reloadWanted = false; await ReadVideo(); }
+            while (reloadWanted && probe == null && !IsDisposed);
+        }
         finally { loading = false; }
     }
 
-    bool loading;
+    bool loading, reloadWanted;
+    /// <summary>A size was typed into the custom box since it was last left</summary>
+    bool typedSize;
 
     /// <summary>A size in MB as typed: "8", "8.5" or "8,5" (a comma as the decimal point); 0 if it isn't one</summary>
     static double ParseMb(string text) =>
@@ -407,7 +432,7 @@ sealed class MainForm : DarkForm
         if (err != null) { ShowStatus(err, Theme.Danger); return; }
         ShowStatus("Reading video…", Theme.Muted);
         try { probe = await Ff.Probe(file); }
-        catch (Exception ex) { AppLog.Error($"Couldn't read {file}", ex); ShowStatus(ex.Message, Theme.Danger); return; }
+        catch (Exception ex) { AppLog.Error($"Couldn't read {file}", ex); ShowStatus(ex.Message, Theme.Danger); goBtn.Enabled = false; return; }
         if (IsDisposed) return;
         AppLog.Info($"Loaded {file}: {probe.Width}x{probe.Height} {probe.Fps:0.##} fps, {probe.Duration:0.00} s, {probe.AudioTracks.Count} audio track(s)");
 
@@ -429,28 +454,29 @@ sealed class MainForm : DarkForm
         };
         if (probe.AudioTracks.Count == 0) lines.Add("Audio:  none");
         foreach (var a in probe.AudioTracks)
-            lines.Add($"Audio {a.Index + 1}:  {a.Label} · {a.Codec.ToUpperInvariant()}, {(a.Layout != "" ? a.Layout : $"{a.Channels} ch")}{(a.Language is "" or "und" ? "" : $", {a.Language}")}");
+            lines.Add($"Audio {a.Index + 1}:  {a.Label} · {a.Codec.ToUpperInvariant()}, {(a.Layout != "" ? a.Layout : $"{a.Channels} ch")}{(a.Language == "" ? "" : $", {a.Language}")}");
         tips.SetToolTip(subtitle, string.Join("\n", lines));
 
         preview.FrameAspect = probe.Width / (double)probe.Height;
-        timeline.Fps = probe.Fps;
         timeline.Reset(probe.Duration);
         zoomBar.Duration = probe.Duration;
         // Closest zoom: a dozen frames across the timeline
-        zoomBar.MinSpan = Math.Min(probe.Duration, 12 / (probe.Fps > 0 ? probe.Fps : 30));
+        zoomBar.MinSpan = Math.Min(probe.Duration, 12 / probe.Fps);
         SetView(0, probe.Duration, remakeThumbs: false);
         timeline.Enabled = true;
         playBtn.Enabled = true;
         ActiveControl = timeline;
 
         // Scale: a percentage of the source, or of the crop when there is one
-        foreach (var pct in Planner.ScaleChips.Where(pct => ScaledSide(pct) >= 144))
+        // 100% always (even for a source under 144p), the others only when they'd still be watchable
+        foreach (var pct in Planner.ScaleChips.Where(pct => pct == 100 || ScaledSide(pct) >= 144))
             resChips.Controls.Add(Chip($"{pct}%", pct == 100 ? null : pct, resChips, v => { resBox.Text = ""; scalePct = (int?)v; UpdateSummary(); }));
         resChips.Controls.Add(resField);
         SelectChip(resChips, null);
-        fpsChips.Controls.Add(Chip($"{fps}", null, fpsChips, v => { fpsBox.Text = ""; frameRate = (int?)v; UpdateSummary(); }));
+        void PickFps(object? v) { fpsBox.Text = ""; frameRate = (int?)v; UpdateSummary(); }
+        fpsChips.Controls.Add(Chip($"{fps}", null, fpsChips, PickFps));
         foreach (var f in Planner.FrameRates.Where(f => f < probe.Fps - 0.5))
-            fpsChips.Controls.Add(Chip($"{f}", f, fpsChips, v => { fpsBox.Text = ""; frameRate = (int?)v; UpdateSummary(); }));
+            fpsChips.Controls.Add(Chip($"{f}", f, fpsChips, PickFps));
         fpsChips.Controls.Add(fpsField);
         SelectChip(fpsChips, null);
         // The picture starts as the whole frame in the video's own shape
@@ -471,7 +497,7 @@ sealed class MainForm : DarkForm
             scroller.Content.Controls.Add(lane);
             trackUi.Add((t, lane));
         }
-        (masterLane.Duration, masterLane.End, masterLane.Visible) = (probe.Duration, probe.Duration, trackUi.Count > 0);
+        (masterLane.Duration, masterLane.End) = (probe.Duration, probe.Duration);
         LayoutLanes();
         ShowTracks();
         _ = LoadPeaks();
@@ -531,8 +557,18 @@ sealed class MainForm : DarkForm
     /// <summary>Sets the window up as a saved project</summary>
     void Restore(Project p)
     {
-        // Opening a project uses its size without changing the size remembered for new videos
-        var remembered = cfg.TargetMb;
+        // A project file from an older version, or edited by hand, mustn't stop the video opening
+        try { RestoreNow(p); }
+        catch (Exception ex) { AppLog.Error("Couldn't restore the project; opening with defaults", ex); }
+    }
+
+    void RestoreNow(Project p)
+    {
+        // Missing lists come back as null from a hand-edited or older file; points are expected in time order
+        static List<T> Sorted<T>(List<T>? keys, Func<T, double> time) => keys?.OrderBy(time).ToList() ?? [];
+        var posKeys = Sorted(p.Pos, k => k.T);
+        var scaleKeys = Sorted(p.Scale, k => k.T);
+        // Opening a project uses its size without changing the size remembered for new videos (remember: false)
         Batch(() =>
         {
             timeline.SetEnd(p.End);
@@ -543,7 +579,7 @@ sealed class MainForm : DarkForm
                 {
                     customMb.Text = "";
                     SelectChip(sizeChips, p.TargetMb);
-                    SetTarget(p.TargetMb);
+                    SetTarget(p.TargetMb, remember: false);
                 }
                 else customMb.Text = p.TargetMb.ToString("0.##");
             }
@@ -555,13 +591,13 @@ sealed class MainForm : DarkForm
             if (frameRate is { } rate && !fpsChips.Controls.OfType<Pill>().Any(c => c.On)) fpsBox.Text = rate.ToString();
 
             // The picture: its shape, then the position and scale key points
-            if (p.Pos.Count > 0 && p.Scale.Count > 0)
+            if (posKeys.Count > 0 && scaleKeys.Count > 0)
             {
                 cropAspect = p.CropAspect;
                 pos.Keys.Clear();
-                pos.Keys.AddRange(p.Pos.Select(k => (k.T, (k.X, k.Y), k.E)));
+                pos.Keys.AddRange(posKeys.Select(k => (k.T, (k.X, k.Y), k.E)));
                 scale.Keys.Clear();
-                scale.Keys.AddRange(p.Scale.Select(k => (k.T, k.V, k.E)));
+                scale.Keys.AddRange(scaleKeys.Select(k => (k.T, k.V, k.E)));
             }
             SetCrop(p.CropMode);
             separate = p.Separate;
@@ -574,10 +610,10 @@ sealed class MainForm : DarkForm
                 (lane.Active, lane.Volume) = (s.Active || (lane != masterLane && trackUi.Count == 1), s.Volume);
                 lane.Selection.Clear();
                 lane.Keys.Clear();
-                lane.Keys.AddRange(s.Keys.Select(k => (k.T, k.V, k.E)));
+                lane.Keys.AddRange(Sorted(s.Keys, k => k.T).Select(k => (k.T, k.V, k.E)));
                 lane.Invalidate();
             }
-            foreach (var s in p.Tracks)
+            foreach (var s in p.Tracks ?? [])
                 if (trackUi.FirstOrDefault(t => t.Track.Index == s.Index).Lane is { } lane) Apply(s, lane);
             if (p.Master != null && trackUi.Count > 0) Apply(p.Master, masterLane);
             UpdateMasterPeaks();
@@ -588,13 +624,12 @@ sealed class MainForm : DarkForm
             ShowCrop();
             UpdateSummary();
         });
-        if (cfg.TargetMb != remembered) { cfg.TargetMb = remembered; cfg.Save(); }
     }
 
 #if DEBUG
     /// <summary>
     /// Debug builds only: puts the window into a state for screenshots and end-to-end tests without clicking.
-    /// CFD_TEST="audio=mix;format=webp;fps=15;res=540;keys=1;menu=1;save=C:\\out.webp"
+    /// CFD_TEST="size=20;res=50;rate=30;trim=20;cropkeys;keys;save=C:\\out.mp4" (res is a percentage, trim the end time)
     /// </summary>
     void ApplyTestState()
     {
@@ -642,7 +677,7 @@ sealed class MainForm : DarkForm
                 case "ease":
                     // Every key point on every track
                     var ease = Enum.Parse<Ease>(value);
-                    foreach (var (_, lane) in trackUi) for (var i = 0; i < lane.Keys.Count; i++) lane.SetEase(i, ease);
+                    foreach (var (_, lane) in trackUi) lane.SetEase(Enumerable.Range(0, lane.Keys.Count), ease);
                     for (var i = 0; i < pos.Count; i++) pos.SetEase(i, ease);
                     for (var i = 0; i < scale.Count; i++) scale.SetEase(i, ease);
                     ShowCrop();
@@ -695,9 +730,22 @@ sealed class MainForm : DarkForm
                     ShowCrop();
                     UpdateSummary();
                     break;
-                // Not SetTarget: a test mustn't change the size remembered in the real settings
+                // manykeys=N: a crop that wanders through N points, for a filter graph too long for a command line
+                case "manykeys":
+                    pos.Keys.Clear();
+                    scale.Keys.Clear();
+                    for (var i = 0; i < int.Parse(value); i++)
+                    {
+                        var t = probe!.Duration * i / int.Parse(value);
+                        pos.Keys.Add((t, (0.4 + 0.2 * (i % 3) / 2, 0.4 + 0.2 * (i % 2)), Ease.Smooth));
+                        scale.Keys.Add((t, MaxCropW * (0.5 + 0.1 * (i % 4)), Ease.Smooth));
+                    }
+                    ShowCrop();
+                    UpdateSummary();
+                    break;
                 // Opens the summary's hover details shortly after, for screenshots
-                case "tip": { var t = new System.Windows.Forms.Timer { Interval = 800 }; t.Tick += (_, _) => { t.Dispose(); AppLog.Info("Summary tip: " + tips.GetToolTip(summary).Replace("\n", " | ")); AppLog.Info("File tip: " + tips.GetToolTip(subtitle).Replace("\n", " | ")); tips.Show(tips.GetToolTip(summary), summary, 0, -D(110), 8000); }; t.Start(); break; }
+                case "tip": { var t = new System.Windows.Forms.Timer { Interval = 800 }; t.Tick += (_, _) => { t.Dispose(); AppLog.Info("Summary tip: " + tips.GetToolTip(summary)?.Replace("\n", " | ")); AppLog.Info("File tip: " + tips.GetToolTip(subtitle)?.Replace("\n", " | ")); tips.Show(tips.GetToolTip(summary), summary, 0, -D(110), 8000); }; t.Start(); break; }
+                // Not SetTarget: a test mustn't change the size remembered in the real settings
                 case "size": targetMb = double.Parse(value); SelectChip(sizeChips, targetMb); UpdateSummary(); break;
                 case "trim": timeline.SetEnd(double.Parse(value)); break;
                 case "keys":
@@ -730,18 +778,20 @@ sealed class MainForm : DarkForm
     /// <param name="keepSpan">scrolling: keep the zoom and stop at the ends, rather than squeezing against them</param>
     void SetView(double start, double end, bool keepSpan = false, bool remakeThumbs = true)
     {
+        // Nothing to zoom into before the video is read (and no thumbnails to make yet)
+        if (probe == null) return;
         var duration = timeline.Duration;
         var span = Math.Clamp(keepSpan ? viewEnd - viewStart : end - start, zoomBar.MinSpan, duration);
         start = Math.Clamp(start, 0, duration - span);
         if (start == viewStart && start + span == viewEnd) return;
         (viewStart, viewEnd) = (start, start + span);
         (timeline.ViewStart, timeline.ViewEnd) = (zoomBar.ViewStart, zoomBar.ViewEnd) = (viewStart, viewEnd);
-        foreach (var lane in new[] { keyLane, posLane, scaleLane })
+        foreach (var lane in KeyLanes)
         {
             (lane.ViewStart, lane.ViewEnd) = (viewStart, viewEnd);
             lane.Invalidate();
         }
-        foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane))
+        foreach (var lane in AudioLanes)
         {
             (lane.ViewStart, lane.ViewEnd) = (viewStart, viewEnd);
             lane.Invalidate();
@@ -911,6 +961,8 @@ sealed class MainForm : DarkForm
             await Player.Play(file, from, to ?? timeline.End, Mix(), Master, DecodeSize(), probe!.Width, probe.Height, PlaybackFps, (bmp, t) =>
             {
                 if (cts.IsCancellationRequested || IsDisposed) { bmp.Dispose(); return; }
+                // Playing to the out point, and it was moved in while playing: stop there now
+                if (to == null && t >= timeline.End) { bmp.Dispose(); StopPlayback(); return; }
                 var old = preview.Image;
                 preview.Image = bmp;
                 old?.Dispose();
@@ -943,13 +995,19 @@ sealed class MainForm : DarkForm
         foreach (var p in group.Controls.OfType<Pill>()) p.On = Equals(p.Tag, value);
     }
 
-    void SetTarget(double mb)
+    /// <param name="remember">kept as the size for new videos: a chip clicked or a typed size finished, not each keystroke</param>
+    void SetTarget(double mb, bool remember)
     {
         targetMb = mb;
-        // Remembered for next time
-        cfg.TargetMb = mb;
-        cfg.Save();
+        if (remember) RememberTarget();
         UpdateSummary();
+    }
+
+    void RememberTarget()
+    {
+        if (cfg.TargetMb == targetMb) return;
+        cfg.TargetMb = targetMb;
+        cfg.Save();
     }
 
     int D(int v) => (int)Math.Round(v * timeline.DeviceDpi / 96f);
@@ -1032,6 +1090,13 @@ sealed class MainForm : DarkForm
             ApplyStretch();
         }
         var open = tracksOpen && probe != null;
+        // Hidden tracks let go of their picked points, so Del or Ctrl+C later can't act on something out of sight
+        if (!open)
+        {
+            foreach (var lane in KeyLanes) { lane.Selection.Clear(); lane.Invalidate(); }
+            // (not the result audio's: that one stays on screen)
+            foreach (var (_, lane) in trackUi) { lane.Selection.Clear(); lane.Invalidate(); }
+        }
         keyLane.Visible = open && !separate;
         posLane.Visible = scaleLane.Visible = open && separate;
         // Showing a track can move it in the list, so put the first four back in order every time
@@ -1283,6 +1348,10 @@ sealed class MainForm : DarkForm
         UpdateSummary();
     }
 
+    /// <summary>Position and scale: the combined track and the two separate ones</summary>
+    KeyLane[] KeyLanes => [keyLane, posLane, scaleLane];
+    /// <summary>Every audio track's lane, then the result audio's</summary>
+    IEnumerable<VolumeLane> AudioLanes => trackUi.Select(t => t.Lane).Append(masterLane);
     IEnumerable<Control> AllTracks => new Control[] { keyLane, posLane, scaleLane, masterLane }.Concat(trackUi.Select(t => t.Lane));
     /// <summary>The tracks on screen: Del and Ctrl+C never act on a hidden one's leftover selection</summary>
     IEnumerable<Control> ShownTracks => AllTracks.Where(t => t.Visible);
@@ -1307,8 +1376,8 @@ sealed class MainForm : DarkForm
         trackH = height;
         Batch(() =>
         {
-            foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane)) lane.RowHeight = trackH;
-            foreach (var lane in new[] { keyLane, posLane, scaleLane }) lane.RowHeight = trackH;
+            foreach (var lane in AudioLanes) lane.RowHeight = trackH;
+            foreach (var lane in KeyLanes) lane.RowHeight = trackH;
             // The timeline keeps its own height: only the tracks under it grow
             SizeTracks();
         });
@@ -1374,7 +1443,8 @@ sealed class MainForm : DarkForm
         double total = 0;
         foreach (var part in text.Trim().Split(':'))
         {
-            if (!double.TryParse(part, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) || n < 0) return null;
+            // "NaN" and "Infinity" parse as numbers, but aren't times
+            if (!double.TryParse(part, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) || !double.IsFinite(n) || n < 0) return null;
             total = total * 60 + n;
         }
         return total;
@@ -1388,7 +1458,10 @@ sealed class MainForm : DarkForm
             float[]? peaks;
             // 100 slices a second (10 ms), so the waveform still has detail zoomed right in
             var slices = (int)Math.Clamp(timeline.Duration * 100, 1200, 400_000);
-            try { peaks = await Ff.Peaks(file, track.Index, slices, lifetime.Token); } catch { return; }
+            // One track that can't be decoded mustn't cost the others their waveforms
+            try { peaks = await Ff.Peaks(file, track.Index, slices, lifetime.Token); }
+            catch when (!lifetime.IsCancellationRequested) { continue; }
+            catch { return; }
             if (IsDisposed) return;
             lane.Peaks = peaks;
             lane.Silent = peaks != null && peaks.Max() < 0.01f;
@@ -1602,7 +1675,9 @@ sealed class MainForm : DarkForm
         var duration = timeline.End - timeline.Start;
         if (probe == null || duration <= 0) return null;
         var cal = calibration.TryGetValue(EffectiveEncoder, out var c) ? c : 1;
-        return Planner.Make(PlanSource, duration, (long)(targetMb * Planner.MB), Mix().Count > 0, cfg.SafetyMarginPercent, cal, scalePct is { } pct ? ScaledSide(pct) : null, frameRate);
+        // A percentage picked before zooming the crop in can now be tiny, so hold it to a watchable size here too
+        int? side = scalePct is { } pct ? Math.Max(ScaledSide(pct), Math.Min(144, ScaledSide(100))) : null;
+        return Planner.Make(PlanSource, duration, (long)(targetMb * Planner.MB), Mix().Count > 0, cfg.SafetyMarginPercent, cal, side, frameRate);
     }
 
     bool Trimmed => probe != null && (timeline.Start > 0.05 || timeline.End < probe.Duration - 0.05);
@@ -1617,7 +1692,7 @@ sealed class MainForm : DarkForm
             SetView(timeline.Current, timeline.Current + (viewEnd - viewStart), keepSpan: true);
         (zoomBar.Current, zoomBar.TrimStart, zoomBar.TrimEnd) = (timeline.Current, timeline.Start, timeline.End);
         zoomBar.Invalidate();
-        foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane))
+        foreach (var lane in AudioLanes)
         {
             (lane.Start, lane.End, lane.Current) = (timeline.Start, timeline.End, timeline.Current);
             if (lane.Visible) lane.Invalidate();
@@ -1641,9 +1716,9 @@ sealed class MainForm : DarkForm
     }
 
     /// <summary>One frame at the chosen frame rate, in seconds: what's marked on the timeline and what moved key points land on</summary>
-    double FrameLength => probe == null ? 0 : 1.0 / (frameRate ?? (probe.Fps > 0 ? probe.Fps : 30));
+    double FrameLength => probe == null ? 0 : 1.0 / (frameRate ?? probe.Fps);
     /// <summary>One step of the arrow keys or the wheel over the preview: a frame at the chosen rate with frame lock on, else a source frame</summary>
-    double StepLength => timeline.FrameLock ? FrameLength : 1.0 / (probe!.Fps > 0 ? probe.Fps : 30);
+    double StepLength => timeline.FrameLock ? FrameLength : 1.0 / probe!.Fps;
 
     void ApplyFrameGrid()
     {
@@ -1834,7 +1909,7 @@ sealed class MainForm : DarkForm
         timeline.Enabled = !busy;
         playBtn.Enabled = !busy;
         customMb.Enabled = fpsBox.Enabled = resBox.Enabled = timeBox.Enabled = !busy;
-        foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane)) lane.Enabled = !busy;
+        foreach (var lane in AudioLanes) lane.Enabled = !busy;
         foreach (var p in new[] { sizeChips, resChips, fpsChips }.SelectMany(g => g.Controls.OfType<Pill>())) p.Enabled = !busy;
         preview.Enabled = keyLane.Enabled = posLane.Enabled = scaleLane.Enabled = !busy;
         // The button keeps its size and says what's happening; hovering turns it into Cancel
@@ -1988,6 +2063,9 @@ sealed class MainForm : DarkForm
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         base.OnFormClosed(e);
+        thumbTimer.Dispose();
+        tips.Dispose();
+        thumbCts?.Dispose();
         timeline.Thumbs = [];
         foreach (var img in thumbCache.Values) img.Dispose();
         thumbCache.Clear();

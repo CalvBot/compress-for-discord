@@ -52,6 +52,7 @@ static class Player
         var frameBytes = w * h * 4;
         var buf = new byte[frameBytes];
         var clock = new Stopwatch();
+        var shown = 0.0;
         try
         {
             for (var i = 0; ; i++)
@@ -66,8 +67,11 @@ static class Player
                 }
                 var due = i / fps;
                 var wait = due - clock.Elapsed.TotalSeconds;
-                if (wait < -0.25) continue; // running behind, drop this frame
+                // Running behind (decoding slower than real time): drop this frame, but still show one every
+                // tenth of a second so the picture keeps moving instead of freezing while the sound plays on
+                if (wait < -0.25 && clock.Elapsed.TotalSeconds - shown < 0.1) continue;
                 if (wait > 0) await Task.Delay(TimeSpan.FromSeconds(wait), ct);
+                shown = clock.Elapsed.TotalSeconds;
                 onFrame(ToBitmap(buf, w, h), from + due);
             }
             // Let the audio tail finish
@@ -131,10 +135,19 @@ static class Player
     /// <summary>How long the done sound lasts, so the app can wait for it before exiting</summary>
     public static readonly TimeSpan ChimeLength = TimeSpan.FromSeconds(1.5);
 
+    static SoundPlayer? chime;
+
     /// <summary>Plays the embedded "complete" sound</summary>
     public static void Chime()
     {
-        var wav = typeof(Player).Assembly.GetManifestResourceStream("complete.wav");
-        if (wav != null) new SoundPlayer(wav).Play();
+        // Loaded once and kept: Play returns at once while Windows still reads the sound from the player's memory
+        if (chime == null)
+        {
+            using var wav = typeof(Player).Assembly.GetManifestResourceStream("complete.wav");
+            if (wav == null) return;
+            chime = new SoundPlayer(wav);
+            chime.Load();
+        }
+        chime.Play();
     }
 }

@@ -18,8 +18,11 @@ sealed record Plan(
 static class Planner
 {
     public const double MB = 1024 * 1024;
-    /// <summary>Discord's upload limits: free, Nitro Basic, Nitro (1 GB)</summary>
-    public static readonly double[] LimitPresets = [10, 50, 1024];
+    /// <summary>
+    /// Discord's upload limits in MiB (what Discord means by MB): free (20 since Aug 2026, was 10), Nitro Basic
+    /// (50), Nitro (1 GB since Sep 2026, was 500). The first is the default.
+    /// </summary>
+    public static readonly double[] LimitPresets = [20, 50, 1024];
     /// <summary>Output size as a percentage of the source, offered as chips; anything else is typed in</summary>
     public static readonly int[] ScaleChips = [100, 75, 50];
     public static readonly int[] FrameRates = [60, 48, 30, 24];

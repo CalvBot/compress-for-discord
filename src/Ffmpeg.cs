@@ -58,6 +58,8 @@ static class Ff
         var ffmpeg = Find("ffmpeg", configured);
         var ffprobe = Find("ffprobe", configured);
         if (ffmpeg == null || ffprobe == null) return "This app needs ffmpeg, which isn't installed yet.";
+        // A different ffmpeg may have different GPU encoders (or work where the old one didn't), so check again
+        if (ffmpeg != Ffmpeg) gpu = null;
         Ffmpeg = ffmpeg;
         Ffprobe = ffprobe;
         return null;
@@ -92,7 +94,8 @@ static class Ff
     public static async Task DownloadFfmpeg(IProgress<double> progress, CancellationToken ct)
     {
         Directory.CreateDirectory(Paths.Work);
-        var zip = Path.Combine(Paths.Work, "ffmpeg-download.zip");
+        // Own name per download, so two windows downloading at once don't write the same file
+        var zip = Path.Combine(Paths.Work, $"ffmpeg-{Guid.NewGuid():N}.zip");
         using (var http = new HttpClient())
         {
             http.DefaultRequestHeaders.UserAgent.ParseAdd("CompressForDiscord");
@@ -122,8 +125,12 @@ static class Ff
         File.Delete(zip);
         if (!File.Exists(Path.Combine(tmp, "ffmpeg.exe")) || !File.Exists(Path.Combine(tmp, "ffprobe.exe")))
             throw new InvalidDataException("The download didn't contain ffmpeg.");
-        try { Directory.Delete(Paths.Ffmpeg, true); } catch { }
+        // Move the old copy aside rather than deleting it in place: a half-deleted folder would block the move in
+        var old = Paths.Ffmpeg + ".old";
+        try { Directory.Delete(old, true); } catch { }
+        if (Directory.Exists(Paths.Ffmpeg)) Directory.Move(Paths.Ffmpeg, old);
         Directory.Move(tmp, Paths.Ffmpeg);
+        try { Directory.Delete(old, true); } catch { }
     }
 
     static Task<string>? gpu;
@@ -227,6 +234,9 @@ static class Ff
 
         var duration = Num(root["format"]?["duration"]);
         if (duration <= 0) duration = Num(v["duration"]);
+        // A still image, or a file whose length isn't stored (some browser recordings): nothing sensible to compress
+        if (!(duration > 0)) throw new Exception("Couldn't tell how long this video is. Try remuxing it first, or it may be an image.");
+        if (w <= 0 || h <= 0) throw new Exception("Couldn't read this video's picture size.");
         return new ProbeResult(duration, swap ? h : w, swap ? w : h, fps, (long)Num(root["format"]?["bit_rate"]), (long)Num(v["bit_rate"]), Str(v["codec_name"]), audio);
     }
 
@@ -240,6 +250,8 @@ static class Ff
                 "-hide_banner", "-loglevel", "error", "-ss", F3(time), "-i", path,
                 "-frames:v", "1", "-vf", $"scale=-2:{height}", "-q:v", "4", "-f", "image2pipe", "-c:v", "mjpeg", "-"
             ], ct, 20000);
+            // A seek at the very end of a short clip can land past the last frame; take an earlier one instead
+            if ((code != 0 || stdout.Length == 0) && time > 0) return await Frame(path, Math.Max(0, time - 1), height, ct);
             if (code != 0 || stdout.Length == 0) return null;
             using var ms = new MemoryStream(stdout);
             using var img = Image.FromStream(ms);
@@ -264,7 +276,7 @@ static class Ff
         })));
     }
 
-    // ---------- encoding ----------
+    // ---------- waveforms ----------
 
     /// <summary>Loudest sample (0..1) in each of `buckets` equal slices of an audio track, for drawing its waveform</summary>
     public static async Task<float[]?> Peaks(string path, int track, int buckets, CancellationToken ct)
@@ -368,6 +380,8 @@ static class Ff
         return $"{string.Join(";", parts)};{string.Concat(tracks.Select((_, i) => $"[a{i}]"))}amix=inputs={tracks.Count}:normalize=0:duration=longest{after}[aout]";
     }
 
+    // ---------- encoding ----------
+
     static async Task RunEncode(List<string> args, double duration, double from, double span, string stage, IProgress<(string Stage, double Progress)> progress, CancellationToken ct)
     {
         progress.Report((stage, from));
@@ -406,7 +420,10 @@ static class Ff
         AppLog.Info($"{stage}: done in {clock.Elapsed.TotalSeconds:0.0} s");
     }
 
-    /// <summary>Encodes, retrying at a lower bitrate up to 3 times if the result overshoots. Returns the temp output path.</summary>
+    /// <summary>
+    /// Encodes, retrying up to 3 times at a lower bitrate (or, when that stops helping, a smaller picture) if the
+    /// result overshoots. Returns the temp output path.
+    /// </summary>
     public static async Task<(string Path, long Size)> Encode(EncodeRequest o, IProgress<(string Stage, double Progress)> progress, CancellationToken ct)
     {
         Directory.CreateDirectory(Paths.Work);
@@ -440,10 +457,10 @@ static class Ff
                 vf.Add("format=yuv420p");
                 var videoGraph = $"[0:v:0]{string.Join(",", vf)}[vout]";
                 var graph = videoGraph + (audio != null ? $";{audio}" : "");
-                string[] common = ["-filter_complex", graph, "-map", "[vout]", "-map_metadata", "-1"];
+                string[] common = [.. Graph(graph, $"{id}-graph.txt"), "-map", "[vout]", "-map_metadata", "-1"];
                 // x264 pass 1 writes no audio, and ffmpeg rejects a graph with an unconnected [aout].
                 // The pass options are video-only (":v"): newer ffmpeg otherwise looks for a pass log for the audio too and fails.
-                string[] videoOnly = ["-filter_complex", videoGraph, "-map", "[vout]", "-map_metadata", "-1"];
+                string[] videoOnly = [.. Graph(videoGraph, $"{id}-graph-v.txt"), "-map", "[vout]", "-map_metadata", "-1"];
 
                 var t0 = Stopwatch.StartNew();
                 string[] rate = ["-b:v", $"{videoKbps}k", "-maxrate", $"{Math.Round(videoKbps * 1.5)}k", "-bufsize", $"{videoKbps * 2}k"];
@@ -500,7 +517,8 @@ static class Ff
                 var side = o.ScaleShortSide ?? fullSide;
                 // The last bitrate cut moved the size less than half as much as it should have
                 var stuck = lastKbps > 0 && lastSize - size < (lastSize - audioBytes) * (1 - (double)videoKbps / lastKbps) * 0.5;
-                if ((size > o.TargetBytes * 1.4 || stuck) && side > 144)
+                var next = Math.Max(50, (int)Math.Floor(videoKbps * (videoBudget / videoMade) * 0.92));
+                if ((size > o.TargetBytes * 1.4 || stuck || next >= videoKbps) && side > 144)
                 {
                     // The encoder has hit its lowest quality for this many pixels and ignores a lower bitrate
                     // (NVENC does this at very low bits per pixel). Fewer pixels is the only way down; at its floor
@@ -513,8 +531,10 @@ static class Ff
                 }
                 else
                 {
+                    // At the lowest bitrate and the smallest picture: another try would make the same file
+                    if (next >= videoKbps) break;
                     (lastKbps, lastSize) = (videoKbps, size);
-                    videoKbps = Math.Max(50, (int)Math.Floor(videoKbps * (videoBudget / videoMade) * 0.92));
+                    videoKbps = next;
                 }
             }
             throw new Exception("Couldn't get the video under the size limit. Try a smaller scale, or trimming it shorter.");
@@ -526,8 +546,20 @@ static class Ff
         }
         finally
         {
-            foreach (var f2 in Directory.EnumerateFiles(Paths.Work, $"{id}-pass*")) try { File.Delete(f2); } catch { }
+            foreach (var f2 in Directory.EnumerateFiles(Paths.Work, $"{id}-*").Where(f2 => f2 != output)) try { File.Delete(f2); } catch { }
         }
+    }
+
+    /// <summary>
+    /// The -filter_complex arguments for a graph. A crop that moves through many points makes a graph too long for
+    /// a Windows command line (32K characters), so a long one goes in a file next to the output instead.
+    /// </summary>
+    static string[] Graph(string graph, string fileName)
+    {
+        if (graph.Length < 8000) return ["-filter_complex", graph];
+        var file = Path.Combine(Paths.Work, fileName);
+        File.WriteAllText(file, graph);
+        return ["-/filter_complex", file];
     }
 
     /// <summary>Moves a finished encode to the output folder under a readable, unique name.</summary>
