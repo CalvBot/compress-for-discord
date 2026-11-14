@@ -44,7 +44,10 @@ sealed class HomeForm : DarkForm
         root.Controls.Add(drop);
 
         Controls.Add(root);
-        AcceptDrop(f => Program.OpenVideo(f, this));
+        AcceptDrop(f => Program.OpenVideo(f, this), on => drop.Hot = on);
+#if DEBUG
+        if (Environment.GetEnvironmentVariable("CFD_TEST") == "drophot") drop.Hot = true;
+#endif
     }
 
     void PickVideo()
@@ -67,6 +70,10 @@ sealed class HomeForm : DarkForm
     /// <summary>Dashed drop target</summary>
     sealed class DropZone : Panel
     {
+        bool hot;
+        /// <summary>A video is being dragged over the window: light up in brand blue</summary>
+        public bool Hot { get => hot; set { if (hot == value) return; hot = value; Invalidate(); } }
+
         public DropZone()
         {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
@@ -87,11 +94,11 @@ sealed class HomeForm : DarkForm
             g.SmoothingMode = SmoothingMode.AntiAlias;
             var px = DeviceDpi / 96f;
             using var path = Theme.Round(new RectangleF(1, 1, Width - 3, Height - 3), 10 * px);
-            using (var b = new SolidBrush(Theme.Bg2)) g.FillPath(b, path);
-            using (var pen = new Pen(Theme.Secondary, 2 * px) { DashStyle = DashStyle.Dash }) g.DrawPath(pen, path);
+            using (var b = new SolidBrush(hot ? Theme.Blend(Theme.Bg2, Theme.Brand, 0.15) : Theme.Bg2)) g.FillPath(b, path);
+            using (var pen = new Pen(hot ? Theme.Brand : Theme.Secondary, (hot ? 2.5f : 2) * px) { DashStyle = DashStyle.Dash }) g.DrawPath(pen, path);
             var text = new Rectangle(0, 0, Width, Height / 2 - (int)(6 * px));
             using var font = new Font("Segoe UI Semibold", 12f);
-            TextRenderer.DrawText(g, "Drop a video here", font, text, Theme.Text, TextFormatFlags.HorizontalCenter | TextFormatFlags.Bottom | TextFormatFlags.SingleLine);
+            TextRenderer.DrawText(g, hot ? "Drop to open it" : "Drop a video here", font, text, hot ? Theme.Header : Theme.Text, TextFormatFlags.HorizontalCenter | TextFormatFlags.Bottom | TextFormatFlags.SingleLine);
         }
     }
 }
