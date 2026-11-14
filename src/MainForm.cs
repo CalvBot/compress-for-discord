@@ -76,7 +76,7 @@ sealed class MainForm : DarkForm
     double viewStart, viewEnd;
     CancellationTokenSource? thumbCts;
     /// <summary>Waits for zooming to settle before remaking the thumbnails</summary>
-    readonly System.Windows.Forms.Timer thumbTimer = new() { Interval = 350 };
+    readonly System.Windows.Forms.Timer thumbTimer = new() { Interval = 150 };
     readonly Timeline timeline;
     readonly FlowLayoutPanel sizeChips, resChips, fpsChips, buttons;
     readonly VolumeLane masterLane;
@@ -630,6 +630,8 @@ sealed class MainForm : DarkForm
                 case "pos": pos.Set(timeline.Current, (double.Parse(value.Split(',')[0]), double.Parse(value.Split(',')[1]))); ShowCrop(); UpdateSummary(); break;
                 case "resetcrop": ResetCrop(); break;
                 case "zoom": SetView(double.Parse(value.Split('-')[0]), double.Parse(value.Split('-')[1])); break;
+                // Zooms back out to the whole video this many ms later
+                case "unzoom": { var t = new System.Windows.Forms.Timer { Interval = int.Parse(value) }; t.Tick += (_, _) => { t.Dispose(); SetView(0, timeline.Duration); }; t.Start(); break; }
                 case "preview": SetPreview(true); break;
                 case "goto": timeBox.Text = value; if (ParseTime(value) is { } go) timeline.Seek(go); break;
                 case "cropkeys":
@@ -694,44 +696,87 @@ sealed class MainForm : DarkForm
         if (remakeThumbs) { thumbTimer.Stop(); thumbTimer.Start(); }
     }
 
+    /// <summary>Every thumbnail made so far, by the moment it shows, so zooming back out (or in again) reuses them</summary>
+    readonly SortedList<double, Image> thumbCache = [];
+    const int ThumbCacheMax = 400;
+
+    /// <summary>The cached thumbnail closest in time to t, and its time</summary>
+    (Image? Img, double At) NearestThumb(double t)
+    {
+        var keys = thumbCache.Keys;
+        if (keys.Count == 0) return (null, 0);
+        int lo = 0, hi = keys.Count - 1;
+        while (lo < hi)
+        {
+            var mid = (lo + hi) / 2;
+            if (keys[mid] < t) lo = mid + 1; else hi = mid;
+        }
+        if (lo > 0 && t - keys[lo - 1] < keys[lo] - t) lo--;
+        return (thumbCache.Values[lo], keys[lo]);
+    }
+
     /// <summary>
-    /// Thumbnails for the stretch the timeline is showing. The first set fills in as it arrives; after a zoom the
-    /// old strip stays until the new one is complete, then they swap.
+    /// Thumbnails for the stretch the timeline is showing. Each cell shows the nearest one already made straight
+    /// away, then the ones it still needs fill in as they arrive.
     /// </summary>
     async Task LoadThumbnails()
     {
         thumbCts?.Cancel();
         var cts = thumbCts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         double start = viewStart, span = viewEnd - viewStart;
-        var first = timeline.Thumbs.All(t => t == null);
         // Zoomed in until there are fewer frames than thumbnails: show the frames themselves, one each
         const int Usual = 16;
         var frame = FrameLength;
         var count = Usual;
-        if (!first && frame > 0 && span / frame <= Usual)
+        if (frame > 0 && span / frame <= Usual)
         {
             start = Math.Floor(start / frame) * frame;
             count = Math.Max(1, (int)Math.Ceiling((viewEnd - start) / frame - 1e-6));
             span = count * frame;
         }
-        var fresh = first ? timeline.Thumbs : new Image?[count];
-        if (first) (timeline.ThumbStart, timeline.ThumbSpan) = (start, span);
-        await Ff.Thumbnails(file, start, span, fresh.Length, timeline.Height, (i, img) =>
+        var cell = span / count;
+        var strip = new Image?[count];
+        var missing = new List<int>();
+        for (var i = 0; i < count; i++)
         {
-            if (cts.IsCancellationRequested || IsDisposed) { img.Dispose(); return; }
-            fresh[i] = img;
-            if (first) BeginInvoke(timeline.StripChanged);
-        }, cts.Token);
-        if (first || IsDisposed) return;
-        if (cts.IsCancellationRequested)
-        {
-            foreach (var img in fresh) img?.Dispose();
-            return;
+            var mid = start + (i + 0.5) * cell;
+            var (img, at) = NearestThumb(mid);
+            strip[i] = img;
+            // Only a thumbnail from inside this cell is the right picture; anything else is a stand-in
+            if (img == null || Math.Abs(at - mid) > cell / 2) missing.Add(i);
         }
-        var old = timeline.Thumbs;
-        (timeline.Thumbs, timeline.ThumbStart, timeline.ThumbSpan) = (fresh, start, span);
+        (timeline.Thumbs, timeline.ThumbStart, timeline.ThumbSpan) = (strip, start, span);
         timeline.StripChanged();
-        foreach (var img in old) img?.Dispose();
+        if (missing.Count == 0) return;
+
+        var times = missing.Select(i => start + (i + 0.5) * cell).ToArray();
+        await Ff.Thumbnails(file, times, timeline.Height, (j, img) =>
+        {
+            void Keep()
+            {
+                if (IsDisposed) { img.Dispose(); return; }
+                // Kept even if the view has moved on: it's likely wanted again
+                if (thumbCache.ContainsKey(times[j])) { img.Dispose(); return; }
+                thumbCache.Add(times[j], img);
+                if (timeline.Thumbs == strip) { strip[missing[j]] = img; timeline.StripChanged(); }
+                TrimThumbCache();
+            }
+            try { BeginInvoke(Keep); } catch { img.Dispose(); }
+        }, cts.Token);
+    }
+
+    /// <summary>Drops the thumbnails furthest from what's on screen once there are too many (never one on screen)</summary>
+    void TrimThumbCache()
+    {
+        if (thumbCache.Count <= ThumbCacheMax) return;
+        var centre = (viewStart + viewEnd) / 2;
+        var showing = timeline.Thumbs.Where(t => t != null).ToHashSet();
+        foreach (var (t, img) in thumbCache.OrderByDescending(kv => Math.Abs(kv.Key - centre)).Take(thumbCache.Count - ThumbCacheMax * 3 / 4).ToList())
+        {
+            if (showing.Contains(img)) continue;
+            thumbCache.Remove(t);
+            img.Dispose();
+        }
     }
 
     // ---------- preview frame ----------
@@ -1835,5 +1880,13 @@ sealed class MainForm : DarkForm
         encodeCts?.Cancel();
         frameCts?.Cancel();
         base.OnFormClosing(e);
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        base.OnFormClosed(e);
+        timeline.Thumbs = [];
+        foreach (var img in thumbCache.Values) img.Dispose();
+        thumbCache.Clear();
     }
 }

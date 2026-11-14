@@ -237,18 +237,17 @@ static class Ff
         catch { return null; }
     }
 
-    /// <summary>Evenly spaced frames for the timeline, 4 at a time; each one is reported as soon as it's ready.</summary>
-    /// <param name="start">where the stretch of video begins</param>
-    /// <param name="duration">how long the stretch is</param>
-    public static async Task Thumbnails(string path, double start, double duration, int count, int height, Action<int, Image> onFrame, CancellationToken ct)
+    /// <summary>Frames at these times for the timeline, several at a time; each one is reported (by its index) as soon as it's ready.</summary>
+    public static async Task Thumbnails(string path, double[] times, int height, Action<int, Image> onFrame, CancellationToken ct)
     {
         var next = -1;
-        await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
+        var workers = Math.Clamp(Environment.ProcessorCount / 2, 4, 8);
+        await Task.WhenAll(Enumerable.Range(0, workers).Select(_ => Task.Run(async () =>
         {
             int i;
-            while ((i = Interlocked.Increment(ref next)) < count && !ct.IsCancellationRequested)
+            while ((i = Interlocked.Increment(ref next)) < times.Length && !ct.IsCancellationRequested)
             {
-                var img = await Frame(path, start + (i + 0.5) * duration / count, height, ct);
+                var img = await Frame(path, times[i], height, ct);
                 if (img != null) onFrame(i, img);
             }
         })));
