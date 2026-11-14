@@ -161,7 +161,7 @@ sealed class MainForm : DarkForm
         preview.MenuRequested += at => { if (probe != null && encodeCts == null) cropMenu.Show(preview, at); };
 
         // Its strip is as tall as a track (the 14 is the row of tabs above it); unlike the tracks it never changes height
-        timeline = new Timeline { Size = new Size(ContentWidth, 14 + 56), Enabled = false, Margin = Padding.Empty };
+        timeline = new Timeline { Width = ContentWidth, RowHeight = trackH, Enabled = false, Margin = Padding.Empty };
         timeline.RangeChanged += () => { UpdateTimeLabel(); UpdateSummary(); };
         // Key points of the crop, shown only while cropping
         // Position and scale: one track for both, or (right-click) one each
@@ -1191,6 +1191,7 @@ sealed class MainForm : DarkForm
         {
             foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane)) lane.RowHeight = trackH;
             foreach (var lane in new[] { keyLane, posLane, scaleLane }) lane.RowHeight = trackH;
+            timeline.RowHeight = trackH;
             SizeTracks();
         });
     }

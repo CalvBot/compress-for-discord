@@ -413,6 +413,13 @@ sealed class Timeline : Control
     }
 
     int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
+    int rowHeight = 56;
+    /// <summary>Height of the thumbnails in 96-dpi pixels, the same as the tracks below; the tabs go on top of it</summary>
+    public int RowHeight { get => rowHeight; set { rowHeight = value; Fit(); } }
+    void Fit() => Height = TabH + Px(rowHeight);
+    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
+    protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
+    protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
     /// <summary>Height of the row of tabs above the thumbnails</summary>
     int TabH => Px(14);
     int TabW => Px(16);
