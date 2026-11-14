@@ -902,6 +902,73 @@ sealed class MainForm : DarkForm
                         lane.Invalidate();
                     }
                     break;
+                case "mousesim":
+                    // Drags the crop box, key points and the playhead with posted mouse messages (the real mouse
+                    // handlers, without moving the cursor), and logs whether each did what it should
+                    BeginInvoke(new Action(async () =>
+                    {
+                        static nint L(PointF p) => ((int)Math.Round(p.Y) << 16) | ((int)Math.Round(p.X) & 0xFFFF);
+                        async Task Drag(Control c, PointF from, PointF to, int steps = 6)
+                        {
+                            PostMessage(c.Handle, 0x200, 0, L(from)); await Task.Delay(40);
+                            PostMessage(c.Handle, 0x201, 1, L(from)); await Task.Delay(40);
+                            for (var i = 1; i <= steps; i++)
+                            {
+                                PostMessage(c.Handle, 0x200, 1, L(new PointF(from.X + (to.X - from.X) * i / steps, from.Y + (to.Y - from.Y) * i / steps)));
+                                await Task.Delay(40);
+                            }
+                            PostMessage(c.Handle, 0x202, 0, L(to)); await Task.Delay(200);
+                        }
+                        void Check(string what, bool ok, string detail) => AppLog.Info($"Mouse: {(ok ? "ok  " : "FAIL")} {what}: {detail}");
+                        string R(RectangleF r) => $"{r.X:0.0},{r.Y:0.0} {r.Width:0.0}x{r.Height:0.0}";
+                        try
+                        {
+                            await Task.Delay(500);
+                            // The crop box: moved, a corner pulled in, an edge pulled in
+                            var r0 = preview.DebugBoxOnScreen;
+                            var mid = new PointF(r0.X + r0.Width / 2, r0.Y + r0.Height / 2);
+                            await Drag(preview, mid, new PointF(mid.X - 30, mid.Y + 15));
+                            var r1 = preview.DebugBoxOnScreen;
+                            Check("crop move", Math.Abs(r1.X - r0.X + 30) < 1.5 && Math.Abs(r1.Y - r0.Y - 15) < 1.5 && Math.Abs(r1.Width - r0.Width) < 1, $"{R(r0)} -> {R(r1)}");
+                            await Drag(preview, new PointF(r1.Right, r1.Bottom), new PointF(r1.Right - 40, r1.Bottom - 40));
+                            var r2 = preview.DebugBoxOnScreen;
+                            Check("crop corner", r2.Width < r1.Width - 20 && Math.Abs(r2.Width / r2.Height - r1.Width / r1.Height) < 0.03 && Math.Abs(r2.X - r1.X) < 1.5 && Math.Abs(r2.Y - r1.Y) < 1.5,
+                                $"{R(r1)} -> {R(r2)} (shape {r1.Width / r1.Height:0.000} -> {r2.Width / r2.Height:0.000}, top left stays)");
+                            var edge = new PointF(r2.X, r2.Y + r2.Height / 2);
+                            await Drag(preview, edge, new PointF(edge.X + 20, edge.Y));
+                            var r3 = preview.DebugBoxOnScreen;
+                            Check("crop edge", r3.Width < r2.Width - 10 && Math.Abs(r3.Right - r2.Right) < 1.5, $"{R(r2)} -> {R(r3)} (right side stays)");
+
+                            // A crop key point dragged later
+                            var g = (int)Math.Round(Tracks.Gutter * keyLane.DeviceDpi / 96f);
+                            var t0 = keyLane.KeyTimes.First();
+                            var k = keyLane.DebugKey(0);
+                            await Drag(keyLane, k, new PointF(k.X + 25, k.Y));
+                            var t1 = keyLane.KeyTimes.First();
+                            var want = 25 * timeline.Duration / (keyLane.Width - g);
+                            Check("crop key drag", Math.Abs(t1 - t0 - want) < want * 0.15 + 0.05 && keyLane.SelectedKey == 0, $"{t0:0.00} -> {t1:0.00} s (want +{want:0.00}), selected {keyLane.SelectedKey}");
+
+                            // A volume key point dragged up
+                            if (trackUi.Count > 0 && trackUi[0].Lane is { Keys.Count: > 1 } vol)
+                            {
+                                var (vt, vv, _) = vol.Keys[1];
+                                var p = vol.DebugKey(1);
+                                await Drag(vol, p, new PointF(p.X, p.Y - 12));
+                                var (nt, nv, _) = vol.Keys[1];
+                                Check("volume key drag", nv > vv + 0.05 && Math.Abs(nt - vt) < timeline.Duration * 0.01, $"{vv:0.00} at {vt:0.0}s -> {nv:0.00} at {nt:0.0}s");
+                            }
+
+                            // A press on the timeline moves the playhead there
+                            var tx = timeline.Width * 3 / 4;
+                            await Drag(timeline, new PointF(tx, timeline.Height - 10), new PointF(tx, timeline.Height - 10), 1);
+                            var ratio = timeline.Current / timeline.Duration;
+                            Check("timeline click", Math.Abs(timeline.Current - timeline.Duration * (tx - g) / (timeline.Width - g)) < timeline.Duration * 0.02 || ratio is > 0.7 and < 0.8,
+                                $"playhead at {timeline.Current:0.0}s of {timeline.Duration:0.0}s ({ratio:P0} along)");
+                        }
+                        catch (Exception ex) { AppLog.Error("Mouse sim", ex); }
+                        AppLog.Info("Mouse: done");
+                    }));
+                    break;
                 case "settings": BeginInvoke(ShowSettings); break;
                 case "help": BeginInvoke(ShowHelp); break;
                 case "menu": BeginInvoke(() => moreBtn.GetType().GetMethod("OnClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(moreBtn, [EventArgs.Empty])); break;

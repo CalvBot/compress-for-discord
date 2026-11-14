@@ -808,6 +808,10 @@ abstract class KeyTrackLane : Control
     protected abstract int KeyCount { get; }
     protected abstract double KeyTime(int i);
     public IEnumerable<double> KeyTimes => Enumerable.Range(0, KeyCount).Select(KeyTime);
+#if DEBUG
+    /// <summary>Where key point i is drawn, for tests that click it</summary>
+    public abstract PointF DebugKey(int i);
+#endif
     /// <summary>Removes the selected key points</summary>
     public abstract void DeleteSelected();
 
@@ -952,6 +956,9 @@ sealed class VolumeLane : KeyTrackLane
     public readonly List<(double T, double V, Ease E)> Keys = [];
     protected override int KeyCount => Keys.Count;
     protected override double KeyTime(int i) => Keys[i].T;
+#if DEBUG
+    public override PointF DebugKey(int i) => new(X(Keys[i].T), Y(Keys[i].V));
+#endif
 
     /// <summary>Changes how the volume moves next to several points at once, committing once (so playback restarts once, not per point)</summary>
     public void SetEase(IEnumerable<int> ids, Ease ease)
@@ -1384,6 +1391,10 @@ sealed class CropView : Control
     }
 
     RectangleF ToScreen(RectangleF b) { var p = Picture; return new RectangleF(p.X + b.X * p.Width, p.Y + b.Y * p.Height, b.Width * p.Width, b.Height * p.Height); }
+#if DEBUG
+    /// <summary>The box in the control's pixels, for tests that drag it</summary>
+    public RectangleF DebugBoxOnScreen => box is { } b ? ToScreen(b) : RectangleF.Empty;
+#endif
     PointF ToFrame(Point at) { var p = Picture; return new PointF((at.X - p.X) / p.Width, (at.Y - p.Y) / p.Height); }
 
     Grab HitTest(Point at)
@@ -1545,13 +1556,33 @@ sealed class CropView : Control
             return;
         }
         var pic = Picture;
-        if (image != null) g.DrawImage(image, pic);
+        if (image != null)
+        {
+            // Frames are decoded at the size they're shown (give or take the rounding to even sizes), so usually it's
+            // a straight copy, centred: much cheaper than a scaled, blended draw, and this repaints with every frame
+            // while scrubbing
+            if (Math.Abs(image.Width - pic.Width) < 2 && Math.Abs(image.Height - pic.Height) < 2)
+            {
+                var at = new Rectangle((int)Math.Round(pic.X + (pic.Width - image.Width) / 2), (int)Math.Round(pic.Y + (pic.Height - image.Height) / 2), image.Width, image.Height);
+                g.CompositingMode = CompositingMode.SourceCopy;
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.DrawImage(image, at, 0, 0, image.Width, image.Height, GraphicsUnit.Pixel);
+                g.CompositingMode = CompositingMode.SourceOver;
+            }
+            else g.DrawImage(image, pic);
+        }
         if (box is not { } b) return;
         var r = Rectangle.Round(ToScreen(b));
-        // Dim everything outside the box
-        g.ExcludeClip(r);
-        using (var dim = new SolidBrush(Color.FromArgb(150, 0, 0, 0))) g.FillRectangle(dim, ClientRectangle);
-        g.ResetClip();
+        // Dim everything outside the box: the four bands around it (a clipped fill of the whole view costs more)
+        using (var dim = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
+        {
+            int top = Math.Clamp(r.Top, 0, Height), bottom = Math.Clamp(r.Bottom, top, Height);
+            int left = Math.Clamp(r.Left, 0, Width), right = Math.Clamp(r.Right, left, Width);
+            if (top > 0) g.FillRectangle(dim, 0, 0, Width, top);
+            if (bottom < Height) g.FillRectangle(dim, 0, bottom, Width, Height - bottom);
+            if (bottom > top && left > 0) g.FillRectangle(dim, 0, top, left, bottom - top);
+            if (bottom > top && right < Width) g.FillRectangle(dim, right, top, Width - right, bottom - top);
+        }
         using (var frame = new Pen(Color.White, Math.Max(1, Px(2)))) g.DrawRectangle(frame, r);
         var hs = Px(9);
         foreach (var c in new[] { new Point(r.Left, r.Top), new Point(r.Right, r.Top), new Point(r.Left, r.Bottom), new Point(r.Right, r.Bottom) })
@@ -1664,6 +1695,9 @@ sealed class KeyLane : KeyTrackLane
     public IReadOnlyList<double> Keys = [];
     protected override int KeyCount => Keys.Count;
     protected override double KeyTime(int i) => Keys[i];
+#if DEBUG
+    public override PointF DebugKey(int i) => new(X(Keys[i]), Y(Level(i)));
+#endif
     /// <summary>Height of the line at each key point, 0 (bottom) to 1</summary>
     public IReadOnlyList<double> Levels = [];
     /// <summary>The line at any time (it curves where points are eased), and a second, fainter one or null (position has two values: across and down)</summary>
