@@ -5,24 +5,26 @@ namespace CompressForDiscord;
 
 /// <summary>
 /// One audio track's waveform, filled in as it's measured. The finest level holds the loudest sample in each
-/// hundredth of a second; each level above holds the loudest of two below it, so drawing any zoom reads only a
-/// sample or two per pixel (like a video editor's waveform levels of detail). Measured in 30-second chunks: the part
-/// on screen first, then outwards from it, so a long recording's waveform pops in where you're looking.
+/// millisecond (so zoomed all the way in, where a frame is ~50 px wide, it still has detail); each level above holds
+/// the loudest of two below it, so drawing any zoom reads only a sample or two per pixel (like a video editor's
+/// waveform levels of detail). Levels are stored as one byte each, the square root of the level, which is the scale
+/// it's drawn at: a 65-minute recording takes ~8 MB a track. Measured in 30-second chunks: the part on screen first,
+/// then outwards from it, so a long recording's waveform pops in where you're looking.
 /// The loader threads write while the window reads; a stale read only means a chunk shows a moment late.
 /// </summary>
 sealed class Waveform
 {
-    /// <summary>Finest slices a second (10 ms each)</summary>
-    public const int Rate = 100;
-    const int SampleRate = 4000, PerSlice = SampleRate / Rate;
+    /// <summary>Finest slices a second (1 ms each)</summary>
+    public const int Rate = 1000;
+    const int SampleRate = 8000, PerSlice = SampleRate / Rate;
     const int ChunkSeconds = 30, ChunkSlices = ChunkSeconds * Rate;
     /// <summary>Longest stretch decoded in one go: shorter means the loader follows the view sooner</summary>
     const int MaxRunChunks = 20;
     /// <summary>ffmpegs measuring at once, each its own stretch: decoding the sound is what takes the time, at one core each</summary>
     static int Workers => Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
 
-    // levels[0] is the finest; values are 0..65535 for 0..1
-    readonly ushort[][] levels;
+    // levels[0] is the finest; values are 0..255 for the square root of 0..1
+    readonly byte[][] levels;
     readonly bool[] known;
     /// <summary>Chunks a worker has taken on and not finished yet (kept on the lead wave, under its gate)</summary>
     readonly bool[] claimed;
@@ -46,10 +48,10 @@ sealed class Waveform
         slices = Math.Max(1, (int)Math.Ceiling(duration * Rate));
         known = new bool[(slices + ChunkSlices - 1) / ChunkSlices];
         claimed = new bool[known.Length];
-        var list = new List<ushort[]>();
+        var list = new List<byte[]>();
         for (var n = slices; ; n = (n + 1) / 2)
         {
-            list.Add(new ushort[n]);
+            list.Add(new byte[n]);
             if (n == 1) break;
         }
         levels = [.. list];
@@ -68,13 +70,17 @@ sealed class Waveform
         var scale = 1 << level;
         var i0 = Math.Clamp((int)(s0 / scale), 0, a.Length - 1);
         var i1 = Math.Clamp((int)Math.Ceiling(s1 / scale), i0 + 1, a.Length);
-        ushort peak = 0;
+        byte peak = 0;
         for (var i = i0; i < i1; i++) if (a[i] > peak) peak = a[i];
         int c0 = Math.Clamp((int)(s0 / ChunkSlices), 0, known.Length - 1), c1 = Math.Clamp((int)((s1 - 1e-6) / ChunkSlices), c0, known.Length - 1);
         measured = false;
         for (var c = c0; c <= c1 && !measured; c++) measured = known[c];
-        return peak / 65535f;
+        return Decode(peak);
     }
+
+    static float Decode(byte b) => b / 255f * (b / 255f);
+    /// <summary>A peak sample (0..32768) as stored: the square root, rounded up so anything above silence shows</summary>
+    static byte Encode(int sample) => (byte)Math.Min(255, Math.Ceiling(Math.Sqrt(sample / 32768.0) * 255));
 
     /// <summary>
     /// Measures these tracks' waveforms, the chunks in view first. One ffmpeg reads them all together, so a long
@@ -164,7 +170,7 @@ sealed class Waveform
                     void Store()
                     {
                         for (var c = 0; c < count; c++)
-                            if (slice < waves[c].slices) waves[c].levels[0][slice] = (ushort)Math.Min(65535, peak[c] * 2);
+                            if (slice < waves[c].slices) waves[c].levels[0][slice] = Encode(peak[c]);
                     }
                     try
                     {
@@ -275,7 +281,7 @@ sealed class Waveform
         {
             if (chunk >= known.Length || known[chunk]) return;
             int lo = chunk * ChunkSlices, hi = Math.Min(slices, lo + ChunkSlices);
-            ushort loud = 0;
+            byte loud = 0;
             for (var i = lo; i < hi; i++) if (levels[0][i] > loud) loud = levels[0][i];
             for (var l = 1; l < levels.Length; l++)
             {
@@ -283,9 +289,9 @@ sealed class Waveform
                 lo >>= 1;
                 hi = Math.Min(here.Length, (hi + 1) >> 1);
                 for (var i = lo; i < hi; i++)
-                    here[i] = Math.Max(below[2 * i], 2 * i + 1 < below.Length ? below[2 * i + 1] : (ushort)0);
+                    here[i] = Math.Max(below[2 * i], 2 * i + 1 < below.Length ? below[2 * i + 1] : (byte)0);
             }
-            Loudest = Math.Max(Loudest, loud / 65535f);
+            Loudest = Math.Max(Loudest, Decode(loud));
             known[chunk] = true;
             Interlocked.Increment(ref knownCount);
             Interlocked.Increment(ref version);

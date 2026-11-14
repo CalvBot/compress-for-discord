@@ -70,6 +70,8 @@ sealed class AppConfig
     public bool PlaySound { get; set; } = true;
     /// <summary>The playhead only stops on frames of the chosen frame rate</summary>
     public bool FrameLock { get; set; } = true;
+    /// <summary>Waveforms drawn mirrored about the middle of their lane rather than up from the bottom</summary>
+    public bool MirroredWaves { get; set; }
     /// <summary>How many recent projects are kept to open again; 0 = none are saved</summary>
     public int RecentProjects { get; set; } = 10;
     public DateTime LastUpdateCheck { get; set; }

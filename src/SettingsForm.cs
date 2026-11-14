@@ -17,6 +17,8 @@ sealed class SettingsForm : DarkForm
 
     /// <summary>ffmpeg was found, changed or downloaded</summary>
     public event Action? FfmpegChanged;
+    /// <summary>The waveform style was changed: redraw them</summary>
+    public event Action? WavesChanged;
     /// <summary>A recent project was picked: the window that opened Settings opens it once Settings has closed</summary>
     public Project? OpenProject { get; private set; }
     readonly RecentList recentList;
@@ -129,9 +131,27 @@ sealed class SettingsForm : DarkForm
             catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
         };
         root.Controls.Add(desktop);
+        // Waveforms: up from the bottom of the lane, or mirrored about its middle
+        var wavesLabel = Muted("Waveforms");
+        wavesLabel.Margin = new Padding(0, 5, 8, 0);
+        var bottom = new Pill("From the bottom") { Margin = new Padding(0, 0, 6, 0) };
+        var mirrored = new Pill("Mirrored") { Margin = Padding.Empty };
+        void PickWaves(bool mirror)
+        {
+            cfg.MirroredWaves = mirror;
+            cfg.Save();
+            (bottom.On, mirrored.On) = (!mirror, mirror);
+            WavesChanged?.Invoke();
+        }
+        bottom.Click += (_, _) => PickWaves(false);
+        mirrored.Click += (_, _) => PickWaves(true);
+        (bottom.On, mirrored.On) = (!cfg.MirroredWaves, cfg.MirroredWaves);
+        var wavesRow = Row(wavesLabel, bottom, mirrored);
+        wavesRow.Margin = new Padding(0, 6, 0, 0);
         var sound = Check("Play a sound when done", cfg.PlaySound);
         sound.CheckedChanged += (_, _) => { cfg.PlaySound = sound.Checked; cfg.Save(); };
         root.Controls.Add(sound);
+        root.Controls.Add(wavesRow);
 
         // Updates
         root.Controls.Add(Section("Updates"));

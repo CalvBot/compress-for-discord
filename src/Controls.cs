@@ -1023,7 +1023,7 @@ sealed class VolumeLane : KeyTrackLane
     {
         var h = new HashCode();
         h.Add(From); h.Add(Span); h.Add(Start); h.Add(End); h.Add(Volume); h.Add(Grid); h.Add(Duration);
-        h.Add(Active); h.Add(Silent); h.Add(Enabled); h.Add(dragKey); h.Add(OnKey >= 0); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Sources);
+        h.Add(Active); h.Add(Silent); h.Add(Enabled); h.Add(dragKey); h.Add(OnKey >= 0); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Sources); h.Add(AppConfig.Current.MirroredWaves);
         // A waveform that's still being measured redraws as each chunk comes in
         for (var j = 0; j < Sources.Count; j++) h.Add(Sources[j].Wave.Version);
         // In any order: a set's order can differ for the same points
@@ -1249,7 +1249,10 @@ sealed class VolumeLane : KeyTrackLane
         using (var bg = new SolidBrush(Back)) g.FillPath(bg, shape);
         g.SetClip(shape);
 
-        float mid = Height / 2f, half = Height / 2f - 2;
+        // Up from the bottom (like an editor's rectified waveform: twice the height for the same lane), or
+        // mirrored about the middle
+        var mirrored = AppConfig.Current.MirroredWaves;
+        float mid = Height / 2f, floor = Height - 2, reach = mirrored ? Height / 2f - 2 : Height - 4;
         var sources = Sources;
         if (sources.Count > 0)
         {
@@ -1269,17 +1272,17 @@ sealed class VolumeLane : KeyTrackLane
                     measured |= m;
                     if (m && p > 0) peak = Math.Max(peak, p * (gain?.Invoke(t) ?? 1));
                 }
-                // Not measured yet: a faint stub on the middle line until it pops in
+                // Not measured yet: a faint stub on the base line until it pops in
                 if (!measured)
                 {
-                    waiting.Add(new RectangleF(G + x, mid - Px(2), 1, 2 * Px(2)));
+                    waiting.Add(mirrored ? new RectangleF(G + x, mid - Px(2), 1, 2 * Px(2)) : new RectangleF(G + x, floor - Px(3), 1, Px(3)));
                     continue;
                 }
                 // A fixed scale (not scaled to the loudest), so it doesn't shift as the rest pops in and tracks compare
                 // fairly. Square root so quiet sound still shows; full scale at 100% reaches about 70%, leaving room
                 // to show a boost.
-                var h = (float)Math.Min(1, Math.Sqrt(peak * GainAt(t) / 2)) * half;
-                if (h >= 0.5f) (t >= Start && t <= End ? inside : outside).Add(new RectangleF(G + x, mid - h, 1, 2 * h));
+                var h = (float)Math.Min(1, Math.Sqrt(peak * GainAt(t) / 2)) * reach;
+                if (h >= 0.5f) (t >= Start && t <= End ? inside : outside).Add(mirrored ? new RectangleF(G + x, mid - h, 1, 2 * h) : new RectangleF(G + x, floor - h, 1, h));
             }
             // Columns line up with pixels, so smoothing only blurs them
             g.SmoothingMode = SmoothingMode.None;

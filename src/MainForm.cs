@@ -664,6 +664,8 @@ sealed class MainForm : DarkForm
             {
                 case "audio": masterLane.Active = value != "off"; masterLane.Invalidate(); UpdateSummary(); break;
                 case "adv": tracksOpen = true; ShowTracks(); break;
+                // The waveform style for this run only (not saved)
+                case "mirrored": cfg.MirroredWaves = true; break;
                 case "grow":
                     // Same path as dragging the window edge
                     userSizing = true;
@@ -2342,6 +2344,7 @@ sealed class MainForm : DarkForm
         if (encodeCts != null) return;
         using var s = new SettingsForm();
         s.FfmpegChanged += () => _ = LoadVideo();
+        s.WavesChanged += () => { masterLane.Invalidate(); foreach (var (_, lane) in trackUi) lane.Invalidate(); };
         s.ShowDialog(this);
         if (s.OpenProject is { } project) { Program.OpenVideo(project.File, this, project); return; }
         UpdateSummary(); // encoder or margin may have changed
