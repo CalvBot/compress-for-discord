@@ -385,6 +385,8 @@ sealed class Timeline : Control
     public event Action<double>? Seeked;
     /// <summary>The strip was double-clicked at this time; the form plays from there, trimmed or not</summary>
     public event Action<double>? PlayRequested;
+    /// <summary>Key point times on every track; Shift + scrubbing snaps to these (and to the start and end)</summary>
+    public Func<IEnumerable<double>>? KeyPoints;
 
     DragKind drag;
     double grabOffset, length;
@@ -518,7 +520,25 @@ sealed class Timeline : Control
         var t = T(e.X);
         drag = HitTest(e.Location);
         if (drag == DragKind.Range) { grabOffset = t - Start; length = End - Start; }
-        if (drag == DragKind.Seek) Seek(t);
+        if (drag == DragKind.Seek) ScrubTo(t, e.X);
+    }
+
+    /// <summary>Moves the playhead while scrubbing. With Shift it jumps to a key point, the start or the end when one is close.</summary>
+    void ScrubTo(double t, int x)
+    {
+        if (!ModifierKeys.HasFlag(Keys.Shift)) { Seek(t); return; }
+        var best = double.NaN;
+        var bestDx = (float)Px(10);
+        foreach (var k in (KeyPoints?.Invoke() ?? []).Append(Start).Append(End))
+        {
+            var dx = Math.Abs(X(k) - x);
+            if (dx <= bestDx) (best, bestDx) = (k, dx);
+        }
+        if (double.IsNaN(best)) { Seek(t); return; }
+        // Exactly on it, not on the nearest frame
+        Current = Math.Clamp(best, 0, Duration);
+        Invalidate();
+        Seeked?.Invoke(Current);
     }
 
 #if DEBUG
@@ -586,7 +606,7 @@ sealed class Timeline : Control
                 SetRange(s, s + length);
                 Seek(s);
                 break;
-            default: Seek(t); break;
+            default: ScrubTo(t, x); break;
         }
         // Draw the playhead now. Windows only repaints when no input is waiting, so with a fast mouse the
         // playhead would otherwise trail behind in jumps.

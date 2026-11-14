@@ -70,7 +70,7 @@ static class Projects
             p.Saved = DateTime.Now;
             var all = Recent();
             foreach (var (path, old) in all.Where(x => string.Equals(x.Project.File, p.File, StringComparison.OrdinalIgnoreCase)))
-                try { File.Delete(path); } catch { }
+                Delete(path);
             File.WriteAllText(Path.Combine(Folder, $"{p.Saved:yyyyMMdd-HHmmss-fff}.json"), JsonSerializer.Serialize(p));
             Trim();
         }
@@ -84,28 +84,37 @@ static class Projects
         {
             p.File = Path.GetFullPath(video);
             foreach (var (other, _) in Recent().Where(x => x.Path != path && string.Equals(x.Project.File, p.File, StringComparison.OrdinalIgnoreCase)))
-                try { File.Delete(other); } catch { }
+                Delete(other);
             File.WriteAllText(path, JsonSerializer.Serialize(p));
+            // They were of the old video
+            try { File.Delete(ThumbPath(path)); } catch { }
         }
         catch { }
     }
 
-    public static void Remove(string path)
-    {
-        try { File.Delete(path); } catch { }
-    }
+    public static void Remove(string path) => Delete(path);
 
     /// <summary>Drops all but the newest ones the setting keeps</summary>
     public static void Trim()
     {
         foreach (var (path, _) in Recent().Skip(AppConfig.Current.RecentProjects))
-            try { File.Delete(path); } catch { }
+            Delete(path);
     }
 
     public static void Clear()
     {
         foreach (var (path, _) in Recent())
-            try { File.Delete(path); } catch { }
+            Delete(path);
+    }
+
+    /// <summary>The project's thumbnails (<see cref="ProjectThumbs"/>), saved beside it</summary>
+    public static string ThumbPath(string path) => Path.ChangeExtension(path, ".jpg");
+
+    /// <summary>A project file and its thumbnails</summary>
+    static void Delete(string path)
+    {
+        try { File.Delete(path); } catch { }
+        try { File.Delete(ThumbPath(path)); } catch { }
     }
 
     /// <summary>"Today 14:05", "Yesterday 09:12", "12 Nov 18:40"</summary>

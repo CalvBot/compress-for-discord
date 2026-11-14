@@ -35,6 +35,8 @@ sealed class FrameReader : IDisposable
 
     /// <summary>Whether frames are decoded on the graphics card (false if it couldn't be set up)</summary>
     public bool Gpu { get; private set; }
+    /// <summary>The video's own frame size, or empty if Windows didn't say</summary>
+    public Size Native { get; private set; }
 
     /// <summary>The video opened for reading frames, or null if Windows can't (the caller uses ffmpeg then)</summary>
     public static FrameReader? Open(string path, double fps, bool gpu = true)
@@ -56,13 +58,15 @@ sealed class FrameReader : IDisposable
             Check(r.GetNativeMediaType(FirstVideo, 0, out var native));
             var rot = MF_MT_VIDEO_ROTATION;
             var rotated = native.GetUINT32(ref rot, out var degrees) >= 0 && degrees != 0;
+            var frameSize = MF_MT_FRAME_SIZE;
+            var nativeSize = native.GetUINT64(ref frameSize, out var packed) >= 0 ? new Size((int)(packed >> 32), (int)(packed & 0xFFFFFFFF)) : Size.Empty;
             Marshal.ReleaseComObject(native);
             if (rotated)
             {
                 Marshal.ReleaseComObject(r);
                 return null;
             }
-            return new FrameReader(r, fps) { Gpu = onGpu };
+            return new FrameReader(r, fps) { Gpu = onGpu, Native = nativeSize };
         }
         catch (Exception ex)
         {

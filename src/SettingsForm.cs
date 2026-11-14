@@ -183,7 +183,14 @@ sealed class SettingsForm : DarkForm
         foreach (var part in (Environment.GetEnvironmentVariable("CFD_TEST") ?? "").Split(';'))
         {
             if (part.StartsWith("recentpage=")) recentList.ShowPage(int.Parse(part[11..]));
-            if (part.StartsWith("recenthover=")) recentList.Hover(int.Parse(part[12..]));
+            // recenthover=N or N,F: row N hovered, at thumbnail F (once the thumbnails are made)
+            if (part.StartsWith("recenthover="))
+            {
+                var at = part[12..].Split(',').Select(int.Parse).ToArray();
+                var wait = new System.Windows.Forms.Timer { Interval = 100 };
+                wait.Tick += (_, _) => { if (!recentList.ThumbsDone) return; wait.Dispose(); recentList.Hover(at[0], at.Length > 1 ? at[1] : -1); };
+                wait.Start();
+            }
             if (part.StartsWith("recentmenu=")) BeginInvoke(() => ShowRecentMenu(int.Parse(part[11..]), new Point(recentList.Width / 2, 20)));
         }
 #endif
@@ -363,12 +370,156 @@ sealed class SettingsForm : DarkForm
         int hover = -1, page;
         /// <summary>The arrow under the mouse: -1 back, 1 on, 0 neither</summary>
         int overArrow;
+        /// <summary>The thumbnail shown for the hovered row: moving across the row scrubs through them</summary>
+        int hoverFrame = -1;
         readonly ToolTip tips = new();
+        /// <summary>Each project's thumbnails, by project file and video (made in the background, one at a time)</summary>
+        readonly Dictionary<string, Bitmap[]?> thumbs = [];
+        readonly CancellationTokenSource life = new();
+        bool filling;
+        Peek? peek;
 
         public RecentList()
         {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
             Fit();
+        }
+
+        static string Key(Item item) => item.Path + "|" + item.Project.File;
+        Bitmap[]? Thumbs(Item item) => thumbs.GetValueOrDefault(Key(item));
+
+        /// <summary>Makes the missing thumbnails, the shown page first</summary>
+        async void FillThumbs()
+        {
+            if (filling) return;
+            filling = true;
+            try
+            {
+                while (!life.IsCancellationRequested)
+                {
+                    var next = Items.Skip(page * PerPage).Take(PerPage).Concat(Items).FirstOrDefault(i => !i.Missing && !thumbs.ContainsKey(Key(i)));
+                    if (next == null) break;
+                    thumbs[Key(next)] = null;
+                    var frames = await Task.Run(() => ProjectThumbs.LoadOrMake(next.Path, next.Project, life.Token));
+                    if (life.IsCancellationRequested) { foreach (var b in frames ?? []) b.Dispose(); break; }
+                    thumbs[Key(next)] = frames;
+                    Invalidate();
+                    if (hover >= 0) ShowPeek();
+                }
+            }
+            catch (Exception ex) { AppLog.Info($"Project thumbnails stopped: {ex.Message}"); }
+            finally { filling = false; }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                life.Cancel();
+                peek?.Dispose();
+                foreach (var frames in thumbs.Values) foreach (var b in frames ?? []) b.Dispose();
+                thumbs.Clear();
+            }
+            base.Dispose(disposing);
+        }
+
+        /// <summary>Where the thumbnail goes in a row</summary>
+        Rectangle ThumbBox(Rectangle row)
+        {
+            var h = row.Height - Px(10);
+            return new Rectangle(row.X + Px(8), row.Y + (row.Height - h) / 2, h * 16 / 9, h);
+        }
+
+        /// <summary>The larger frame above the hovered row (below it if there's no room), or hidden</summary>
+        void ShowPeek()
+        {
+            if (hover < 0 || hoverFrame < 0 || Thumbs(Items[hover]) is not { } frames || !IsHandleCreated || !Visible)
+            {
+                peek?.Hide();
+                return;
+            }
+            var frame = frames[Math.Clamp(hoverFrame, 0, frames.Length - 1)];
+            var w = Px(288);
+            var h = (int)Math.Round(w * (double)frame.Height / frame.Width);
+            var size = new Size(w + 2 * Px(6), h + Px(6) + Px(24));
+            var pad = Px(Pad);
+            var rowTop = PointToScreen(new Point(0, pad + (hover - page * PerPage) * Row));
+            var mouse = MousePosition;
+            var screen = Screen.FromControl(this).WorkingArea;
+            var x = Math.Clamp(mouse.X - size.Width / 2, screen.Left, screen.Right - size.Width);
+            var y = rowTop.Y - size.Height - Px(4);
+            if (y < screen.Top) y = rowTop.Y + Row + Px(4);
+            peek ??= new Peek();
+            peek.Set(frame, Items[hover].Project.File);
+            peek.Bounds = new Rectangle(new Point(x, y), size);
+            if (!peek.Visible) peek.Show(FindForm());
+        }
+
+        /// <summary>A borderless window with one frame and the video's path. It never takes focus or the mouse.</summary>
+        sealed class Peek : Form
+        {
+            Image? image;
+            string caption = "";
+
+            public Peek()
+            {
+                FormBorderStyle = FormBorderStyle.None;
+                ShowInTaskbar = false;
+                StartPosition = FormStartPosition.Manual;
+                BackColor = Theme.Bg2;
+                DoubleBuffered = true;
+            }
+
+            protected override bool ShowWithoutActivation => true;
+            protected override CreateParams CreateParams
+            {
+                get
+                {
+                    var cp = base.CreateParams;
+                    cp.ExStyle |= 0x08000000 | 0x80; // no activate, tool window
+                    return cp;
+                }
+            }
+
+            protected override void OnHandleCreated(EventArgs e)
+            {
+                base.OnHandleCreated(e);
+                // Rounded corners on Windows 11
+                var round = 2;
+                try { DwmSetWindowAttribute(Handle, 33, ref round, 4); } catch { }
+            }
+
+            [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+            static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+            // The mouse goes through to the list underneath
+            protected override void WndProc(ref Message m)
+            {
+                if (m.Msg == 0x84) { m.Result = -1; return; } // WM_NCHITTEST: HTTRANSPARENT
+                base.WndProc(ref m);
+            }
+
+            public void Set(Image frame, string path)
+            {
+                if (ReferenceEquals(frame, image) && path == caption) return;
+                (image, caption) = (frame, path);
+                Invalidate();
+            }
+
+            int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                var g = e.Graphics;
+                using (var border = new Pen(Theme.Bg3)) g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+                if (image == null) return;
+                var pad = Px(6);
+                var pic = new Rectangle(pad, pad, Width - 2 * pad, Height - pad - Px(24));
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+                g.DrawImage(image, pic);
+                TextRenderer.DrawText(g, caption, Font, new Rectangle(pad, pic.Bottom, Width - 2 * pad, Px(24)), Theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.PathEllipsis | TextFormatFlags.NoPrefix);
+            }
         }
 
         int Px(float v) => (int)Math.Round(v * DeviceDpi / 96f);
@@ -396,6 +547,8 @@ sealed class SettingsForm : DarkForm
             page = Math.Clamp(page, 0, Pages - 1);
             Fit();
             Invalidate();
+            peek?.Hide();
+            FillThumbs();
         }
 
         void GoTo(int to)
@@ -404,6 +557,8 @@ sealed class SettingsForm : DarkForm
             if (to == page) return;
             page = to;
             Invalidate();
+            // This page's thumbnails come next
+            FillThumbs();
             // The row under the mouse is a different project now
             var p = PointToClient(MousePosition);
             OnMouseMove(new MouseEventArgs(MouseButtons.None, 0, p.X, p.Y, 0));
@@ -429,13 +584,23 @@ sealed class SettingsForm : DarkForm
             base.OnMouseMove(e);
             var row = RowAt(e.Location);
             var arrow = ArrowAt(e.Location);
+            // Left to right across the row runs through the thumbnails
+            var inner = Width - 2 * Px(Pad);
+            var frame = row >= 0 ? Math.Clamp((e.X - Px(Pad)) * ProjectThumbs.Count / Math.Max(1, inner), 0, ProjectThumbs.Count - 1) : -1;
             if (row != hover || arrow != overArrow)
             {
                 (hover, overArrow) = (row, arrow);
                 Cursor = row >= 0 || arrow != 0 ? Cursors.Hand : Cursors.Default;
-                tips.SetToolTip(this, row >= 0 ? Items[row].Project.File : null);
+                // The preview shows the path; the tooltip is for rows without one
+                tips.SetToolTip(this, row >= 0 && Thumbs(Items[row]) == null ? Items[row].Project.File : null);
                 Invalidate();
             }
+            if (frame != hoverFrame)
+            {
+                hoverFrame = frame;
+                if (row >= 0) Invalidate(ThumbBox(new Rectangle(Px(Pad), Px(Pad) + (row - page * PerPage) * Row, inner, Row)));
+            }
+            ShowPeek();
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -461,12 +626,21 @@ sealed class SettingsForm : DarkForm
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
-            (hover, overArrow) = (-1, 0);
+            (hover, overArrow, hoverFrame) = (-1, 0, -1);
             Invalidate();
+            peek?.Hide();
         }
 
-        /// <summary>Shows a row as hovered (test screenshots)</summary>
-        public void Hover(int i) { hover = i; Invalidate(); }
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            if (!Visible) peek?.Hide();
+        }
+
+        /// <summary>Shows a row as hovered, at this thumbnail (test screenshots)</summary>
+        public void Hover(int i, int frame = -1) { (hover, hoverFrame) = (i, frame); Invalidate(); ShowPeek(); }
+        /// <summary>Whether every project on the page has its thumbnails (or can't have any)</summary>
+        public bool ThumbsDone => !filling && Items.All(i => i.Missing || thumbs.ContainsKey(Key(i)));
         /// <summary>Shows this page (test screenshots)</summary>
         public void ShowPage(int p) => GoTo(p);
 
@@ -487,7 +661,27 @@ sealed class SettingsForm : DarkForm
                 if (i == hover)
                     using (var shape = Theme.Round(new RectangleF(r.X, r.Y + 1, r.Width - 1, r.Height - 2), Px(6)))
                     using (var fill = new SolidBrush(Theme.Bg)) g.FillPath(fill, shape);
+                // The thumbnail: the hovered row's follows the mouse, the others show the first
+                var tb = ThumbBox(r);
+                using (var shape = Theme.Round(new RectangleF(tb.X, tb.Y, tb.Width, tb.Height), Px(4)))
+                {
+                    if (Thumbs(item) is { } frames)
+                    {
+                        var state = g.Save();
+                        g.SetClip(shape);
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+                        var img = frames[i == hover && hoverFrame >= 0 ? Math.Min(hoverFrame, frames.Length - 1) : 0];
+                        // Fill the box, cropping what doesn't fit
+                        var scale = Math.Max(tb.Width / (float)img.Width, tb.Height / (float)img.Height);
+                        var (dw, dh) = (img.Width * scale, img.Height * scale);
+                        g.DrawImage(img, tb.X + (tb.Width - dw) / 2, tb.Y + (tb.Height - dh) / 2, dw, dh);
+                        g.Restore(state);
+                    }
+                    else using (var fill = new SolidBrush(Theme.Bg2)) g.FillPath(fill, shape);
+                }
                 var text = Px(10);
+                r = Rectangle.FromLTRB(tb.Right, r.Y, r.Right, r.Bottom);
                 var when = item.Missing ? "moved or deleted · click to locate" : Projects.When(item.Project.Saved);
                 var whenW = TextRenderer.MeasureText(when, Font).Width;
                 TextRenderer.DrawText(g, when, Font, new Rectangle(r.Right - text - whenW, r.Y, whenW, r.Height), item.Missing ? Theme.Danger : Theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPrefix);

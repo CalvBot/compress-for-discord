@@ -183,6 +183,7 @@ sealed class MainForm : DarkForm
             cfg.Save();
             if (timeline.FrameLock && probe != null) timeline.Seek(timeline.Current);
         };
+        timeline.KeyPoints = () => AllTracks.SelectMany(l => l.KeyTimes);
         timeline.Seeked += t => { if (playCts != null) stoppedByClick = Environment.TickCount64; StopPlayback(); RequestFrame(t); };
         // Double-click plays from that spot to the end of the video, so you can watch what's outside the trim.
         // Not when the first click of the two was what stopped it playing: then it just stays stopped there.
@@ -2434,12 +2435,14 @@ sealed class MainForm : DarkForm
         var mods = keyData & Keys.Modifiers;
         if (keyData == (Keys.Control | Keys.C)) return CopyKeys();
         if (keyData == (Keys.Control | Keys.V)) return PasteKeys();
-        if (mods != Keys.None && !(mods == Keys.Shift && key is Keys.Left or Keys.Right)) return false;
+        if (mods != Keys.None && !(mods == Keys.Shift && key is Keys.Left or Keys.Right or Keys.Space)) return false;
         var step = mods == Keys.Shift ? 5 : StepLength;
         // Close enough to count as being on a key point (with frame lock, the playhead can only get within half a frame)
         var near = Math.Max(0.01, timeline.FrameLock ? FrameLength / 2 : 0);
         switch (key)
         {
+            // Shift + Space: play from the start of the trim, even if already playing
+            case Keys.Space when mods == Keys.Shift: StopPlayback(); _ = PlayFrom(timeline.Start); break;
             case Keys.Space: TogglePlay(); break;
             // Over a track with key points, the arrows go from one to the next
             case Keys.Left or Keys.Right when mods == Keys.None && hoverTrack is { Visible: true } && hoverTrack.KeyTimes.ToList() is { Count: > 0 } times:

@@ -7,6 +7,7 @@ sealed class HelpForm : DarkForm
     [
         ("Playback", [
             ("Space", "Play / pause"),
+            ("Shift + Space", "Play from the start"),
             ("← / →", "Step a frame (Shift: 5 seconds)"),
             ("Wheel on preview", "Step a frame"),
             ("Home / End", "Jump to start / end"),
@@ -14,6 +15,7 @@ sealed class HelpForm : DarkForm
         ("Timeline", [
             ("Q / E  (or I / O)", "Set start / end"),
             ("Shift + drag a tab", "Snap it to the playhead"),
+            ("Shift + scrub", "Snap to key points, start and end"),
             ("Double-click", "Play from there"),
             ("Wheel / Alt + wheel", "Scroll / zoom to playhead"),
             ("Alt + Shift + wheel", "Zoom to the mouse"),
