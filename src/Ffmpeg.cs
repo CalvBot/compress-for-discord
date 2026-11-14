@@ -233,7 +233,9 @@ static class Ff
     }
 
     /// <summary>Evenly spaced frames for the timeline, 4 at a time; each one is reported as soon as it's ready.</summary>
-    public static async Task Thumbnails(string path, double duration, int count, int height, Action<int, Image> onFrame, CancellationToken ct)
+    /// <param name="start">where the stretch of video begins</param>
+    /// <param name="duration">how long the stretch is</param>
+    public static async Task Thumbnails(string path, double start, double duration, int count, int height, Action<int, Image> onFrame, CancellationToken ct)
     {
         var next = -1;
         await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
@@ -241,7 +243,7 @@ static class Ff
             int i;
             while ((i = Interlocked.Increment(ref next)) < count && !ct.IsCancellationRequested)
             {
-                var img = await Frame(path, (i + 0.5) * duration / count, height, ct);
+                var img = await Frame(path, start + (i + 0.5) * duration / count, height, ct);
                 if (img != null) onFrame(i, img);
             }
         })));

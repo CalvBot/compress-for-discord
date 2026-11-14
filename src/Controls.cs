@@ -276,10 +276,29 @@ sealed class Timeline : Control
     /// <summary>Height of the row of tabs above the thumbnails</summary>
     int TabH => Px(14);
     int TabW => Px(16);
+    /// <summary>The part of the video on screen (the timeline's zoom). End at or before start = all of it.</summary>
+    public double ViewStart, ViewEnd;
+    double From => ViewEnd > ViewStart ? ViewStart : 0;
+    double Span => ViewEnd > ViewStart ? ViewEnd - ViewStart : Duration;
+    /// <summary>The stretch of video the thumbnails were made for (they're remade after zooming)</summary>
+    public double ThumbStart, ThumbSpan = 1;
+    /// <summary>Mouse wheel: zoom by this factor around this time</summary>
+    public event Action<double, double>? ZoomRequested;
+    /// <summary>Shift + mouse wheel: scroll by this fraction of what's on screen</summary>
+    public event Action<double>? PanRequested;
+
     /// <summary>Empty strip at the left, so the timeline lines up with the tracks below and their buttons</summary>
     int G => Px(Tracks.Gutter);
-    float X(double t) => G + (float)(t / Duration * (Width - G));
-    double T(int x) => Math.Clamp((x - G) / (double)Math.Max(1, Width - G) * Duration, 0, Duration);
+    float X(double t) => G + (float)((t - From) / Span * (Width - G));
+    double T(int x) => Math.Clamp(From + (x - G) / (double)Math.Max(1, Width - G) * Span, 0, Duration);
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        if (!Enabled) return;
+        if (ModifierKeys.HasFlag(Keys.Shift)) PanRequested?.Invoke(e.Delta > 0 ? -0.15 : 0.15);
+        else ZoomRequested?.Invoke(e.Delta > 0 ? 0.75 : 1 / 0.75, T(e.X));
+    }
 
     public void Reset(double duration)
     {
@@ -287,6 +306,7 @@ sealed class Timeline : Control
         Start = 0;
         End = Duration;
         Current = 0;
+        (ViewStart, ViewEnd, ThumbStart, ThumbSpan) = (0, Duration, 0, Duration);
         Invalidate();
     }
 
@@ -396,11 +416,17 @@ sealed class Timeline : Control
         int left = G, bodyW = Width - left;
         using (var black = new SolidBrush(Color.Black)) g.FillRectangle(black, left, top, bodyW, bodyH);
 
+        // Zoomed in, the start, end and playhead can be off either side: keep everything out of the button strip
+        g.SetClip(new Rectangle(left, 0, bodyW, Height));
+
         // Thumbnails, cropped to fill each cell
         var n = Thumbs.Length;
         for (var i = 0; i < n; i++)
         {
-            var cell = new RectangleF(left + i * bodyW / (float)n, top, Math.Min(bodyW / (float)n + 1, Width - left - i * bodyW / (float)n), bodyH);
+            // Each thumbnail sits where its stretch of video is, so the strip stays right while zoomed thumbnails load
+            float x0 = X(ThumbStart + i * ThumbSpan / n), x1 = X(ThumbStart + (i + 1) * ThumbSpan / n);
+            if (x1 < left || x0 > Width) continue;
+            var cell = new RectangleF(x0, top, x1 - x0 + 1, bodyH);
             if (Thumbs[i] is not { } img)
             {
                 using var b = new SolidBrush(Color.FromArgb(i % 2 == 0 ? 18 : 26, Color.White));
@@ -416,8 +442,8 @@ sealed class Timeline : Control
         int s = (int)Math.Round(X(Start)), en = (int)Math.Round(X(End)), edge = Math.Max(2, Px(3)), tw = TabW;
         using (var dim = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
         {
-            g.FillRectangle(dim, left, top, s - left, bodyH);
-            g.FillRectangle(dim, en, top, Width - en, bodyH);
+            g.FillRectangle(dim, left, top, Math.Max(0, s - left), bodyH);
+            g.FillRectangle(dim, en, top, Math.Max(0, Width - en), bodyH);
         }
         using (var brand = new SolidBrush(Enabled ? Theme.Brand : Theme.Secondary))
         {
@@ -554,8 +580,12 @@ sealed class VolumeLane : Control
     /// <summary>Room at the left for the buttons; the lane itself starts after it, in line with the timeline</summary>
     int G => Px(Tracks.Gutter);
     int BodyW => Math.Max(1, Width - G);
-    float X(double t) => G + (float)(t / Duration * BodyW);
-    double T(int x) => Math.Clamp((x - G) / (double)BodyW * Duration, 0, Duration);
+    /// <summary>The part of the video on screen (the timeline's zoom). End at or before start = all of it.</summary>
+    public double ViewStart, ViewEnd;
+    double From => ViewEnd > ViewStart ? ViewStart : 0;
+    double Span => ViewEnd > ViewStart ? ViewEnd - ViewStart : Duration;
+    float X(double t) => G + (float)((t - From) / Span * BodyW);
+    double T(int x) => Math.Clamp(From + (x - G) / (double)BodyW * Span, 0, Duration);
     float Y(double v) => Pad + (float)((2 - v) / 2 * (Height - 2 * Pad));
     // Sticks to 100% when close, so "unchanged" is easy to hit
     static double Snap(double v) { v = Math.Clamp(v, 0, 2); return Math.Abs(v - 1) < 0.06 ? 1 : Math.Round(v, 2); }
@@ -582,8 +612,8 @@ sealed class VolumeLane : Control
     }
 
     string BadgeText => Label + (Silent ? " · silent" : "");
-    Rectangle MuteButton => Tracks.Button(this, 0);
-    Rectangle AddButton => Tracks.Button(this, 1);
+    Rectangle MuteButton => Tracks.Button(this, 0, 2);
+    Rectangle AddButton => Tracks.Button(this, 1, 2);
     Rectangle Badge => new(G + Px(5), Px(4), Px(10) + TextRenderer.MeasureText(BadgeText, Small, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
 
     /// <summary>Adds a point on the line at a time (or finds the one already there); returns its index</summary>
@@ -680,18 +710,18 @@ sealed class VolumeLane : Control
             using var outside = new Pen(Color.FromArgb(90, Active ? Theme.Brand : Theme.Secondary));
             for (var x = 0; x < BodyW; x++)
             {
-                var t = x / (double)BodyW * Duration;
+                var t = From + x / (double)BodyW * Span;
                 // Half height at 100% so there's room to show a boost
-                var h = (float)Math.Min(1, peaks[Math.Min(peaks.Length - 1, (int)((long)x * peaks.Length / BodyW))] / loudest * 0.5 * GainAt(t)) * half;
+                var h = (float)Math.Min(1, peaks[Math.Clamp((int)(t / Duration * peaks.Length), 0, peaks.Length - 1)] / loudest * 0.5 * GainAt(t)) * half;
                 if (h >= 0.5f) g.DrawLine(t >= Start && t <= End ? inside : outside, G + x + 0.5f, mid - h, G + x + 0.5f, mid + h);
             }
         }
 
         // Volume line and its points
         var line = Color.FromArgb(Active ? 235 : 110, Color.White);
-        var pts = new List<PointF> { new(G, Y(GainAt(0))) };
+        var pts = new List<PointF> { new(X(0), Y(GainAt(0))) };
         pts.AddRange(Keys.Select(k => new PointF(X(k.T), Y(k.V))));
-        pts.Add(new PointF(Width, Y(GainAt(Duration))));
+        pts.Add(new PointF(X(Duration), Y(GainAt(Duration))));
         using (var pen = new Pen(line, 1.5f)) g.DrawLines(pen, pts.ToArray());
         using (var dot = new SolidBrush(line))
             foreach (var k in Keys) g.FillEllipse(dot, X(k.T) - Px(4), Y(k.V) - Px(4), Px(8), Px(8));
@@ -876,15 +906,15 @@ sealed class CropView : Control
 /// <summary>The strip at the left of the timeline and every track, holding each track's buttons</summary>
 static class Tracks
 {
-    /// <summary>Width of the strip, in 96-dpi pixels: two buttons and a gap before the track</summary>
-    public const int Gutter = 58;
+    /// <summary>Width of the strip, in 96-dpi pixels: one button and a gap before the track</summary>
+    public const int Gutter = 30;
 
-    /// <summary>Where a track's first (0) or second (1) button goes: side by side, centred on the track's height</summary>
-    public static Rectangle Button(Control track, int slot)
+    /// <summary>Where button number `slot` of a track's `count` goes: stacked one above the other, centred on the track's height</summary>
+    public static Rectangle Button(Control track, int slot, int count)
     {
         int Px(int v) => (int)Math.Round(v * track.DeviceDpi / 96f);
-        var size = Px(24);
-        return new Rectangle(slot * (size + Px(4)), (track.Height - size) / 2, size, size);
+        int size = Px(24), gap = Px(4), top = (track.Height - (count * size + (count - 1) * gap)) / 2;
+        return new Rectangle(0, top + slot * (size + gap), size, size);
     }
 
     public static void DrawButton(Graphics g, Rectangle r)
@@ -941,12 +971,15 @@ sealed class KeyLane : Control
     protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
     protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
 
-    // Same column as the audio tracks' add-a-point buttons
-    Rectangle AddButton => Tracks.Button(this, 1);
+    Rectangle AddButton => Tracks.Button(this, 0, 1);
     int G => Px(Tracks.Gutter);
     int BodyW => Math.Max(1, Width - G);
-    float X(double t) => G + (float)(t / Duration * BodyW);
-    double T(int x) => Math.Clamp((x - G) / (double)BodyW * Duration, 0, Duration);
+    /// <summary>The part of the video on screen (the timeline's zoom). End at or before start = all of it.</summary>
+    public double ViewStart, ViewEnd;
+    double From => ViewEnd > ViewStart ? ViewStart : 0;
+    double Span => ViewEnd > ViewStart ? ViewEnd - ViewStart : Duration;
+    float X(double t) => G + (float)((t - From) / Span * BodyW);
+    double T(int x) => Math.Clamp(From + (x - G) / (double)BodyW * Span, 0, Duration);
     float Y(double level) => Height - Px(9) - (float)(Math.Clamp(level, 0, 1) * (Height - Px(18)));
     double Level(int i) => i < Levels.Count ? Levels[i] : 0;
 
@@ -995,9 +1028,9 @@ sealed class KeyLane : Control
         // The zoom over time: flat before the first point and after the last
         if (Keys.Count > 0)
         {
-            var pts = new List<PointF> { new(G, Y(Level(0))) };
+            var pts = new List<PointF> { new(X(0), Y(Level(0))) };
             for (var i = 0; i < Keys.Count; i++) pts.Add(new PointF(X(Keys[i]), Y(Level(i))));
-            pts.Add(new PointF(Width, Y(Level(Keys.Count - 1))));
+            pts.Add(new PointF(X(Duration), Y(Level(Keys.Count - 1))));
             using var line = new Pen(Color.FromArgb(200, Theme.Brand), Math.Max(1.5f, Px(2)));
             g.DrawLines(line, pts.ToArray());
         }
@@ -1018,5 +1051,118 @@ sealed class KeyLane : Control
         using (var back = Theme.Round(badge, Px(4)))
         using (var fill = new SolidBrush(Color.FromArgb(215, Theme.Bg2))) g.FillPath(fill, back);
         TextRenderer.DrawText(g, name, SmallFont, new Rectangle(badge.X + Px(5), badge.Y, badge.Width, badge.Height), Theme.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+    }
+}
+
+/// <summary>
+/// The whole video as a thin bar, with a window on it marking the part the timeline and tracks are showing.
+/// Drag the window to scroll, drag either end to zoom, double-click to see everything again.
+/// </summary>
+sealed class ZoomBar : Control
+{
+    enum Grab { None, Left, Right, Move }
+
+    public double Duration = 1, ViewStart, ViewEnd = 1, Current, TrimStart, TrimEnd = 1;
+    /// <summary>The window was dragged to this start and end</summary>
+    public event Action<double, double>? ViewChanged;
+
+    Grab grab;
+    double grabOffset, grabSpan;
+
+    public ZoomBar()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, false);
+    }
+
+    int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
+    void Fit() => Height = Px(16);
+    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
+    protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
+    protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
+
+    int G => Px(Tracks.Gutter);
+    int BodyW => Math.Max(1, Width - G);
+    float X(double t) => G + (float)(t / Duration * BodyW);
+    double T(int x) => Math.Clamp((x - G) / (double)BodyW * Duration, 0, Duration);
+    /// <summary>The closest it zooms: a second, or less for very short videos</summary>
+    public double MinSpan => Math.Min(1, Duration / 4);
+
+    Grab HitTest(int x)
+    {
+        float a = X(ViewStart), b = X(ViewEnd);
+        var reach = Px(7);
+        if (Math.Abs(x - a) <= reach && x < (a + b) / 2) return Grab.Left;
+        if (Math.Abs(x - b) <= reach) return Grab.Right;
+        return x > a && x < b ? Grab.Move : Grab.None;
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (!Enabled || e.Button != MouseButtons.Left) return;
+        grab = HitTest(e.X);
+        grabSpan = ViewEnd - ViewStart;
+        if (grab == Grab.None)
+        {
+            // Click outside the window: bring it there and keep hold of it
+            var centre = T(e.X);
+            ViewChanged?.Invoke(centre - grabSpan / 2, centre + grabSpan / 2);
+            grab = Grab.Move;
+        }
+        grabOffset = T(e.X) - ViewStart;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (grab == Grab.None)
+        {
+            Cursor = HitTest(e.X) switch { Grab.Left or Grab.Right => Cursors.SizeWE, Grab.Move => Cursors.Hand, _ => Cursors.Default };
+            return;
+        }
+        var t = T(e.X);
+        switch (grab)
+        {
+            case Grab.Left: ViewChanged?.Invoke(Math.Min(t, ViewEnd - MinSpan), ViewEnd); break;
+            case Grab.Right: ViewChanged?.Invoke(ViewStart, Math.Max(t, ViewStart + MinSpan)); break;
+            default: ViewChanged?.Invoke(t - grabOffset, t - grabOffset + grabSpan); break;
+        }
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); grab = Grab.None; }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        base.OnMouseDoubleClick(e);
+        if (Enabled && e.Button == MouseButtons.Left) ViewChanged?.Invoke(0, Duration);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Parent?.BackColor ?? Theme.Bg);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        float h = Height - 1;
+        using var track = Theme.Round(new RectangleF(G, 0, BodyW - 1, h), h / 2);
+        using (var bg = new SolidBrush(Theme.Bg3)) g.FillPath(bg, track);
+        g.SetClip(track);
+        // The trimmed part, faintly, so you can see where the clip sits in the whole video
+        using (var trim = new SolidBrush(Color.FromArgb(70, Theme.Brand))) g.FillRectangle(trim, X(TrimStart), 0, Math.Max(1, X(TrimEnd) - X(TrimStart)), Height);
+        g.ResetClip();
+
+        // The window: what the timeline is showing
+        float a = X(ViewStart), b = Math.Max(X(ViewEnd), a + Px(12));
+        using (var window = Theme.Round(new RectangleF(a, 0, Math.Min(b, Width - 1) - a, h), h / 2))
+        {
+            using var fill = new SolidBrush(Color.FromArgb(Enabled ? 150 : 80, Theme.Secondary));
+            using var edge = new Pen(Enabled ? Theme.SecondaryHover : Theme.Secondary);
+            g.FillPath(fill, window);
+            g.DrawPath(edge, window);
+        }
+        using (var grip = new Pen(Color.FromArgb(200, Color.White), Math.Max(1, Px(2))))
+            foreach (var x in new[] { a + Px(5), Math.Min(b, Width - 1) - Px(5) })
+                g.DrawLine(grip, x, Px(4), x, Height - Px(5));
+        using (var head = new Pen(Color.White, Math.Max(1, Px(2)))) g.DrawLine(head, X(Current), 0, X(Current), Height);
     }
 }

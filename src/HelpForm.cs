@@ -11,6 +11,7 @@ sealed class HelpForm : DarkForm
         ("E  or  O", "Set end"),
         ("Home / End", "Jump to start / end"),
         ("Double-click timeline", "Play from there"),
+        ("Wheel on timeline", "Zoom (Shift: scroll)"),
         ("Shift + drag a tab", "Keep the playhead, snap to it"),
         ("Alt + click a track", "Add a key point"),
         ("Enter", "Compress & copy"),

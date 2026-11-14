@@ -47,6 +47,12 @@ sealed class MainForm : DarkForm
     readonly Label subtitle, timeLabel, summary, status;
     readonly CropView preview;
     readonly KeyLane keyLane;
+    readonly ZoomBar zoomBar;
+    /// <summary>The part of the video the timeline and tracks are showing (zoom)</summary>
+    double viewStart, viewEnd;
+    CancellationTokenSource? thumbCts;
+    /// <summary>Waits for zooming to settle before remaking the thumbnails</summary>
+    readonly System.Windows.Forms.Timer thumbTimer = new() { Interval = 350 };
     readonly Timeline timeline;
     readonly FlowLayoutPanel sizeChips, resChips, cropChips, fpsChips, encChips, tracksPanel, buttons;
     readonly VolumeLane masterLane;
@@ -115,7 +121,13 @@ sealed class MainForm : DarkForm
         timeline.ContextMenuStrip = timelineMenu;
 
         // Play row: Play, Preview, the current time (click to type one), the trim range, and Advanced on the right
-        timeRow = new Panel { Size = new Size(ContentWidth, 30), Margin = new Padding(0, 6, 0, 10) };
+        timeRow = new Panel { Size = new Size(ContentWidth, 30), Margin = new Padding(0, 0, 0, 8) };
+        // The whole video with a window on it: drag the window's ends to zoom the timeline, the middle to scroll
+        zoomBar = new ZoomBar { Size = new Size(ContentWidth, 16), Margin = new Padding(0, 0, 0, 4) };
+        zoomBar.ViewChanged += (a, b) => SetView(a, b);
+        timeline.ZoomRequested += (factor, around) => { var span = (viewEnd - viewStart) * factor; SetView(around - (around - viewStart) * factor, around - (around - viewStart) * factor + span); };
+        timeline.PanRequested += by => { var shift = (viewEnd - viewStart) * by; SetView(viewStart + shift, viewEnd + shift, keepSpan: true); };
+        thumbTimer.Tick += (_, _) => { thumbTimer.Stop(); _ = LoadThumbnails(); };
         playBtn = new Pill("▶  Play") { Dock = DockStyle.Left, Enabled = false };
         playBtn.Click += (_, _) => TogglePlay();
         // Preview: show the result, with position and scale applied, instead of the editing view with its box
@@ -136,7 +148,7 @@ sealed class MainForm : DarkForm
         timeRow.Controls.AddRange([timeLabel, advBtn, timeField, Gap(), previewBtn, Gap(), playBtn]);
 
         // Options: label column + chip rows
-        options = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, BackColor = Theme.Bg2, Padding = new Padding(12, 10, 12, 6), Margin = new Padding(0, 0, 0, 10), MinimumSize = new Size(ContentWidth, 0) };
+        options = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, BackColor = Theme.Bg2, Padding = new Padding(12, 10, 12, 6), Margin = new Padding(0, 10, 0, 10), MinimumSize = new Size(ContentWidth, 0) };
         options.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         options.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         FlowLayoutPanel ChipRow()
@@ -240,7 +252,7 @@ sealed class MainForm : DarkForm
         bottom.Controls.Add(info, 0, 0);
         bottom.Controls.Add(buttons, 1, 0);
 
-        root.Controls.AddRange([titleRow, preview, timeline, masterLane, tracksPanel, timeRow, options, bar, bottom]);
+        root.Controls.AddRange([titleRow, preview, timeRow, zoomBar, timeline, masterLane, tracksPanel, options, bar, bottom]);
         Controls.Add(root);
         AcceptDrop(f => { if (encodeCts == null && outPath == null) Program.OpenVideo(f, this); });
         // Clicking anywhere else stops typing in the custom size box
@@ -291,6 +303,8 @@ sealed class MainForm : DarkForm
         preview.FrameAspect = probe.Width / (double)probe.Height;
         timeline.Fps = probe.Fps;
         timeline.Reset(probe.Duration);
+        zoomBar.Duration = probe.Duration;
+        SetView(0, probe.Duration, remakeThumbs: false);
         timeline.Enabled = true;
         playBtn.Enabled = true;
         ActiveControl = timeline;
@@ -316,6 +330,7 @@ sealed class MainForm : DarkForm
             lane.Committed += UpdateMasterPeaks;
             // Hear a volume change once the mouse is let go
             lane.Committed += RestartIfPlaying;
+            (lane.ViewStart, lane.ViewEnd) = (viewStart, viewEnd);
             tracksPanel.Controls.Add(lane);
             trackUi.Add((t, lane));
         }
@@ -361,6 +376,7 @@ sealed class MainForm : DarkForm
                 case "fps": frameRate = int.Parse(value); SelectChip(fpsChips, frameRate); UpdateSummary(); break;
                 case "res": scalePct = int.Parse(value); SelectChip(resChips, scalePct); UpdateSummary(); break;
                 case "crop": SetCrop(value); break;
+                case "zoom": SetView(double.Parse(value.Split('-')[0]), double.Parse(value.Split('-')[1])); break;
                 case "preview": SetPreview(true); break;
                 case "goto": timeBox.Text = value; if (ParseTime(value) is { } go) timeline.Seek(go); break;
                 case "cropkeys":
@@ -404,14 +420,57 @@ sealed class MainForm : DarkForm
         });
     }
 
+    /// <summary>
+    /// Shows this stretch of the video on the timeline and every track.
+    /// </summary>
+    /// <param name="keepSpan">scrolling: keep the zoom and stop at the ends, rather than squeezing against them</param>
+    void SetView(double start, double end, bool keepSpan = false, bool remakeThumbs = true)
+    {
+        var duration = timeline.Duration;
+        var span = Math.Clamp(keepSpan ? viewEnd - viewStart : end - start, zoomBar.MinSpan, duration);
+        start = Math.Clamp(start, 0, duration - span);
+        if (start == viewStart && start + span == viewEnd) return;
+        (viewStart, viewEnd) = (start, start + span);
+        (timeline.ViewStart, timeline.ViewEnd) = (keyLane.ViewStart, keyLane.ViewEnd) = (zoomBar.ViewStart, zoomBar.ViewEnd) = (viewStart, viewEnd);
+        foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane))
+        {
+            (lane.ViewStart, lane.ViewEnd) = (viewStart, viewEnd);
+            lane.Invalidate();
+        }
+        timeline.Invalidate();
+        keyLane.Invalidate();
+        zoomBar.Invalidate();
+        if (remakeThumbs) { thumbTimer.Stop(); thumbTimer.Start(); }
+    }
+
+    /// <summary>
+    /// Thumbnails for the stretch the timeline is showing. The first set fills in as it arrives; after a zoom the
+    /// old strip stays until the new one is complete, then they swap.
+    /// </summary>
     async Task LoadThumbnails()
     {
-        var height = timeline.Height;
-        await Ff.Thumbnails(file, probe!.Duration, timeline.Thumbs.Length, height, (i, img) =>
+        thumbCts?.Cancel();
+        var cts = thumbCts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        double start = viewStart, span = viewEnd - viewStart;
+        var first = timeline.Thumbs.All(t => t == null);
+        var fresh = first ? timeline.Thumbs : new Image?[timeline.Thumbs.Length];
+        if (first) (timeline.ThumbStart, timeline.ThumbSpan) = (start, span);
+        await Ff.Thumbnails(file, start, span, fresh.Length, timeline.Height, (i, img) =>
         {
-            if (IsDisposed) { img.Dispose(); return; }
-            BeginInvoke(() => { timeline.Thumbs[i] = img; timeline.Invalidate(); });
-        }, lifetime.Token);
+            if (cts.IsCancellationRequested || IsDisposed) { img.Dispose(); return; }
+            fresh[i] = img;
+            if (first) BeginInvoke(timeline.Invalidate);
+        }, cts.Token);
+        if (first || IsDisposed) return;
+        if (cts.IsCancellationRequested)
+        {
+            foreach (var img in fresh) img?.Dispose();
+            return;
+        }
+        var old = timeline.Thumbs;
+        (timeline.Thumbs, timeline.ThumbStart, timeline.ThumbSpan) = (fresh, start, span);
+        timeline.Invalidate();
+        foreach (var img in old) img?.Dispose();
     }
 
     // ---------- preview frame ----------
@@ -754,7 +813,7 @@ sealed class MainForm : DarkForm
     {
         var w = baseW + extraW;
         root.SuspendLayout();
-        foreach (var c in new Control[] { titleRow, preview, timeline, keyLane, timeRow, bar }) c.Width = w;
+        foreach (var c in new Control[] { titleRow, preview, timeRow, zoomBar, timeline, keyLane, bar }) c.Width = w;
         preview.Height = basePreviewH + extraH;
         options.MinimumSize = bottom.MinimumSize = new Size(w, 0);
         foreach (var row in chipRows) row.MaximumSize = new Size(baseChipMax + extraW, 0);
@@ -823,6 +882,11 @@ sealed class MainForm : DarkForm
         if (!timeBox.Focused) timeBox.Text = Planner.FormatTime(timeline.Current);
         timeLabel.Text = $"{Planner.FormatTime(timeline.Start)} – {Planner.FormatTime(timeline.End)} ({Planner.FormatTime(timeline.End - timeline.Start, false)})";
         ShowCrop();
+        // Keep the playhead in sight while playing: turn the page when it runs off the end
+        if (playCts != null && (timeline.Current > viewEnd || timeline.Current < viewStart))
+            SetView(timeline.Current, timeline.Current + (viewEnd - viewStart), keepSpan: true);
+        (zoomBar.Current, zoomBar.TrimStart, zoomBar.TrimEnd) = (timeline.Current, timeline.Start, timeline.End);
+        zoomBar.Invalidate();
         foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane))
         {
             (lane.Start, lane.End, lane.Current) = (timeline.Start, timeline.End, timeline.Current);
