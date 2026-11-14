@@ -20,6 +20,7 @@ sealed class HelpForm : DarkForm
         ("Del", "Delete the selected key point"),
         ("Right-click a key point", "Linear, smooth, ease or hold"),
         ("Button left of the timeline", "Frame lock: stop on whole frames"),
+        ("Settings > Recent projects", "Open a video as you last set it up"),
         ("Ctrl / Shift + drag picture", "Snap to edges / one direction"),
         ("Ctrl / Shift / Alt + drag corner", "Snap / from centre / reshape"),
         ("Enter", "Compress & copy"),

@@ -64,6 +64,16 @@ class DarkForm : Form
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    static extern int SetWindowTheme(IntPtr hwnd, string app, string? idList);
+
+    /// <summary>Gives a scrolling control Windows' dark scrollbars</summary>
+    public static void DarkScrollbars(Control c)
+    {
+        if (c.IsHandleCreated) SetWindowTheme(c.Handle, "DarkMode_Explorer", null);
+        else c.HandleCreated += (_, _) => SetWindowTheme(c.Handle, "DarkMode_Explorer", null);
+    }
+
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);

@@ -1,6 +1,6 @@
 namespace CompressForDiscord;
 
-/// <summary>ffmpeg location, desktop shortcut, done sound and updates. Everything applies as soon as it's changed.</summary>
+/// <summary>Recent projects, ffmpeg location, desktop shortcut, done sound and updates. Everything applies as soon as it's changed.</summary>
 sealed class SettingsForm : DarkForm
 {
     const int W = 580;
@@ -17,6 +17,10 @@ sealed class SettingsForm : DarkForm
 
     /// <summary>ffmpeg was found, changed or downloaded</summary>
     public event Action? FfmpegChanged;
+    /// <summary>A recent project was picked: the window that opened Settings opens it once Settings has closed</summary>
+    public Project? OpenProject { get; private set; }
+    readonly FlowLayoutPanel recentList;
+    readonly Label recentNote;
 
     public SettingsForm()
     {
@@ -26,6 +30,34 @@ sealed class SettingsForm : DarkForm
         StartPosition = FormStartPosition.CenterParent;
 
         var root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, Location = new Point(20, 6), Margin = Padding.Empty };
+
+        // Recent projects: every compress is saved, so a closed window can be picked up again
+        root.Controls.Add(Section("Recent projects"));
+        recentList = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, Margin = Padding.Empty };
+        root.Controls.Add(recentList);
+        recentNote = Muted("");
+        recentNote.Margin = new Padding(0, 4, 10, 0);
+        var keepLabel = Muted("Keep the last");
+        keepLabel.Margin = new Padding(0, 5, 8, 0);
+        var keep = new List<Pill>();
+        foreach (var n in new[] { 10, 25, 50, 0 })
+        {
+            var chip = new Pill(n == 0 ? "Off" : $"{n}") { Margin = new Padding(0, 0, 6, 0), On = cfg.RecentProjects == n };
+            chip.Click += (_, _) =>
+            {
+                cfg.RecentProjects = n;
+                cfg.Save();
+                foreach (var c in keep) c.On = c == chip;
+                Projects.Trim();
+                FillRecent();
+            };
+            keep.Add(chip);
+        }
+        var clear = Link("Clear", () => { Projects.Clear(); FillRecent(); });
+        clear.Margin = new Padding(8, 5, 0, 0);
+        root.Controls.Add(Row([keepLabel, .. keep, clear]));
+        root.Controls.Add(recentNote);
+        FillRecent();
 
         // ffmpeg: a folder you can type or paste, Browse, and Open folder. Empty = found automatically.
         root.Controls.Add(Section("ffmpeg"));
@@ -129,6 +161,35 @@ sealed class SettingsForm : DarkForm
         base.OnShown(e);
         ActiveControl = null;
     }
+
+    /// <summary>One row per recent project, newest first; click to open it. The list scrolls after six.</summary>
+    void FillRecent()
+    {
+        recentList.SuspendLayout();
+        foreach (Control c in recentList.Controls.Cast<Control>().ToList()) c.Dispose();
+        var recent = Projects.Recent();
+        const int Shown = 6, RowH = 34;
+        var scrolls = recent.Count > Shown;
+        var box = scrolls ? new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Size = new Size(W, Shown * (RowH + 2)), Margin = Padding.Empty } : recentList;
+        foreach (var (_, project) in recent)
+        {
+            var row = new ProjectRow(Path.GetFileName(project.File), Projects.When(project.Saved), !File.Exists(project.File)) { Size = new Size(scrolls ? W - SystemInformation.VerticalScrollBarWidth - 2 : W, RowH), Margin = new Padding(0, 0, 0, 2) };
+            tips.SetToolTip(row, project.File);
+            row.Click += (_, _) =>
+            {
+                if (!File.Exists(project.File)) return;
+                OpenProject = project;
+                Close();
+            };
+            box.Controls.Add(row);
+        }
+        if (scrolls) { DarkScrollbars(box); recentList.Controls.Add(box); }
+        recentList.ResumeLayout();
+        recentNote.Text = cfg.RecentProjects == 0 ? "Projects aren't saved." : recent.Count == 0 ? "Nothing yet. Each video you compress shows up here." : "";
+        recentNote.Visible = recentNote.Text != "";
+    }
+
+    readonly ToolTip tips = new();
 
     static Label Section(string text) =>
         new() { Text = text.ToUpperInvariant(), AutoSize = true, ForeColor = Theme.Muted, Font = new Font("Segoe UI Semibold", 8.5f), Margin = new Padding(0, 14, 0, 8) };
@@ -239,6 +300,38 @@ sealed class SettingsForm : DarkForm
             updateStatus.Text = "Update failed: " + ex.Message;
             updateStatus.ForeColor = Theme.Danger;
             installBtn.Enabled = checkLink.Enabled = true;
+        }
+    }
+
+    /// <summary>A recent project: the video's name, and when it was saved. Greyed out when the video has gone.</summary>
+    sealed class ProjectRow : Control
+    {
+        readonly string name, when;
+        readonly bool missing;
+        bool hover;
+
+        public ProjectRow(string name, string when, bool missing)
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            (this.name, this.when, this.missing) = (name, missing ? "video moved or deleted" : when, missing);
+            Cursor = missing ? Cursors.Default : Cursors.Hand;
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); hover = !missing; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hover = false; Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Parent?.BackColor ?? Theme.Bg);
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            var px = DeviceDpi / 96f;
+            using (var shape = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), 6 * px))
+            using (var fill = new SolidBrush(hover ? Theme.Bg3 : Theme.Bg2)) g.FillPath(fill, shape);
+            var pad = (int)(12 * px);
+            var whenW = TextRenderer.MeasureText(when, Font).Width;
+            TextRenderer.DrawText(g, when, Font, new Rectangle(Width - pad - whenW, 0, whenW, Height), missing ? Theme.Danger : Theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(g, name, Font, new Rectangle(pad, 0, Width - 3 * pad - whenW, Height), missing ? Theme.Muted : Theme.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
     }
 

@@ -1,0 +1,96 @@
+using System.Text.Json;
+
+namespace CompressForDiscord;
+
+/// <summary>Everything set up for one video, saved so it can be opened again after the window has closed</summary>
+sealed class Project
+{
+    public string File { get; set; } = "";
+    public DateTime Saved { get; set; }
+    public double Start { get; set; }
+    public double End { get; set; }
+    public double Current { get; set; }
+    public double TargetMb { get; set; }
+    public int? ScalePct { get; set; }
+    public int? FrameRate { get; set; }
+    public string CropMode { get; set; } = "src";
+    public double CropAspect { get; set; }
+    public bool Separate { get; set; }
+    public bool TracksOpen { get; set; }
+    public List<PosKey> Pos { get; set; } = [];
+    public List<ValueKey> Scale { get; set; } = [];
+    public List<TrackState> Tracks { get; set; } = [];
+    public TrackState? Master { get; set; }
+}
+
+sealed record PosKey(double T, double X, double Y, Ease E);
+sealed record ValueKey(double T, double V, Ease E);
+sealed record TrackState(int Index, bool Active, double Volume, List<ValueKey> Keys);
+
+/// <summary>
+/// The last few projects, one file each, newest first. A video has at most one: saving it again replaces the
+/// old one. Only as many as the setting says are kept.
+/// </summary>
+static class Projects
+{
+    /// <summary>Test runs point this somewhere else so they never touch the real list</summary>
+    static readonly string Folder = Environment.GetEnvironmentVariable("CFD_PROJECTS") is { Length: > 0 } dir ? dir : Path.Combine(Paths.Data, "projects");
+
+    static bool Enabled
+    {
+        get
+        {
+#if DEBUG
+            // A debug test run without its own folder saves nothing
+            if (Environment.GetEnvironmentVariable("CFD_TEST") is { Length: > 0 } && Environment.GetEnvironmentVariable("CFD_PROJECTS") is not { Length: > 0 }) return false;
+#endif
+            return AppConfig.Current.RecentProjects > 0;
+        }
+    }
+
+    public static List<(string Path, Project Project)> Recent()
+    {
+        var list = new List<(string, Project)>();
+        try
+        {
+            foreach (var f in Directory.EnumerateFiles(Folder, "*.json"))
+                try { if (JsonSerializer.Deserialize<Project>(File.ReadAllText(f)) is { File.Length: > 0 } p) list.Add((f, p)); }
+                catch { }
+        }
+        catch { }
+        return list.OrderByDescending(x => x.Item2.Saved).ToList();
+    }
+
+    public static void Save(Project p)
+    {
+        if (!Enabled) return;
+        try
+        {
+            Directory.CreateDirectory(Folder);
+            p.Saved = DateTime.Now;
+            var all = Recent();
+            foreach (var (path, old) in all.Where(x => string.Equals(x.Project.File, p.File, StringComparison.OrdinalIgnoreCase)))
+                try { File.Delete(path); } catch { }
+            File.WriteAllText(Path.Combine(Folder, $"{p.Saved:yyyyMMdd-HHmmss-fff}.json"), JsonSerializer.Serialize(p));
+            Trim();
+        }
+        catch { }
+    }
+
+    /// <summary>Drops all but the newest ones the setting keeps</summary>
+    public static void Trim()
+    {
+        foreach (var (path, _) in Recent().Skip(AppConfig.Current.RecentProjects))
+            try { File.Delete(path); } catch { }
+    }
+
+    public static void Clear()
+    {
+        foreach (var (path, _) in Recent())
+            try { File.Delete(path); } catch { }
+    }
+
+    /// <summary>"Today 14:05", "Yesterday 09:12", "12 Nov 18:40"</summary>
+    public static string When(DateTime t) =>
+        t.Date == DateTime.Today ? $"Today {t:HH:mm}" : t.Date == DateTime.Today.AddDays(-1) ? $"Yesterday {t:HH:mm}" : $"{t:d MMM HH:mm}";
+}

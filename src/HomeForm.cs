@@ -22,7 +22,12 @@ sealed class HomeForm : DarkForm
         update.Margin = new Padding(0, 5, 10, 0);
         var settings = new Pill("Settings") { Icon = PillIcon.Gear, Margin = new Padding(0, 0, 6, 0) };
         var help = new Pill("Help") { Icon = PillIcon.Help, Margin = Padding.Empty };
-        settings.Click += (_, _) => new SettingsForm().ShowDialog(this);
+        settings.Click += (_, _) =>
+        {
+            using var form = new SettingsForm();
+            form.ShowDialog(this);
+            if (form.OpenProject is { } p) Program.OpenVideo(p.File, this, p);
+        };
         help.Click += (_, _) => new HelpForm().ShowDialog(this);
         var tips = new ToolTip();
         tips.SetToolTip(settings, "Settings");

@@ -68,6 +68,8 @@ sealed class AppConfig
     public bool PlaySound { get; set; } = true;
     /// <summary>The playhead only stops on frames of the chosen frame rate</summary>
     public bool FrameLock { get; set; } = true;
+    /// <summary>How many recent projects are kept to open again; 0 = none are saved</summary>
+    public int RecentProjects { get; set; } = 10;
     public DateTime LastUpdateCheck { get; set; }
     /// <summary>Folder last saved to with "Compress & save"</summary>
     public string SaveFolder { get; set; } = "";

@@ -23,10 +23,10 @@ static class Program
         Application.Run(app);
     }
 
-    /// <summary>Opens the compressor for a video, closing the window it was opened from</summary>
-    public static void OpenVideo(string file, Form? from = null)
+    /// <summary>Opens the compressor for a video (set up as a saved project, if given), closing the window it was opened from</summary>
+    public static void OpenVideo(string file, Form? from = null, Project? project = null)
     {
-        Show(new MainForm(Path.GetFullPath(file)));
+        Show(new MainForm(Path.GetFullPath(file), project));
         from?.Close();
     }
 

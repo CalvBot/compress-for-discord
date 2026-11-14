@@ -96,9 +96,17 @@ sealed class MainForm : DarkForm
     int baseW, basePreviewH, baseChipMax, extraW, extraH;
     bool userSizing, fitting;
 
-    public MainForm(string file)
+    /// <summary>A saved project to set the window up as, once the video is read</summary>
+    readonly Project? restore;
+    /// <summary>The settings as they were once the video was read, to tell whether anything was changed since</summary>
+    string? baseline;
+    /// <summary>Saved to the recent projects already (after a compress), so closing doesn't save it again</summary>
+    bool projectSaved;
+
+    public MainForm(string file, Project? project = null)
     {
         this.file = file;
+        restore = project;
         fileSize = new FileInfo(file).Length;
         targetMb = cfg.TargetMb;
 
@@ -407,12 +415,110 @@ sealed class MainForm : DarkForm
         UpdateTimeLabel();
         UpdateSummary();
         ShowStatus("", Theme.Muted);
-        RequestFrame(0);
+        if (restore != null) Restore(restore);
+        baseline = StateKey();
+        RequestFrame(timeline.Current);
         _ = ResolveAutoEncoder();
         _ = LoadThumbnails();
 #if DEBUG
         ApplyTestState();
 #endif
+    }
+
+    // ---------- recent projects ----------
+
+    /// <summary>Everything set up in the window, to save as a recent project</summary>
+    Project Snapshot() => new()
+    {
+        File = file,
+        Start = timeline.Start,
+        End = timeline.End,
+        Current = timeline.Current,
+        TargetMb = targetMb,
+        ScalePct = scalePct,
+        FrameRate = frameRate,
+        CropMode = cropMode,
+        CropAspect = cropAspect,
+        Separate = separate,
+        TracksOpen = tracksOpen,
+        Pos = [.. pos.Keys.Select(k => new PosKey(k.T, k.Value.X, k.Value.Y, k.E))],
+        Scale = [.. scale.Keys.Select(k => new ValueKey(k.T, k.Value, k.E))],
+        Tracks = [.. trackUi.Select(t => State(t.Track.Index, t.Lane))],
+        Master = trackUi.Count > 0 ? State(-1, masterLane) : null,
+    };
+
+    static TrackState State(int index, VolumeLane lane) => new(index, lane.Active, lane.Volume, [.. lane.Keys.Select(k => new ValueKey(k.T, k.V, k.E))]);
+
+    /// <summary>The settings that make a project worth saving: not where the playhead is or whether Advanced is open</summary>
+    string StateKey()
+    {
+        var p = Snapshot();
+        (p.Current, p.TracksOpen) = (0, false);
+        return System.Text.Json.JsonSerializer.Serialize(p);
+    }
+
+    void SaveProject()
+    {
+        if (probe == null || projectSaved) return;
+        projectSaved = true;
+        Projects.Save(Snapshot());
+    }
+
+    /// <summary>Sets the window up as a saved project</summary>
+    void Restore(Project p)
+    {
+        Batch(() =>
+        {
+            timeline.SetEnd(p.End);
+            timeline.SetStart(p.Start);
+            if (p.TargetMb > 0)
+            {
+                if (Planner.LimitPresets.Contains(p.TargetMb))
+                {
+                    customMb.Text = "";
+                    SelectChip(sizeChips, p.TargetMb);
+                    SetTarget(p.TargetMb);
+                }
+                else customMb.Text = p.TargetMb.ToString("0.##");
+            }
+            scalePct = p.ScalePct;
+            SelectChip(resChips, scalePct);
+            frameRate = p.FrameRate;
+            SelectChip(fpsChips, frameRate);
+            if (frameRate is { } rate && !fpsChips.Controls.OfType<Pill>().Any(c => c.On)) fpsBox.Text = rate.ToString();
+
+            // The picture: its shape, then the position and scale key points
+            if (p.Pos.Count > 0 && p.Scale.Count > 0)
+            {
+                cropAspect = p.CropAspect;
+                pos.Keys.Clear();
+                pos.Keys.AddRange(p.Pos.Select(k => (k.T, (k.X, k.Y), k.E)));
+                scale.Keys.Clear();
+                scale.Keys.AddRange(p.Scale.Select(k => (k.T, k.V, k.E)));
+            }
+            SetCrop(p.CropMode);
+            separate = p.Separate;
+            keptPos = null;
+
+            // Audio: each track that's still there, by its number
+            void Apply(TrackState s, VolumeLane lane)
+            {
+                (lane.Active, lane.Volume) = (s.Active, s.Volume);
+                lane.Keys.Clear();
+                lane.Keys.AddRange(s.Keys.Select(k => (k.T, k.V, k.E)));
+                lane.Invalidate();
+            }
+            foreach (var s in p.Tracks)
+                if (trackUi.FirstOrDefault(t => t.Track.Index == s.Index).Lane is { } lane) Apply(s, lane);
+            if (p.Master != null && trackUi.Count > 0) Apply(p.Master, masterLane);
+            UpdateMasterPeaks();
+
+            tracksOpen = p.TracksOpen;
+            ShowTracksNow();
+            timeline.Seek(Math.Clamp(p.Current, timeline.Start, timeline.End));
+            ShowCrop();
+            UpdateSummary();
+        });
     }
 
 #if DEBUG
@@ -445,6 +551,8 @@ sealed class MainForm : DarkForm
                 case "separate": SetSeparate(true); break;
                 case "select": keyLane.Select(int.Parse(value)); break;
                 case "del": DeleteSelectedKey(); break;
+                case "restore": if (Projects.Recent().FirstOrDefault(r => r.Project.File == file).Project is { } saved) Restore(saved); break;
+                case "saveproject": projectSaved = false; SaveProject(); break;
                 case "ease":
                     // Every key point on every track
                     var ease = Enum.Parse<Ease>(value);
@@ -1460,6 +1568,7 @@ sealed class MainForm : DarkForm
 
     async void Done(string message)
     {
+        SaveProject();
         // Chime, then get out of the way; the file is already on the clipboard or saved
         bar.Value = 1;
         ShowStatus(message, Theme.Green);
@@ -1513,6 +1622,7 @@ sealed class MainForm : DarkForm
         using var s = new SettingsForm();
         s.FfmpegChanged += () => _ = LoadVideo();
         s.ShowDialog(this);
+        if (s.OpenProject is { } project) { Program.OpenVideo(project.File, this, project); return; }
         UpdateSummary(); // encoder or margin may have changed
     }
 
@@ -1586,6 +1696,7 @@ sealed class MainForm : DarkForm
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        if (probe != null && encodeCts == null && baseline != null && StateKey() != baseline) SaveProject();
         playCts?.Cancel();
         lifetime.Cancel();
         encodeCts?.Cancel();
