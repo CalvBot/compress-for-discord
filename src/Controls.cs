@@ -344,6 +344,8 @@ sealed class Timeline : Control
     public double ViewStart, ViewEnd;
     double From => ViewEnd > ViewStart ? ViewStart : 0;
     double Span => ViewEnd > ViewStart ? ViewEnd - ViewStart : Duration;
+    /// <summary>Length of one frame at the chosen frame rate, in seconds. Frames are marked once zoomed in far enough.</summary>
+    public double Grid;
     /// <summary>The stretch of video the thumbnails were made for (they're remade after zooming)</summary>
     public double ThumbStart, ThumbSpan = 1;
     /// <summary>Alt + mouse wheel: zoom by this factor around this time</summary>
@@ -502,6 +504,8 @@ sealed class Timeline : Control
             g.DrawImage(img, cell, new RectangleF((img.Width - sw) / 2, (img.Height - sh) / 2, sw, sh), GraphicsUnit.Pixel);
         }
 
+        Tracks.DrawFrames(g, Grid, From, Span, left, bodyW, top, Height, DeviceDpi, 70);
+
         // Whole pixels throughout, so the tabs and the frame meet without soft or missing pixels
         int s = (int)Math.Round(X(Start)), en = (int)Math.Round(X(End)), edge = Math.Max(2, Px(3)), tw = TabW;
         using (var dim = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
@@ -629,6 +633,12 @@ sealed class VolumeLane : Control
     public event Action<double, double>? ZoomRequested;
     public IEnumerable<double> KeyTimes => Keys.Select(k => k.T);
 
+    /// <summary>Length of one frame at the chosen frame rate, in seconds. Frames are marked once zoomed in far enough.</summary>
+    public double Grid;
+    /// <summary>Where a point goes when it's moved or Ctrl+clicked in: onto a frame of the chosen frame rate</summary>
+    double OnFrame(double t) => Grid > 0 ? Math.Clamp(Math.Round(t / Grid) * Grid, 0, Duration) : t;
+    int grabX;
+    double grabT;
     int rowHeight = 56;
     /// <summary>Height in 96-dpi pixels; every keyframable track shares it</summary>
     public int RowHeight { get => rowHeight; set { rowHeight = value; Fit(); } }
@@ -760,8 +770,10 @@ sealed class VolumeLane : Control
         else if (e.Button == MouseButtons.Left)
         {
             // Ctrl+click puts a new point under the mouse, already held so it can be dragged into place
-            if (k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) k = AddKey(T(e.X));
+            if (k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) k = AddKey(OnFrame(T(e.X)));
             dragKey = k;
+            grabX = e.X;
+            grabT = k >= 0 ? Keys[k].T : 0;
             dragStretch = k < 0 ? HitStretch(e.Location) : -1;
             dragFlat = k < 0 && Keys.Count == 0;
             grabY = e.Y;
@@ -778,7 +790,10 @@ sealed class VolumeLane : Control
             var lo = dragKey > 0 ? Keys[dragKey - 1].T + 0.05 : 0;
             var hi = dragKey < Keys.Count - 1 ? Keys[dragKey + 1].T - 0.05 : Duration;
             // Shift: slide it in time only
-            Keys[dragKey] = (Math.Clamp(T(e.X), lo, Math.Max(lo, hi)), ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift) ? Keys[dragKey].V : V(e.Y));
+            // A point can sit between frames (after the frame rate was lowered, say) and stays there while only its
+            // value is dragged. Once it's moved sideways it lands on a frame.
+            var t = Math.Abs(e.X - grabX) <= Px(3) ? grabT : OnFrame(T(e.X));
+            Keys[dragKey] = (Math.Clamp(t, lo, Math.Max(lo, hi)), ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift) ? Keys[dragKey].V : V(e.Y));
             Invalidate();
         }
         else if (dragStretch >= 0)
@@ -829,6 +844,8 @@ sealed class VolumeLane : Control
                 if (h >= 0.5f) g.DrawLine(t >= Start && t <= End ? inside : outside, G + x + 0.5f, mid - h, G + x + 0.5f, mid + h);
             }
         }
+
+        Tracks.DrawFrames(g, Grid, From, Span, G, BodyW, 0, Height, DeviceDpi, 28);
 
         // Volume line and its points
         var line = Color.FromArgb(Active ? 235 : 110, Color.White);
@@ -1060,6 +1077,18 @@ static class Tracks
         return new Rectangle(0, top + slot * (size + gap), size, size);
     }
 
+    /// <summary>A faint line at the start of every frame, once they're far enough apart to tell from one another</summary>
+    public static void DrawFrames(Graphics g, double frame, double from, double span, int left, int width, int top, int bottom, int dpi, int strength)
+    {
+        if (frame <= 0 || span <= 0 || frame / span * width < 6 * dpi / 96f) return;
+        using var pen = new Pen(Color.FromArgb(strength, Color.White));
+        for (var k = Math.Ceiling(from / frame); k * frame <= from + span; k++)
+        {
+            var x = left + (float)((k * frame - from) / span * width);
+            g.DrawLine(pen, x, top, x, bottom);
+        }
+    }
+
     public static void DrawButton(Graphics g, Rectangle r)
     {
         using var back = Theme.Round(r, r.Height / 4f);
@@ -1106,6 +1135,9 @@ sealed class KeyLane : Control
     public event Action<double, double>? ZoomRequested;
     public IEnumerable<double> KeyTimes => Keys;
 
+    /// <summary>Length of one frame at the chosen frame rate, in seconds. Frames are marked once zoomed in far enough.</summary>
+    public double Grid;
+    double OnFrame(double t) => Grid > 0 ? Math.Clamp(Math.Round(t / Grid) * Grid, 0, Duration) : t;
     int rowHeight = 56;
     /// <summary>Height in 96-dpi pixels; every keyframable track shares it</summary>
     public int RowHeight { get => rowHeight; set { rowHeight = value; Fit(); } }
@@ -1164,7 +1196,7 @@ sealed class KeyLane : Control
         var k = HitKey(e.X);
         if (e.Button == MouseButtons.Right && k >= 0) RemoveRequested?.Invoke(k);
         else if (e.Button == MouseButtons.Right) MenuRequested?.Invoke(e.Location);
-        else if (e.Button == MouseButtons.Left && k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) AddRequested?.Invoke(T(e.X));
+        else if (e.Button == MouseButtons.Left && k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) AddRequested?.Invoke(OnFrame(T(e.X)));
         else if (e.Button == MouseButtons.Left) { dragKey = k; moved = false; }
     }
 
@@ -1173,7 +1205,8 @@ sealed class KeyLane : Control
         base.OnMouseMove(e);
         if (dragKey < 0) { Cursor = AddButton.Contains(e.Location) ? Cursors.Hand : HitKey(e.X) >= 0 ? Cursors.SizeWE : Cursors.Default; return; }
         moved = true;
-        MoveRequested?.Invoke(dragKey, T(e.X));
+        // A moved point lands on a frame of the chosen frame rate
+        MoveRequested?.Invoke(dragKey, OnFrame(T(e.X)));
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -1192,6 +1225,7 @@ sealed class KeyLane : Control
         using (var bg = new SolidBrush(Back)) g.FillPath(bg, track);
         g.SetClip(track);
 
+        Tracks.DrawFrames(g, Grid, From, Span, G, BodyW, 0, Height, DeviceDpi, 28);
         if (Keys.Count > 0 && Levels2.Count == Keys.Count)
         {
             var second = new List<PointF> { new(X(0), Y(Levels2[0])) };
@@ -1260,8 +1294,8 @@ sealed class ZoomBar : Control
     int BodyW => Math.Max(1, Width - G);
     float X(double t) => G + (float)(t / Duration * BodyW);
     double T(int x) => Math.Clamp((x - G) / (double)BodyW * Duration, 0, Duration);
-    /// <summary>The closest it zooms: a second, or less for very short videos</summary>
-    public double MinSpan => Math.Min(1, Duration / 4);
+    /// <summary>The closest it zooms: the shortest stretch of video that can fill the timeline</summary>
+    public double MinSpan = 1;
 
     Grab HitTest(int x)
     {

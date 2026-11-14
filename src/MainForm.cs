@@ -336,6 +336,8 @@ sealed class MainForm : DarkForm
         timeline.Fps = probe.Fps;
         timeline.Reset(probe.Duration);
         zoomBar.Duration = probe.Duration;
+        // Closest zoom: a dozen frames across the timeline
+        zoomBar.MinSpan = Math.Min(probe.Duration, 12 / (probe.Fps > 0 ? probe.Fps : 30));
         SetView(0, probe.Duration, remakeThumbs: false);
         timeline.Enabled = true;
         playBtn.Enabled = true;
@@ -410,6 +412,7 @@ sealed class MainForm : DarkForm
                 case "fps": frameRate = int.Parse(value); SelectChip(fpsChips, frameRate); UpdateSummary(); break;
                 case "res": scalePct = int.Parse(value); SelectChip(resChips, scalePct); UpdateSummary(); break;
                 case "crop": SetCrop(value); break;
+                case "rate": fpsBox.Text = value; break;
                 case "separate": SetSeparate(true); break;
                 case "combine": SetSeparate(false); break;
                 case "trackh": SetTrackHeight(int.Parse(value)); break;
@@ -490,7 +493,17 @@ sealed class MainForm : DarkForm
         var cts = thumbCts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         double start = viewStart, span = viewEnd - viewStart;
         var first = timeline.Thumbs.All(t => t == null);
-        var fresh = first ? timeline.Thumbs : new Image?[timeline.Thumbs.Length];
+        // Zoomed in until there are fewer frames than thumbnails: show the frames themselves, one each
+        const int Usual = 16;
+        var frame = FrameLength;
+        var count = Usual;
+        if (!first && frame > 0 && span / frame <= Usual)
+        {
+            start = Math.Floor(start / frame) * frame;
+            count = Math.Max(1, (int)Math.Ceiling((viewEnd - start) / frame - 1e-6));
+            span = count * frame;
+        }
+        var fresh = first ? timeline.Thumbs : new Image?[count];
         if (first) (timeline.ThumbStart, timeline.ThumbSpan) = (start, span);
         await Ff.Thumbnails(file, start, span, fresh.Length, timeline.Height, (i, img) =>
         {
@@ -1079,10 +1092,26 @@ sealed class MainForm : DarkForm
         return (bits >= Good / 2 ? Theme.Warn : Theme.Danger, hint);
     }
 
+    /// <summary>One frame at the chosen frame rate, in seconds: what's marked on the timeline and what moved key points land on</summary>
+    double FrameLength => probe == null ? 0 : 1.0 / (frameRate ?? (probe.Fps > 0 ? probe.Fps : 30));
+
+    void ApplyFrameGrid()
+    {
+        var frame = FrameLength;
+        if (timeline.Grid == frame) return;
+        timeline.Grid = keyLane.Grid = posLane.Grid = scaleLane.Grid = masterLane.Grid = frame;
+        foreach (var (_, lane) in trackUi) lane.Grid = frame;
+        timeline.Invalidate();
+        foreach (Control c in scroller.Content.Controls) c.Invalidate();
+        // Zoomed right in, the thumbnails are one per frame, so they follow the frame rate too
+        if ((viewEnd - viewStart) / frame <= timeline.Thumbs.Length) { thumbTimer.Stop(); thumbTimer.Start(); }
+    }
+
     /// <param name="keepStatus">leave an error or "Cancelled" showing instead of going back to the result line</param>
     void UpdateSummary(bool keepStatus = false)
     {
         if (outPath != null || probe == null) return;
+        ApplyFrameGrid();
         if (!keepStatus && encodeCts == null && status.Visible) ShowStatus("", Theme.Muted);
         var limit = Planner.FormatBytes(targetMb * Planner.MB);
         var plan = CurrentPlan();
