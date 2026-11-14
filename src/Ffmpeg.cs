@@ -36,6 +36,10 @@ sealed class EncodeRequest
     public string Encoder = "auto";
     public bool CappedBySource;
     public double Calibration;
+    /// <summary>Crop box in source pixels (left, top, width) at each key time; null = whole frame. Every box has the shape CropW:CropH.</summary>
+    public List<(double T, double X, double Y, double W)>? Crop;
+    /// <summary>Size of the smallest crop box. The output is this (times the scale), so nothing is ever enlarged.</summary>
+    public int CropW, CropH;
 }
 
 static class Ff
@@ -263,11 +267,13 @@ static class Ff
         return peaks;
     }
 
-    /// <summary>ffmpeg volume filter for a track: a plain number, or a straight-line ramp between its points</summary>
-    static string VolumeFilter(TrackMix t, double offset)
+    /// <summary>
+    /// ffmpeg expression for a value that moves in straight lines between points over time (and holds before the
+    /// first and after the last). Seeking with -ss restarts the filter clock at 0, so the offset is added back
+    /// to get source time.
+    /// </summary>
+    static string Ramp(IReadOnlyList<(double T, double V)> k, double offset)
     {
-        if (t.Keys is not { Count: > 0 } k) return $"volume={F3(t.Volume)}";
-        // Seeking with -ss restarts the filter clock at 0, so add the offset back to get source time
         var time = $"(t+{F3(offset)})";
         var expr = F3(k[^1].V);
         for (var i = k.Count - 1; i >= 1; i--)
@@ -276,8 +282,34 @@ static class Ff
             var ramp = b.T - a.T < 0.001 ? F3(b.V) : $"{F3(a.V)}+({F3(b.V - a.V)})*({time}-{F3(a.T)})/{F3(b.T - a.T)}";
             expr = $"if(lt({time},{F3(b.T)}),{ramp},{expr})";
         }
-        expr = $"if(lt({time},{F3(k[0].T)}),{F3(k[0].V)},{expr})";
-        return $"volume='{expr}':eval=frame";
+        return $"if(lt({time},{F3(k[0].T)}),{F3(k[0].V)},{expr})";
+    }
+
+    /// <summary>ffmpeg volume filter for a track: a plain number, or a ramp between its points</summary>
+    static string VolumeFilter(TrackMix t, double offset) =>
+        t.Keys is { Count: > 0 } k ? $"volume='{Ramp(k, offset)}':eval=frame" : $"volume={F3(t.Volume)}";
+
+    /// <summary>
+    /// Crop (and scale) filters. A box that doesn't change is a plain crop. A moving or zooming one can't be, because
+    /// ffmpeg's crop can't change size mid-video: instead each frame is scaled so the box comes out at the output
+    /// size, and a fixed-size crop then follows the box around.
+    /// </summary>
+    static IEnumerable<string> CropFilters(EncodeRequest o)
+    {
+        var c = o.Crop!;
+        // Output size: the smallest box, times the chosen scale, kept even for H.264
+        var f = o.ScaleShortSide is { } s ? s / (double)Math.Min(o.CropW, o.CropH) : 1;
+        int outW = Math.Max(2, (int)Math.Round(o.CropW * f) & ~1), outH = Math.Max(2, (int)Math.Round(o.CropH * f) & ~1);
+        if (c.All(k => Math.Abs(k.X - c[0].X) < 0.5 && Math.Abs(k.Y - c[0].Y) < 0.5 && Math.Abs(k.W - c[0].W) < 0.5))
+        {
+            yield return $"crop={o.CropW}:{o.CropH}:{(int)c[0].X}:{(int)c[0].Y}";
+            if (f != 1) yield return $"scale={outW}:{outH}";
+            yield break;
+        }
+        string w = Ramp(c.Select(k => (k.T, k.W)).ToList(), o.Start), x = Ramp(c.Select(k => (k.T, k.X)).ToList(), o.Start), y = Ramp(c.Select(k => (k.T, k.Y)).ToList(), o.Start);
+        // Rounded up to even so the scaled frame is never a pixel smaller than the crop taken from it
+        yield return $"scale=w='ceil(iw*{outW}/({w})/2)*2':h='ceil(ih*{outW}/({w})/2)*2':eval=frame";
+        yield return $"crop={outW}:{outH}:x='({x})*{outW}/({w})':y='({y})*{outW}/({w})'";
     }
 
     /// <param name="offset">source time the input was seeked to</param>
@@ -324,7 +356,8 @@ static class Ff
         var passlog = Path.Combine(Paths.Work, $"{id}-pass");
 
         var vf = new List<string>();
-        if (o.ScaleShortSide is { } s) vf.Add(o.Portrait ? $"scale={s}:-2" : $"scale=-2:{s}");
+        if (o.Crop is { Count: > 0 }) vf.AddRange(CropFilters(o));
+        else if (o.ScaleShortSide is { } s) vf.Add(o.Portrait ? $"scale={s}:-2" : $"scale=-2:{s}");
         if (o.Fps is { } f) vf.Add($"fps={f}");
         vf.Add("format=yuv420p");
         var audio = o.AudioKbps > 0 ? AudioGraph(o.Tracks, o.Start) : null;

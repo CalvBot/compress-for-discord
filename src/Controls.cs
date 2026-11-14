@@ -667,3 +667,229 @@ sealed class VolumeLane : Control
         TextRenderer.DrawText(g, label, Small, new Rectangle(0, Px(2), Width - Px(6), Height), Theme.Muted, TextFormatFlags.Right | TextFormatFlags.Top | TextFormatFlags.NoPrefix);
     }
 }
+
+/// <summary>
+/// The video preview. With a crop box set, it's drawn over the frame (everything outside dimmed) and can be
+/// moved by dragging inside it and resized by its corners.
+/// </summary>
+sealed class CropView : Control
+{
+    enum Grab { None, Move, TopLeft, TopRight, BottomLeft, BottomRight }
+
+    Image? image;
+    RectangleF? box;
+    public Image? Image { get => image; set { image = value; Invalidate(); } }
+    /// <summary>Width / height of the video, so the box maps to the picture and not the black bars</summary>
+    public double FrameAspect = 16 / 9.0;
+    /// <summary>Crop box as fractions of the frame (0..1 each way); null = no crop</summary>
+    public RectangleF? Box { get => box; set { box = value; Invalidate(); } }
+    /// <summary>Width / height the box must keep, in those same fractions; 0 = any shape</summary>
+    public double BoxAspect;
+    /// <summary>The box is being dragged to this</summary>
+    public event Action<RectangleF>? BoxChanged;
+    /// <summary>The drag ended</summary>
+    public event Action? BoxCommitted;
+
+    Grab grab;
+    PointF grabAt;
+    RectangleF grabBox;
+
+    public CropView()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, false);
+        BackColor = Color.Black;
+    }
+
+    int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
+
+    /// <summary>Where the picture sits inside the control (fitted, centred)</summary>
+    RectangleF Picture
+    {
+        get
+        {
+            var scale = Math.Min(Width / FrameAspect, Height);
+            float w = (float)(scale * FrameAspect), h = (float)scale;
+            return new RectangleF((Width - w) / 2, (Height - h) / 2, w, h);
+        }
+    }
+
+    RectangleF ToScreen(RectangleF b) { var p = Picture; return new RectangleF(p.X + b.X * p.Width, p.Y + b.Y * p.Height, b.Width * p.Width, b.Height * p.Height); }
+    PointF ToFrame(Point at) { var p = Picture; return new PointF(Math.Clamp((at.X - p.X) / p.Width, 0, 1), Math.Clamp((at.Y - p.Y) / p.Height, 0, 1)); }
+
+    Grab HitTest(Point at)
+    {
+        if (box is not { } b || !Enabled) return Grab.None;
+        var r = ToScreen(b);
+        var reach = Px(10);
+        bool left = Math.Abs(at.X - r.Left) <= reach, right = Math.Abs(at.X - r.Right) <= reach, top = Math.Abs(at.Y - r.Top) <= reach, bottom = Math.Abs(at.Y - r.Bottom) <= reach;
+        if (top && left) return Grab.TopLeft;
+        if (top && right) return Grab.TopRight;
+        if (bottom && left) return Grab.BottomLeft;
+        if (bottom && right) return Grab.BottomRight;
+        return r.Contains(at) ? Grab.Move : Grab.None;
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button != MouseButtons.Left || box is not { } b) return;
+        grab = HitTest(e.Location);
+        grabAt = ToFrame(e.Location);
+        grabBox = b;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (grab == Grab.None)
+        {
+            Cursor = HitTest(e.Location) switch { Grab.TopLeft or Grab.BottomRight => Cursors.SizeNWSE, Grab.TopRight or Grab.BottomLeft => Cursors.SizeNESW, Grab.Move => Cursors.SizeAll, _ => Cursors.Default };
+            return;
+        }
+        var at = ToFrame(e.Location);
+        if (grab == Grab.Move)
+        {
+            var x = Math.Clamp(grabBox.X + at.X - grabAt.X, 0, 1 - grabBox.Width);
+            var y = Math.Clamp(grabBox.Y + at.Y - grabAt.Y, 0, 1 - grabBox.Height);
+            BoxChanged?.Invoke(new RectangleF(x, y, grabBox.Width, grabBox.Height));
+            return;
+        }
+        // Resizing: the opposite corner stays put
+        bool fromLeft = grab is Grab.TopLeft or Grab.BottomLeft, fromTop = grab is Grab.TopLeft or Grab.TopRight;
+        float ax = fromLeft ? grabBox.Right : grabBox.Left, ay = fromTop ? grabBox.Bottom : grabBox.Top;
+        float roomW = fromLeft ? ax : 1 - ax, roomH = fromTop ? ay : 1 - ay;
+        float w = Math.Clamp(fromLeft ? ax - at.X : at.X - ax, 0.05f, roomW), h = Math.Clamp(fromTop ? ay - at.Y : at.Y - ay, 0.05f, roomH);
+        if (BoxAspect > 0)
+        {
+            // Keep the shape: follow whichever direction was dragged further, then fit inside the frame
+            w = (float)Math.Max(w, h * BoxAspect);
+            if (w > roomW) w = roomW;
+            h = (float)(w / BoxAspect);
+            if (h > roomH) { h = roomH; w = (float)(h * BoxAspect); }
+        }
+        BoxChanged?.Invoke(new RectangleF(fromLeft ? ax - w : ax, fromTop ? ay - h : ay, w, h));
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (grab == Grab.None) return;
+        grab = Grab.None;
+        BoxCommitted?.Invoke();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Color.Black);
+        var pic = Picture;
+        if (image != null)
+        {
+            g.InterpolationMode = InterpolationMode.Bilinear;
+            g.DrawImage(image, pic);
+        }
+        if (box is not { } b) return;
+        var r = Rectangle.Round(ToScreen(b));
+        var all = Rectangle.Round(pic);
+        using (var dim = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
+        {
+            g.FillRectangle(dim, all.Left, all.Top, all.Width, r.Top - all.Top);
+            g.FillRectangle(dim, all.Left, r.Bottom, all.Width, all.Bottom - r.Bottom);
+            g.FillRectangle(dim, all.Left, r.Top, r.Left - all.Left, r.Height);
+            g.FillRectangle(dim, r.Right, r.Top, all.Right - r.Right, r.Height);
+        }
+        using (var frame = new Pen(Color.White, Math.Max(1, Px(2)))) g.DrawRectangle(frame, r);
+        var hs = Px(9);
+        foreach (var c in new[] { new Point(r.Left, r.Top), new Point(r.Right, r.Top), new Point(r.Left, r.Bottom), new Point(r.Right, r.Bottom) })
+            g.FillRectangle(Brushes.White, c.X - hs / 2, c.Y - hs / 2, hs, hs);
+    }
+}
+
+/// <summary>
+/// Thin track under the timeline showing the crop's key points as diamonds. Double-click adds one, dragging
+/// moves it in time, right-click removes it, clicking jumps to it.
+/// </summary>
+sealed class KeyLane : Control
+{
+    public double Duration = 1, Current;
+    /// <summary>Times of the key points, in order</summary>
+    public IReadOnlyList<double> Keys = [];
+    public event Action<double>? AddRequested;
+    public event Action<int>? RemoveRequested, Picked;
+    public event Action<int, double>? MoveRequested;
+
+    int dragKey = -1;
+    bool moved;
+
+    public KeyLane()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, false);
+    }
+
+    int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
+    void Fit() => Height = Px(18);
+    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
+    protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
+    protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
+
+    float X(double t) => (float)(t / Duration * Width);
+    double T(int x) => Math.Clamp(x / (double)Math.Max(1, Width) * Duration, 0, Duration);
+
+    int HitKey(int x)
+    {
+        for (var i = 0; i < Keys.Count; i++) if (Math.Abs(x - X(Keys[i])) <= Px(8)) return i;
+        return -1;
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (!Enabled) return;
+        var k = HitKey(e.X);
+        if (e.Button == MouseButtons.Right && k >= 0) RemoveRequested?.Invoke(k);
+        else if (e.Button == MouseButtons.Left) { dragKey = k; moved = false; }
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (dragKey < 0) { Cursor = HitKey(e.X) >= 0 ? Cursors.SizeWE : Cursors.Default; return; }
+        moved = true;
+        MoveRequested?.Invoke(dragKey, T(e.X));
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (dragKey >= 0 && !moved) Picked?.Invoke(dragKey);
+        dragKey = -1;
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        base.OnMouseDoubleClick(e);
+        if (Enabled && e.Button == MouseButtons.Left && HitKey(e.X) < 0) AddRequested?.Invoke(T(e.X));
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Parent?.BackColor ?? Theme.Bg);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var track = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), Px(5)))
+        using (var bg = new SolidBrush(Theme.Bg3)) g.FillPath(bg, track);
+        float mid = Height / 2f, d = Height / 2f - Px(2);
+        if (Keys.Count > 1)
+            using (var line = new Pen(Color.FromArgb(150, Theme.Brand), Math.Max(1, Px(2)))) g.DrawLine(line, X(Keys[0]), mid, X(Keys[^1]), mid);
+        using (var head = new Pen(Color.FromArgb(160, Color.White))) g.DrawLine(head, X(Current), 0, X(Current), Height);
+        foreach (var t in Keys)
+        {
+            var x = Math.Clamp(X(t), d, Width - d);
+            // White when the playhead is on it: that's the point the box on the preview edits
+            using var fill = new SolidBrush(Math.Abs(t - Current) < 0.02 ? Color.White : Theme.Brand);
+            g.FillPolygon(fill, [new PointF(x, mid - d), new PointF(x + d, mid), new PointF(x, mid + d), new PointF(x - d, mid)]);
+        }
+    }
+}

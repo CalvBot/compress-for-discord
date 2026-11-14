@@ -14,7 +14,18 @@ sealed class MainForm : DarkForm
     Dictionary<string, double> calibration = [];
     string? autoEncoder;
     double targetMb;
-    int? resolution, frameRate;
+    /// <summary>Output size as a percentage of the source (or of the crop); null = 100%</summary>
+    int? scalePct;
+    int? frameRate;
+
+    /// <summary>A crop box at a moment: its centre and width as fractions of the frame. Its height follows from the shape.</summary>
+    readonly record struct CropKey(double T, double Cx, double Cy, double W);
+    /// <summary>off, src (the video's own shape), 16:9, 1:1, 9:16 or free</summary>
+    string cropMode = "off";
+    /// <summary>Width / height of the crop box in pixels. Every key point shares it, so the output never changes size.</summary>
+    double cropAspect;
+    /// <summary>One point = a fixed crop. More = the box moves and zooms between them.</summary>
+    readonly List<CropKey> cropKeys = [];
     /// <summary>Keep the sound (the ticked tracks, mixed) or drop it</summary>
     bool audioOn;
     /// <summary>The per-track panel under Audio is open</summary>
@@ -35,10 +46,11 @@ sealed class MainForm : DarkForm
     string? outPath;
 
     readonly Label subtitle, timeLabel, summary, status;
-    readonly PictureBox preview;
+    readonly CropView preview;
+    readonly KeyLane keyLane;
     readonly Timeline timeline;
     readonly LinkLabel resetLink;
-    readonly FlowLayoutPanel sizeChips, resChips, fpsChips, encChips, audioChips, audioPanel, buttons;
+    readonly FlowLayoutPanel sizeChips, resChips, cropChips, fpsChips, encChips, audioChips, audioPanel, buttons;
     readonly Label audioLabel;
     readonly LinkLabel advLink;
     readonly TextBox customMb;
@@ -83,10 +95,18 @@ sealed class MainForm : DarkForm
         // Deferred: changing the text in the middle of a layout pass leaves the label at its default width
         subtitle.SizeChanged += (_, _) => { if (IsHandleCreated) BeginInvoke(FitSubtitle); };
 
-        preview = new PictureBox { Size = new Size(ContentWidth, 300), BackColor = Color.Black, SizeMode = PictureBoxSizeMode.Zoom, Margin = new Padding(0, 0, 0, 10) };
+        preview = new CropView { Size = new Size(ContentWidth, 300), Margin = new Padding(0, 0, 0, 10) };
+        preview.BoxChanged += EditCrop;
+        preview.BoxCommitted += () => UpdateSummary();
 
         timeline = new Timeline { Size = new Size(ContentWidth, 68), Enabled = false, Margin = Padding.Empty };
         timeline.RangeChanged += () => { UpdateTimeLabel(); UpdateSummary(); };
+        // Key points of the crop, shown only while cropping
+        keyLane = new KeyLane { Size = new Size(ContentWidth, 18), Margin = new Padding(0, 4, 0, 0), Visible = false };
+        keyLane.AddRequested += AddCropKey;
+        keyLane.RemoveRequested += i => { if (cropKeys.Count > 1) cropKeys.RemoveAt(i); ShowCrop(); UpdateSummary(); };
+        keyLane.MoveRequested += MoveCropKey;
+        keyLane.Picked += i => timeline.Seek(cropKeys[i].T);
         timeline.Seeked += t => { StopPlayback(); RequestFrame(t); };
         // Double-click plays from that spot to the end of the video, so you can watch what's outside the trim
         timeline.PlayRequested += t => { if (probe != null && encodeCts == null) { StopPlayback(); _ = PlayFrom(t, probe.Duration); } };
@@ -138,6 +158,10 @@ sealed class MainForm : DarkForm
         resChips = ChipRow();
         fpsChips = ChipRow();
         encChips = ChipRow();
+        cropChips = ChipRow();
+        foreach (var (label, value) in new[] { ("Off", "off"), ("Original", "src"), ("16:9", "16:9"), ("1:1", "1:1"), ("9:16", "9:16"), ("Free", "free") })
+            cropChips.Controls.Add(Chip(label, value, cropChips, v => SetCrop((string)v!)));
+        SelectChip(cropChips, "off");
         // "GPU" means NVIDIA or AMD hardware encoding when this PC has it (the default); the chip hides itself if it doesn't
         foreach (var (label, value) in new[] { ("GPU", "auto"), ("CPU", "x264") })
             encChips.Controls.Add(Chip(label, value, encChips, v => { cfg.Encoder = (string)v!; cfg.Save(); UpdateSummary(); }));
@@ -154,11 +178,12 @@ sealed class MainForm : DarkForm
 
         options.Controls.Add(OptLabel("Size"), 0, 0); options.Controls.Add(sizeChips, 1, 0);
         options.Controls.Add(OptLabel("Scale"), 0, 1); options.Controls.Add(resChips, 1, 1);
-        options.Controls.Add(OptLabel("Frame rate"), 0, 2); options.Controls.Add(fpsChips, 1, 2);
-        options.Controls.Add(OptLabel("Encoder"), 0, 3); options.Controls.Add(encChips, 1, 3);
-        options.Controls.Add(audioLabel, 0, 4); options.Controls.Add(audioChips, 1, 4);
-        options.Controls.Add(advLink, 1, 5);
-        options.Controls.Add(audioPanel, 1, 6);
+        options.Controls.Add(OptLabel("Crop"), 0, 2); options.Controls.Add(cropChips, 1, 2);
+        options.Controls.Add(OptLabel("Frame rate"), 0, 3); options.Controls.Add(fpsChips, 1, 3);
+        options.Controls.Add(OptLabel("Encoder"), 0, 4); options.Controls.Add(encChips, 1, 4);
+        options.Controls.Add(audioLabel, 0, 5); options.Controls.Add(audioChips, 1, 5);
+        options.Controls.Add(advLink, 1, 6);
+        options.Controls.Add(audioPanel, 1, 7);
         audioLabel.Visible = audioChips.Visible = advLink.Visible = audioPanel.Visible = false;
 
         bar = new Bar { Size = new Size(ContentWidth, 8), Visible = false, Margin = new Padding(0, 0, 0, 8) };
@@ -191,7 +216,7 @@ sealed class MainForm : DarkForm
         bottom.Controls.Add(info, 0, 0);
         bottom.Controls.Add(buttons, 1, 0);
 
-        root.Controls.AddRange([titleRow, preview, timeline, timeRow, options, bar, bottom]);
+        root.Controls.AddRange([titleRow, preview, timeline, keyLane, timeRow, options, bar, bottom]);
         Controls.Add(root);
         AcceptDrop(f => { if (encodeCts == null && outPath == null) Program.OpenVideo(f, this); });
         // Clicking anywhere else stops typing in the custom size box
@@ -239,15 +264,16 @@ sealed class MainForm : DarkForm
         details = $" · {Planner.FormatBytes(fileSize)} · {shortSide}p{fps} · {Planner.FormatRate(srcKbps)}";
         FitSubtitle();
 
+        preview.FrameAspect = probe.Width / (double)probe.Height;
         timeline.Fps = probe.Fps;
         timeline.Reset(probe.Duration);
         timeline.Enabled = true;
         playBtn.Enabled = true;
         ActiveControl = timeline;
 
-        // Scale: a percentage of the source. The chip carries the resulting short side (null = unchanged).
+        // Scale: a percentage of the source, or of the crop when there is one
         foreach (var pct in Planner.Scales.Where(pct => ScaledSide(pct) >= 144))
-            resChips.Controls.Add(Chip($"{pct}%", pct == 100 ? null : ScaledSide(pct), resChips, v => { resolution = (int?)v; UpdateSummary(); }));
+            resChips.Controls.Add(Chip($"{pct}%", pct == 100 ? null : pct, resChips, v => { scalePct = (int?)v; UpdateSummary(); }));
         SelectChip(resChips, null);
         fpsChips.Controls.Add(Chip($"{fps}", null, fpsChips, v => { frameRate = (int?)v; UpdateSummary(); }));
         foreach (var f in Planner.FrameRates.Where(f => f < probe.Fps - 0.5))
@@ -311,7 +337,17 @@ sealed class MainForm : DarkForm
                 case "step": for (var i = 0; i < int.Parse(value); i++) HandleEditKey(Keys.Right); break;
                 case "busy": SetBusy(true); ShowStatus("Compressing on GPU · 42%", Theme.Text); bar.Value = 0.42; break;
                 case "fps": frameRate = int.Parse(value); SelectChip(fpsChips, frameRate); UpdateSummary(); break;
-                case "res": resolution = int.Parse(value); SelectChip(resChips, resolution); UpdateSummary(); break;
+                case "res": scalePct = int.Parse(value); SelectChip(resChips, scalePct); UpdateSummary(); break;
+                case "crop": SetCrop(value); break;
+                case "cropkeys":
+                    // A zoom: the full box at 20% of the way in, half the width and off-centre by 60%
+                    cropKeys.Clear();
+                    cropKeys.Add(new CropKey(probe!.Duration * 0.2, 0.5, 0.5, MaxCropW));
+                    cropKeys.Add(new CropKey(probe.Duration * 0.6, 0.62, 0.45, MaxCropW * 0.5));
+                    timeline.Seek(probe.Duration * 0.4);
+                    ShowCrop();
+                    UpdateSummary();
+                    break;
                 case "size": targetMb = double.Parse(value); UpdateSummary(); break;
                 case "trim": timeline.SetEnd(double.Parse(value)); break;
                 case "keys":
@@ -524,6 +560,131 @@ sealed class MainForm : DarkForm
     List<TrackMix> Mix() => probe == null || !audioOn ? []
         : trackUi.Where(t => t.Box.Checked).Select(t => new TrackMix(t.Track.Index, t.Lane.Volume, [.. t.Lane.Keys])).ToList();
 
+    // ---------- crop and zoom ----------
+
+    double SrcAspect => probe!.Width / (double)probe.Height;
+    /// <summary>Widest a box of the current shape can be, as a fraction of the frame's width, and still fit its height</summary>
+    double MaxCropW => Math.Min(1, cropAspect / SrcAspect);
+    bool Cropping => probe != null && cropMode != "off" && cropKeys.Count > 0;
+
+    /// <summary>The box at a time: the key points, moving in straight lines between them</summary>
+    CropKey CropAt(double t)
+    {
+        if (cropKeys.Count == 1 || t <= cropKeys[0].T) return cropKeys[0];
+        for (var i = 1; i < cropKeys.Count; i++)
+            if (t < cropKeys[i].T)
+            {
+                var (a, b) = (cropKeys[i - 1], cropKeys[i]);
+                var f = (t - a.T) / Math.Max(0.001, b.T - a.T);
+                return new CropKey(t, a.Cx + (b.Cx - a.Cx) * f, a.Cy + (b.Cy - a.Cy) * f, a.W + (b.W - a.W) * f);
+            }
+        return cropKeys[^1];
+    }
+
+    /// <summary>A key point as a rectangle in fractions of the frame, kept inside it</summary>
+    RectangleF CropRect(CropKey k)
+    {
+        double w = Math.Min(k.W, MaxCropW), h = w * SrcAspect / cropAspect;
+        return new RectangleF((float)Math.Clamp(k.Cx - w / 2, 0, 1 - w), (float)Math.Clamp(k.Cy - h / 2, 0, 1 - h), (float)w, (float)h);
+    }
+
+    void ClampCropWidths()
+    {
+        for (var i = 0; i < cropKeys.Count; i++) cropKeys[i] = cropKeys[i] with { W = Math.Min(cropKeys[i].W, MaxCropW) };
+    }
+
+    void SetCrop(string mode)
+    {
+        cropMode = mode;
+        SelectChip(cropChips, mode);
+        if (mode != "off" && probe != null)
+        {
+            cropAspect = mode switch { "16:9" => 16 / 9.0, "1:1" => 1, "9:16" => 9 / 16.0, "free" when cropAspect > 0 => cropAspect, _ => SrcAspect };
+            // Starts as the biggest box of that shape, in the middle
+            if (cropKeys.Count == 0) cropKeys.Add(new CropKey(0, 0.5, 0.5, MaxCropW));
+            ClampCropWidths();
+        }
+        ShowCrop();
+        UpdateSummary();
+    }
+
+    /// <summary>Puts the box for the current time on the preview, and the key points on their track</summary>
+    void ShowCrop()
+    {
+        var on = Cropping;
+        if (keyLane.Visible != on) keyLane.Visible = on;
+        if (!on)
+        {
+            if (preview.Box != null) preview.Box = null;
+            return;
+        }
+        preview.BoxAspect = cropMode == "free" ? 0 : cropAspect / SrcAspect;
+        preview.Box = CropRect(CropAt(timeline.Current));
+        (keyLane.Duration, keyLane.Current, keyLane.Keys) = (timeline.Duration, timeline.Current, cropKeys.Select(k => k.T).ToList());
+        keyLane.Invalidate();
+    }
+
+    /// <summary>
+    /// The box was dragged on the preview. With one key point that's a fixed crop, so it just changes. With
+    /// several, it changes the point under the playhead, or adds one there if there isn't one.
+    /// </summary>
+    void EditCrop(RectangleF r)
+    {
+        if (!Cropping) return;
+        if (cropMode == "free")
+        {
+            // Any shape goes, but every key point takes it on, or the output would change size mid-video
+            cropAspect = r.Width / r.Height * SrcAspect;
+            ClampCropWidths();
+        }
+        var key = new CropKey(timeline.Current, r.X + r.Width / 2, r.Y + r.Height / 2, r.Width);
+        var i = cropKeys.Count == 1 ? 0 : cropKeys.FindIndex(k => Math.Abs(k.T - key.T) < 0.02);
+        if (i >= 0) cropKeys[i] = key with { T = cropKeys[i].T };
+        else
+        {
+            var after = cropKeys.FindIndex(k => k.T > key.T);
+            cropKeys.Insert(after < 0 ? cropKeys.Count : after, key);
+        }
+        ShowCrop();
+    }
+
+    void AddCropKey(double t)
+    {
+        if (!Cropping || cropKeys.Any(k => Math.Abs(k.T - t) < 0.05)) return;
+        var after = cropKeys.FindIndex(k => k.T > t);
+        cropKeys.Insert(after < 0 ? cropKeys.Count : after, CropAt(t) with { T = t });
+        timeline.Seek(t);
+        UpdateSummary();
+    }
+
+    void MoveCropKey(int i, double t)
+    {
+        // A point can't pass its neighbours
+        var lo = i > 0 ? cropKeys[i - 1].T + 0.05 : 0;
+        var hi = i < cropKeys.Count - 1 ? cropKeys[i + 1].T - 0.05 : timeline.Duration;
+        cropKeys[i] = cropKeys[i] with { T = Math.Clamp(t, lo, Math.Max(lo, hi)) };
+        ShowCrop();
+    }
+
+    /// <summary>
+    /// What gets planned as the source: the whole frame, or with a crop the smallest box. The output is that
+    /// size (times the scale), so the most zoomed-in moment is pixel for pixel and nothing is ever enlarged.
+    /// </summary>
+    ProbeResult PlanSource
+    {
+        get
+        {
+            if (!Cropping) return probe!;
+            var w = cropKeys.Min(k => Math.Min(k.W, MaxCropW));
+            int pw = Math.Max(2, (int)Math.Round(w * probe!.Width) & ~1), ph = Math.Max(2, (int)Math.Round(pw / cropAspect) & ~1);
+            return probe with { Width = pw, Height = Math.Min(ph, probe.Height & ~1) };
+        }
+    }
+
+    /// <summary>The key points in source pixels (left, top, width) for the encoder</summary>
+    List<(double T, double X, double Y, double W)>? CropForEncode() => !Cropping ? null
+        : cropKeys.Select(k => { var r = CropRect(k); return (k.T, (double)r.X * probe!.Width, (double)r.Y * probe.Height, (double)r.Width * probe.Width); }).ToList();
+
     // ---------- window size ----------
 
     void CaptureBase() => (baseW, basePreviewH, baseChipMax) = (preview.Width, preview.Height, sizeChips.MaximumSize.Width);
@@ -533,7 +694,7 @@ sealed class MainForm : DarkForm
     {
         var w = baseW + extraW;
         root.SuspendLayout();
-        foreach (var c in new Control[] { titleRow, preview, timeline, timeRow, bar }) c.Width = w;
+        foreach (var c in new Control[] { titleRow, preview, timeline, keyLane, timeRow, bar }) c.Width = w;
         preview.Height = basePreviewH + extraH;
         options.MinimumSize = bottom.MinimumSize = new Size(w, 0);
         foreach (var row in chipRows) row.MaximumSize = new Size(baseChipMax + extraW, 0);
@@ -585,14 +746,14 @@ sealed class MainForm : DarkForm
     string EffectiveEncoder => cfg.Encoder == "auto" ? autoEncoder ?? "nvenc" : cfg.Encoder;
 
     /// <summary>Short side of the picture at a scale percentage (even, as H.264 needs)</summary>
-    int ScaledSide(int percent) => (int)Math.Round(Math.Min(probe!.Width, probe.Height) * percent / 100.0) & ~1;
+    int ScaledSide(int percent) { var src = PlanSource; return (int)Math.Round(Math.Min(src.Width, src.Height) * percent / 100.0) & ~1; }
 
     Plan? CurrentPlan()
     {
         var duration = timeline.End - timeline.Start;
         if (probe == null || duration <= 0) return null;
         var cal = calibration.TryGetValue(EffectiveEncoder, out var c) ? c : 1;
-        return Planner.Make(probe, duration, (long)(targetMb * Planner.MB), Mix().Count > 0, cfg.SafetyMarginPercent, cal, resolution, frameRate);
+        return Planner.Make(PlanSource, duration, (long)(targetMb * Planner.MB), Mix().Count > 0, cfg.SafetyMarginPercent, cal, scalePct is { } pct ? ScaledSide(pct) : null, frameRate);
     }
 
     bool Trimmed => probe != null && (timeline.Start > 0.05 || timeline.End < probe.Duration - 0.05);
@@ -601,6 +762,7 @@ sealed class MainForm : DarkForm
     {
         timeLabel.Text = $"{Planner.FormatTime(timeline.Current)}    {Planner.FormatTime(timeline.Start)} – {Planner.FormatTime(timeline.End)}  ({Planner.FormatTime(timeline.End - timeline.Start)})";
         resetLink.Visible = Trimmed && encodeCts == null;
+        ShowCrop();
         foreach (var (_, _, lane, row) in trackUi)
         {
             (lane.Start, lane.End, lane.Current) = (timeline.Start, timeline.End, timeline.Current);
@@ -617,7 +779,8 @@ sealed class MainForm : DarkForm
         // Already as good as the source: nothing to gain
         if (plan.CappedBySource) return (Theme.Green, "");
         const double Good = 0.05; // bits per pixel per frame that H.264 needs to look clean
-        double shortSrc = Math.Min(probe!.Width, probe.Height), aspect = Math.Max(probe.Width, probe.Height) / shortSrc;
+        var src = PlanSource;
+        double shortSrc = Math.Min(src.Width, src.Height), aspect = Math.Max(src.Width, src.Height) / shortSrc;
         double Bits(int side, int f) => plan.VideoKbps * 1000.0 / (side * side * aspect * f);
         var bits = Bits(plan.OutputShortSide, fps);
         if (bits >= Good) return (Theme.Green, "");
@@ -710,6 +873,9 @@ sealed class MainForm : DarkForm
                 ScaleShortSide = plan.ScaleShortSide,
                 Fps = plan.Fps,
                 Portrait = probe.Height > probe.Width,
+                Crop = CropForEncode(),
+                CropW = PlanSource.Width,
+                CropH = PlanSource.Height,
                 Encoder = cfg.Encoder,
                 CappedBySource = plan.CappedBySource,
                 Calibration = plan.Calibration,
@@ -761,7 +927,8 @@ sealed class MainForm : DarkForm
         customMb.Enabled = !busy;
         foreach (var (_, box, lane, _) in trackUi) box.Enabled = lane.Enabled = !busy;
         advLink.Enabled = !busy;
-        foreach (var p in new[] { sizeChips, resChips, fpsChips, encChips, audioChips }.SelectMany(g => g.Controls.OfType<Pill>())) p.Enabled = !busy;
+        foreach (var p in new[] { sizeChips, resChips, cropChips, fpsChips, encChips, audioChips }.SelectMany(g => g.Controls.OfType<Pill>())) p.Enabled = !busy;
+        preview.Enabled = keyLane.Enabled = !busy;
         // The button keeps its size and says what's happening; hovering turns it into Cancel
         goBtn.AltText = busy ? "Compressing…" : null;
         goBtn.HoverText = busy ? "✕  Cancel" : null;
