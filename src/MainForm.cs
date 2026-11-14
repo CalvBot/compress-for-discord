@@ -551,6 +551,22 @@ sealed class MainForm : DarkForm
                 case "separate": SetSeparate(true); break;
                 case "select": keyLane.Select(int.Parse(value)); break;
                 case "del": DeleteSelectedKey(); break;
+                // selmulti=lane:0,1 (lane: key, pos, scale, or an audio track number)
+                case "selmulti":
+                    var (which, ids) = (value.Split(':')[0], value.Split(':')[1].Split(',').Select(int.Parse));
+                    if (which is "key" or "pos" or "scale") (which == "key" ? keyLane : which == "pos" ? posLane : scaleLane).Selection.SetMany(ids);
+                    else trackUi[int.Parse(which)].Lane.Selection.SetMany(ids);
+                    foreach (var t in AllTracks) t.Invalidate();
+                    break;
+                case "copy": CopyKeys(); break;
+                case "paste": PasteKeys(); break;
+                case "shiftsel":
+                    // Moves the shared track's selection by this many seconds, the way a drag does
+                    var all = new IKeyTrack[] { pos, scale };
+                    var d = Interp.ClampShift(Enumerable.Range(0, pos.Count).Select(pos.TimeAt).ToList(), keyLane.Selection.Set, double.Parse(value), timeline.Duration);
+                    foreach (var k in all) k.Shift(keyLane.Selection.Set, d);
+                    ShowCrop();
+                    break;
                 case "restore": if (Projects.Recent().FirstOrDefault(r => r.Project.File == file).Project is { } saved) Restore(saved); break;
                 case "saveproject": projectSaved = false; SaveProject(); break;
                 case "ease":
@@ -970,8 +986,23 @@ sealed class MainForm : DarkForm
             foreach (var k in tracks()) added |= k.Add(t);
             if (added) { timeline.Seek(t); UpdateSummary(); }
         };
-        lane.RemoveRequested += i => { foreach (var k in tracks()) if (i < k.Count) k.RemoveAt(i); ShowCrop(); UpdateSummary(); };
-        lane.MoveRequested += (i, t) => { foreach (var k in tracks()) if (i < k.Count) k.Move(i, t, timeline.Duration); ShowCrop(); };
+        lane.RemoveRequested += gone =>
+        {
+            foreach (var k in tracks())
+                foreach (var i in gone.OrderDescending()) if (i < k.Count) k.RemoveAt(i);
+            ShowCrop();
+            UpdateSummary();
+        };
+        // The held point and the rest of the selection move together, short of any point not selected
+        lane.ShiftRequested += (group, delta) =>
+        {
+            var all = tracks();
+            var times = Enumerable.Range(0, all[0].Count).Select(all[0].TimeAt).ToList();
+            delta = Interp.ClampShift(times, group, delta, timeline.Duration);
+            if (delta == 0) return;
+            foreach (var k in all) k.Shift(group, delta);
+            ShowCrop();
+        };
         lane.Picked += i => { if (i < tracks()[0].Count) timeline.Seek(tracks()[0].TimeAt(i)); };
         HookTrack(lane);
     }
@@ -1030,18 +1061,94 @@ sealed class MainForm : DarkForm
         trackMenu.Show(track, at);
     }
 
+    /// <summary>Sets how the value moves next to a point; when it's one of several selected, next to all of them</summary>
     void SetEase(Control track, int index, Ease ease)
     {
         if (track is VolumeLane v)
         {
-            v.SetEase(index, ease);
+            foreach (var i in v.Selection.Contains(index) ? v.Selection.Sorted : [index]) v.SetEase(i, ease);
             if (v != masterLane) UpdateMasterPeaks();
         }
         else if (track is KeyLane k && keyTracks.TryGetValue(k, out var tracks))
         {
-            foreach (var t in tracks()) if (index < t.Count) t.SetEase(index, ease);
+            foreach (var i in k.Selection.Contains(index) ? k.Selection.Sorted : [index])
+                foreach (var t in tracks()) if (i < t.Count) t.SetEase(i, ease);
             ShowCrop();
         }
+    }
+
+    // ---------- copy and paste key points ----------
+
+    /// <summary>Copied key points, timed from the first: audio levels, or position and/or scale</summary>
+    sealed record KeyClip(bool Audio, List<(double Dt, double V, (double X, double Y)? P, double? S, Ease E)> Points);
+    KeyClip? keyClip;
+    Control? clipFrom;
+
+    /// <summary>Ctrl+C: the selected key points, on whichever track they are. False if none are selected.</summary>
+    bool CopyKeys()
+    {
+        foreach (var track in AllTracks)
+        {
+            if (track is VolumeLane { Selection.Count: > 0 } a)
+            {
+                var pts = a.Selection.Sorted.Where(i => i < a.Keys.Count).Select(i => a.Keys[i]).ToList();
+                keyClip = new(true, [.. pts.Select(k => (k.T - pts[0].T, k.V, ((double, double)?)null, (double?)null, k.E))]);
+            }
+            else if (track is KeyLane { Selection.Count: > 0 } b)
+            {
+                var idx = b.Selection.Sorted.Where(i => i < pos.Count || i < scale.Count).ToList();
+                if (idx.Count == 0) return false;
+                // The shared track's points are both position and scale; a separate track's are just its own
+                var withPos = b != scaleLane;
+                var withScale = b != posLane;
+                var first = (withPos ? pos : (IKeyTrack)scale).TimeAt(idx[0]);
+                keyClip = new(false, [.. idx.Select(i => (
+                    (withPos ? pos.Keys[i].T : scale.Keys[i].T) - first,
+                    0.0,
+                    withPos ? pos.Keys[i].Value : ((double, double)?)null,
+                    withScale ? scale.Keys[i].Value : (double?)null,
+                    withPos ? pos.Keys[i].E : scale.Keys[i].E))]);
+            }
+            else continue;
+            clipFrom = track;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Ctrl+V: the copied points, the first at the playhead and the rest spaced as they were. They go on the track
+    /// under the mouse if it takes them, otherwise back on the one they came from, and are left selected.
+    /// </summary>
+    bool PasteKeys()
+    {
+        if (keyClip is not { } clip || probe == null) return false;
+        bool Takes(Control? t) => t is { Visible: true } && (clip.Audio
+            ? t is VolumeLane
+            : t == keyLane || (t == posLane && clip.Points.Any(p => p.P != null)) || (t == scaleLane && clip.Points.Any(p => p.S != null)));
+        var target = Takes(hoverTrack) ? hoverTrack : Takes(clipFrom) ? clipFrom : !clip.Audio && Takes(keyLane) ? keyLane : null;
+        if (target == null) return false;
+        var at = timeline.Current;
+        var points = clip.Points.Select(p => (T: at + p.Dt, p)).Where(x => x.T <= timeline.Duration + 1e-6).ToList();
+        if (target is VolumeLane lane)
+        {
+            lane.Paste(points.Select(x => (x.T, x.p.V, x.p.E)));
+            if (lane != masterLane) UpdateMasterPeaks();
+            return true;
+        }
+        if (!Cropping) return false;
+        foreach (var (t, p) in points)
+        {
+            // On the shared track both values get a point (one copied without the other keeps what it has there),
+            // so position and scale stay at the same times
+            var (x, s) = (p.P ?? pos.At(t), p.S ?? scale.At(t));
+            if (target != scaleLane && (p.P != null || target == keyLane)) pos.Put(t, x, p.E);
+            if (target != posLane && (p.S != null || target == keyLane)) scale.Put(t, Math.Min(s, MaxCropW), p.E);
+        }
+        ShowCrop();
+        ((KeyLane)target).SelectTimes(points.Select(x => x.T));
+        UpdateSummary();
+        return true;
     }
 
     /// <summary>Back to no key points. For audio that's a level volume line; for position and scale, the whole frame.</summary>
@@ -1227,6 +1334,8 @@ sealed class MainForm : DarkForm
     void Fill(KeyLane lane, IKeyTrack track, IEnumerable<double> levels, Func<double, double> levelAt, IEnumerable<double>? levels2 = null, Func<double, double>? level2At = null)
     {
         (lane.Duration, lane.Current) = (timeline.Duration, timeline.Current);
+        // Points added or taken away shift the numbers of the rest, so a selection no longer means the same points
+        if (lane.Keys.Count != track.Count) lane.Selection.Clear();
         lane.Keys = Enumerable.Range(0, track.Count).Select(track.TimeAt).ToList();
         lane.Eases = Enumerable.Range(0, track.Count).Select(track.EaseAt).ToList();
         (lane.LevelAt, lane.Level2At) = (levelAt, level2At);
@@ -1669,6 +1778,8 @@ sealed class MainForm : DarkForm
         if (probe == null || encodeCts != null || outPath != null || Typing) return false;
         var key = keyData & Keys.KeyCode;
         var mods = keyData & Keys.Modifiers;
+        if (keyData == (Keys.Control | Keys.C)) return CopyKeys();
+        if (keyData == (Keys.Control | Keys.V)) return PasteKeys();
         if (mods != Keys.None && !(mods == Keys.Shift && key is Keys.Left or Keys.Right)) return false;
         var step = mods == Keys.Shift ? 5 : StepLength;
         // Close enough to count as being on a key point (with frame lock, the playhead can only get within half a frame)

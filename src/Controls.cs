@@ -769,17 +769,50 @@ sealed class VolumeLane : Control
     double OnFrame(double t) => Grid > 0 ? Math.Clamp(Math.Round(t / Grid) * Grid, 0, Duration) : t;
     int grabX;
     double grabT;
-    /// <summary>The key point that's selected (Del removes it); -1 = none</summary>
-    public int SelectedKey { get; private set; } = -1;
+    /// <summary>The key points that are selected (Del removes them, dragging one moves them all)</summary>
+    public KeySelection Selection { get; } = new();
+    /// <summary>The selected point clicked last; -1 = none</summary>
+    public int SelectedKey => Selection.Primary;
     /// <summary>A key point on this track was selected (so any selected on another track can be let go)</summary>
     public event Action? KeySelected;
+    /// <summary>A Shift+click on a point that was already selected: let go of it if the mouse comes up without dragging</summary>
+    int toggleOff = -1;
+    bool moved;
 
     public void Select(int index)
     {
-        if (SelectedKey == index) return;
-        SelectedKey = index;
+        if (!Selection.Only(index)) return;
         Invalidate();
         if (index >= 0) KeySelected?.Invoke();
+    }
+
+    /// <summary>Selects the points at these times (the ones just pasted)</summary>
+    public void SelectTimes(IEnumerable<double> times)
+    {
+        var ts = times.ToList();
+        Selection.SetMany(Enumerable.Range(0, Keys.Count).Where(i => ts.Any(t => Math.Abs(Keys[i].T - t) < 0.02)));
+        Invalidate();
+        if (Selection.Count > 0) KeySelected?.Invoke();
+    }
+
+    /// <summary>Pasted points: each replaces one already at its time, or goes in between. Then they're selected.</summary>
+    public void Paste(IEnumerable<(double T, double V, Ease E)> points)
+    {
+        var times = new List<double>();
+        foreach (var (t, v, ease) in points)
+        {
+            if (t > Duration) continue;
+            var i = Keys.FindIndex(k => Math.Abs(k.T - t) < 0.02);
+            if (i >= 0) Keys[i] = (Keys[i].T, v, ease);
+            else
+            {
+                var after = Keys.FindIndex(k => k.T > t);
+                Keys.Insert(after < 0 ? Keys.Count : after, (t, v, ease));
+            }
+            times.Add(t);
+        }
+        SelectTimes(times);
+        Committed?.Invoke();
     }
 
     /// <summary>How close the playhead has to be to a key point to count as on it: within half a frame</summary>
@@ -789,9 +822,9 @@ sealed class VolumeLane : Control
 
     public void DeleteSelected()
     {
-        if (SelectedKey < 0 || SelectedKey >= Keys.Count) return;
-        Keys.RemoveAt(SelectedKey);
-        SelectedKey = -1;
+        if (Selection.Count == 0) return;
+        foreach (var i in Selection.Sorted.Reverse()) if (i < Keys.Count) Keys.RemoveAt(i);
+        Selection.Clear();
         Invalidate();
         Committed?.Invoke();
     }
@@ -817,7 +850,8 @@ sealed class VolumeLane : Control
     {
         var h = new HashCode();
         foreach (var v in new[] { From, Span, Start, End, Volume, Grid, Duration }) h.Add(v);
-        h.Add(Active); h.Add(Silent); h.Add(Enabled); h.Add(dragKey); h.Add(SelectedKey); h.Add(OnKey >= 0); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Peaks);
+        h.Add(Active); h.Add(Silent); h.Add(Enabled); h.Add(dragKey); h.Add(OnKey >= 0); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Peaks);
+        foreach (var i in Selection.Sorted) h.Add(i);
         foreach (var k in Keys) { h.Add(k.T); h.Add(k.V); h.Add(k.E); }
         return h.ToHashCode();
     }
@@ -885,7 +919,7 @@ sealed class VolumeLane : Control
 
     public void ClearKeys()
     {
-        SelectedKey = -1;
+        Selection.Clear();
         Keys.Clear();
         Invalidate();
         Committed?.Invoke();
@@ -894,7 +928,7 @@ sealed class VolumeLane : Control
     /// <summary>Back to 100% throughout: no points, and the level line where it started</summary>
     public void ResetLevel()
     {
-        SelectedKey = -1;
+        Selection.Clear();
         Keys.Clear();
         Volume = 1;
         Invalidate();
@@ -917,6 +951,7 @@ sealed class VolumeLane : Control
         var after = Keys.FindIndex(k => k.T > t);
         var at = after < 0 ? Keys.Count : after;
         Keys.Insert(at, (t, GainAt(t), Ease.Linear));
+        Selection.Clear(); // the points after it have moved up one
         Invalidate();
         return at;
     }
@@ -931,7 +966,7 @@ sealed class VolumeLane : Control
             if (OnKey is >= 0 and var there)
             {
                 Keys.RemoveAt(there);
-                SelectedKey = -1;
+                Selection.Clear();
                 Invalidate();
             }
             else AddKey(Current);
@@ -949,14 +984,26 @@ sealed class VolumeLane : Control
         var k = HitKey(e.Location);
         if (e.Button == MouseButtons.Right)
         {
-            if (k >= 0) Select(k);
+            // A point that's part of the selection keeps it, so the menu's ease goes to all of them
+            if (k >= 0 && !Selection.Contains(k)) Select(k);
             MenuRequested?.Invoke(e.Location);
         }
         else if (e.Button == MouseButtons.Left)
         {
+            var shift = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift);
             // Ctrl+click puts a new point under the mouse, already held so it can be dragged into place
             if (k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) k = AddKey(OnFrame(T(e.X)));
-            Select(k);
+            toggleOff = -1;
+            moved = false;
+            // Shift+click adds a point to the selection (or, without a drag, takes it away again);
+            // a plain click on a selected point keeps the selection so they can all be dragged
+            if (k >= 0 && shift)
+            {
+                if (Selection.Contains(k)) toggleOff = k;
+                else { Selection.Add(k); Invalidate(); KeySelected?.Invoke(); }
+            }
+            else if (k < 0) { if (!shift) Select(-1); }
+            else if (!Selection.Contains(k)) Select(k);
             dragKey = k;
             grabX = e.X;
             grabT = k >= 0 ? Keys[k].T : 0;
@@ -972,14 +1019,21 @@ sealed class VolumeLane : Control
         base.OnMouseMove(e);
         if (dragKey >= 0)
         {
-            // A point can't pass its neighbours
-            var lo = dragKey > 0 ? Keys[dragKey - 1].T + 0.05 : 0;
-            var hi = dragKey < Keys.Count - 1 ? Keys[dragKey + 1].T - 0.05 : Duration;
-            // Shift: slide it in time only
+            if (Math.Abs(e.X - grabX) > Px(3) || Math.Abs(e.Y - grabY) > Px(3)) moved = true;
+            if (!moved) return;
+            // The point held and every other selected one move together; none can pass an unselected neighbour.
+            // Shift: in time only. Ctrl: the level only, staying where it is in time.
             // A point can sit between frames (after the frame rate was lowered, say) and stays there while only its
             // value is dragged. Once it's moved sideways it lands on a frame.
-            var t = Math.Abs(e.X - grabX) <= Px(3) ? grabT : OnFrame(T(e.X));
-            Keys[dragKey] = (Math.Clamp(t, lo, Math.Max(lo, hi)), ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift) ? Keys[dragKey].V : V(e.Y), Keys[dragKey].E);
+            var group = Selection.Contains(dragKey) ? Selection.Set : new HashSet<int> { dragKey };
+            var t = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control) || Math.Abs(e.X - grabX) <= Px(3) ? grabT : OnFrame(T(e.X));
+            var dt = Interp.ClampShift(Keys.Select(p => p.T).ToList(), group, t - Keys[dragKey].T, Duration);
+            var dv = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift) ? 0 : V(e.Y) - Keys[dragKey].V;
+            // The whole group stays within 0..200%
+            var vs = group.Where(i => i < Keys.Count).Select(i => Keys[i].V).ToList();
+            dv = Math.Clamp(dv, -vs.Min(), 2 - vs.Max());
+            foreach (var i in group)
+                if (i < Keys.Count) Keys[i] = (Keys[i].T + dt, Math.Round(Keys[i].V + dv, 3), Keys[i].E);
             Invalidate();
         }
         else if (dragStretch >= 0)
@@ -1001,7 +1055,14 @@ sealed class VolumeLane : Control
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        var changed = dragKey >= 0 || dragStretch >= 0 || (dragFlat && Volume != grabVolume);
+        if (dragKey >= 0 && !moved)
+        {
+            // A click without a drag: Shift+click on a selected point lets it go; a plain click selects just that one
+            if (toggleOff >= 0) { Selection.Remove(toggleOff); Invalidate(); }
+            else if (!ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift)) Select(dragKey);
+        }
+        var changed = (dragKey >= 0 && moved) || dragStretch >= 0 || (dragFlat && Volume != grabVolume);
+        toggleOff = -1;
         dragKey = dragStretch = -1;
         dragFlat = false;
         if (changed) Committed?.Invoke();
@@ -1059,10 +1120,10 @@ sealed class VolumeLane : Control
         using (var dot = new SolidBrush(line))
             foreach (var k in Keys)
                 using (var icon = KeyIcon.Shape(k.E, X(k.T), Y(k.V), Px(5))) g.FillPath(dot, icon);
-        if (SelectedKey >= 0 && SelectedKey < Keys.Count)
-            using (var ring = new Pen(Theme.Warn, Math.Max(1.5f, Px(2))))
-            using (var around = KeyIcon.Shape(Keys[SelectedKey].E, X(Keys[SelectedKey].T), Y(Keys[SelectedKey].V), Px(8)))
-                g.DrawPath(ring, around);
+        using (var ring = new Pen(Theme.Warn, Math.Max(1.5f, Px(2))))
+            foreach (var i in Selection.Set)
+                if (i < Keys.Count)
+                    using (var around = KeyIcon.Shape(Keys[i].E, X(Keys[i].T), Y(Keys[i].V), Px(8))) g.DrawPath(ring, around);
 
         g.ResetClip();
 
@@ -1445,17 +1506,29 @@ sealed class KeyLane : Control
     /// <summary>Length of one frame at the chosen frame rate, in seconds. Frames are marked once zoomed in far enough.</summary>
     public double Grid;
     double OnFrame(double t) => Grid > 0 ? Math.Clamp(Math.Round(t / Grid) * Grid, 0, Duration) : t;
-    /// <summary>The key point that's selected (Del removes it); -1 = none</summary>
-    public int SelectedKey { get; private set; } = -1;
+    /// <summary>The key points that are selected (Del removes them, dragging one moves them all)</summary>
+    public KeySelection Selection { get; } = new();
+    /// <summary>The selected point clicked last; -1 = none</summary>
+    public int SelectedKey => Selection.Primary;
     /// <summary>A key point on this track was selected (so any selected on another track can be let go)</summary>
     public event Action? KeySelected;
+    int toggleOff = -1;
+    bool shiftClick;
 
     public void Select(int index)
     {
-        if (SelectedKey == index) return;
-        SelectedKey = index;
+        if (!Selection.Only(index)) return;
         Invalidate();
         if (index >= 0) KeySelected?.Invoke();
+    }
+
+    /// <summary>Selects the points at these times (the ones just pasted)</summary>
+    public void SelectTimes(IEnumerable<double> times)
+    {
+        var ts = times.ToList();
+        Selection.SetMany(Enumerable.Range(0, Keys.Count).Where(i => ts.Any(t => Math.Abs(Keys[i] - t) < 0.02)));
+        Invalidate();
+        if (Selection.Count > 0) KeySelected?.Invoke();
     }
 
     /// <summary>How close the playhead has to be to a key point to count as on it: within half a frame</summary>
@@ -1464,10 +1537,10 @@ sealed class KeyLane : Control
 
     public void DeleteSelected()
     {
-        if (SelectedKey < 0 || SelectedKey >= Keys.Count) return;
-        var index = SelectedKey;
-        SelectedKey = -1;
-        RemoveRequested?.Invoke(index);
+        if (Selection.Count == 0) return;
+        var gone = Selection.Sorted;
+        Selection.Clear();
+        RemoveRequested?.Invoke(gone);
     }
 
     int rowHeight = 56;
@@ -1483,8 +1556,10 @@ sealed class KeyLane : Control
     }
     /// <summary>A point wanted at this time</summary>
     public event Action<double>? AddRequested;
-    public event Action<int>? RemoveRequested, Picked;
-    public event Action<int, double>? MoveRequested;
+    public event Action<int[]>? RemoveRequested;
+    public event Action<int>? Picked;
+    /// <summary>These points want to move together by this much (in seconds; not yet limited by their neighbours)</summary>
+    public event Action<IReadOnlySet<int>, double>? ShiftRequested;
 
     int dragKey = -1;
     bool moved;
@@ -1526,7 +1601,7 @@ sealed class KeyLane : Control
         if (e.Button == MouseButtons.Left && AddButton.Contains(e.Location))
         {
             // Adds a point at the playhead, or takes away the one that's already there
-            if (OnKey is >= 0 and var there) { SelectedKey = -1; RemoveRequested?.Invoke(there); }
+            if (OnKey is >= 0 and var there) { Selection.Clear(); RemoveRequested?.Invoke([there]); }
             else AddRequested?.Invoke(Current);
             return;
         }
@@ -1534,26 +1609,53 @@ sealed class KeyLane : Control
         var k = HitKey(e.X);
         if (e.Button == MouseButtons.Right)
         {
-            if (k >= 0) Select(k);
+            // A point that's part of the selection keeps it, so the menu's ease goes to all of them
+            if (k >= 0 && !Selection.Contains(k)) Select(k);
             MenuRequested?.Invoke(e.Location);
         }
         else if (e.Button == MouseButtons.Left && k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) AddRequested?.Invoke(OnFrame(T(e.X)));
-        else if (e.Button == MouseButtons.Left) { Select(k); dragKey = k; moved = false; }
+        else if (e.Button == MouseButtons.Left)
+        {
+            // Shift+click adds a point to the selection (or, without a drag, takes it away again);
+            // a plain click on a selected point keeps the selection so they can all be dragged
+            shiftClick = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift);
+            toggleOff = -1;
+            if (k >= 0 && shiftClick)
+            {
+                if (Selection.Contains(k)) toggleOff = k;
+                else { Selection.Add(k); Invalidate(); KeySelected?.Invoke(); }
+            }
+            else if (k < 0) { if (!shiftClick) Select(-1); }
+            else if (!Selection.Contains(k)) Select(k);
+            dragKey = k;
+            grabX = e.X;
+            moved = false;
+        }
     }
+
+    int grabX;
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
         if (dragKey < 0) { Cursor = AddButton.Contains(e.Location) ? Cursors.Hand : HitKey(e.X) >= 0 ? Cursors.SizeWE : Cursors.Default; return; }
+        if (!moved && Math.Abs(e.X - grabX) <= Px(3)) return;
         moved = true;
-        // A moved point lands on a frame of the chosen frame rate
-        MoveRequested?.Invoke(dragKey, OnFrame(T(e.X)));
+        // The held point lands on a frame of the chosen frame rate; the rest of the selection keeps its spacing
+        if (dragKey >= Keys.Count) return;
+        var delta = OnFrame(T(e.X)) - Keys[dragKey];
+        if (delta != 0) ShiftRequested?.Invoke(Selection.Contains(dragKey) ? Selection.Set : new HashSet<int> { dragKey }, delta);
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        if (dragKey >= 0 && !moved) Picked?.Invoke(dragKey);
+        if (dragKey >= 0 && !moved)
+        {
+            if (toggleOff >= 0) { Selection.Remove(toggleOff); Invalidate(); }
+            else if (!shiftClick) { Select(dragKey); Picked?.Invoke(dragKey); }
+        }
+        toggleOff = -1;
         dragKey = -1;
     }
 
@@ -1587,7 +1689,7 @@ sealed class KeyLane : Control
             // Its shape says how the value moves next to it.
             using var fill = new SolidBrush(Math.Abs(Keys[i] - Current) <= Near ? Color.White : Theme.Brand);
             using (var icon = KeyIcon.Shape(EaseOf(i), x, y, d)) g.FillPath(fill, icon);
-            if (i == SelectedKey)
+            if (Selection.Contains(i))
             {
                 using var ring = new Pen(Theme.Warn, Math.Max(1.5f, Px(2)));
                 using var around = KeyIcon.Shape(EaseOf(i), x, y, d + Px(3));

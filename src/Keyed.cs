@@ -54,6 +54,56 @@ static class Interp
             }
         return k[^1].V;
     }
+
+    /// <summary>
+    /// How far a group of points can move together: as far as asked, short of the first unselected neighbour on
+    /// either side (keeping a small gap) and the ends of the video. The group keeps its spacing and order.
+    /// </summary>
+    public static double ClampShift(IReadOnlyList<double> times, IReadOnlySet<int> selected, double delta, double duration, double gap = 0.05)
+    {
+        double lo = double.NegativeInfinity, hi = double.PositiveInfinity;
+        foreach (var i in selected)
+        {
+            if (i < 0 || i >= times.Count) continue;
+            lo = Math.Max(lo, (i > 0 && !selected.Contains(i - 1) ? times[i - 1] + gap : 0) - times[i]);
+            hi = Math.Min(hi, (i < times.Count - 1 && !selected.Contains(i + 1) ? times[i + 1] - gap : duration) - times[i]);
+        }
+        return lo > hi || double.IsInfinity(lo) ? 0 : Math.Clamp(delta, lo, hi);
+    }
+}
+
+/// <summary>Which key points on one track are selected (Shift+click adds or takes away), and the one clicked last</summary>
+sealed class KeySelection
+{
+    readonly HashSet<int> set = [];
+    int primary = -1;
+    public IReadOnlySet<int> Set => set;
+    public int Count => set.Count;
+    public bool Contains(int i) => set.Contains(i);
+    /// <summary>The point clicked last (its ease is the one the menu shows), or -1</summary>
+    public int Primary => set.Contains(primary) ? primary : set.Count > 0 ? set.Min() : -1;
+    public int[] Sorted => [.. set.Order()];
+
+    /// <summary>Just this one (or none, for -1); false if that's already so</summary>
+    public bool Only(int i)
+    {
+        if (i < 0 ? set.Count == 0 : set.Count == 1 && set.Contains(i)) return false;
+        set.Clear();
+        if (i >= 0) set.Add(i);
+        primary = i;
+        return true;
+    }
+
+    public void Add(int i) { set.Add(i); primary = i; }
+    public void Remove(int i) => set.Remove(i);
+    public void Clear() { set.Clear(); primary = -1; }
+
+    public void SetMany(IEnumerable<int> ids)
+    {
+        set.Clear();
+        foreach (var i in ids) set.Add(i);
+        primary = set.Count > 0 ? set.Min() : -1;
+    }
 }
 
 /// <summary>What a key-point track on screen needs from the values behind it, whatever they are</summary>
@@ -65,7 +115,8 @@ interface IKeyTrack
     void SetEase(int i, Ease ease);
     /// <summary>Adds a point at a time, holding whatever the value already is there. False if there's one there already.</summary>
     bool Add(double t);
-    void Move(int i, double t, double duration);
+    /// <summary>Moves these points by the same amount (already limited with Interp.ClampShift)</summary>
+    void Shift(IEnumerable<int> indices, double delta);
     void RemoveAt(int i);
 }
 
@@ -125,12 +176,18 @@ sealed class Keyed<V>(Func<V, V, double, V> mix) : IKeyTrack
         Keys.Insert(after < 0 ? Keys.Count : after, (t, value, ease));
     }
 
-    /// <summary>Moves a point in time; it can't pass its neighbours</summary>
-    public void Move(int i, double t, double duration)
+    public void Shift(IEnumerable<int> indices, double delta)
     {
-        var lo = i > 0 ? Keys[i - 1].T + 0.05 : 0;
-        var hi = i < Keys.Count - 1 ? Keys[i + 1].T - 0.05 : duration;
-        Keys[i] = (Math.Clamp(t, lo, Math.Max(lo, hi)), Keys[i].Value, Keys[i].E);
+        foreach (var i in indices)
+            if (i >= 0 && i < Keys.Count) Keys[i] = (Keys[i].T + delta, Keys[i].Value, Keys[i].E);
+    }
+
+    /// <summary>A pasted point: replaces the one already at that time, or goes in between</summary>
+    public void Put(double t, V value, Ease ease)
+    {
+        var i = Keys.FindIndex(k => Math.Abs(k.T - t) < 0.02);
+        if (i >= 0) Keys[i] = (Keys[i].T, value, ease);
+        else Insert(t, value, ease);
     }
 
     /// <summary>Removes a point; the last one stays, as the fixed value</summary>
