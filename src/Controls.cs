@@ -69,6 +69,8 @@ sealed class Pill : Control
         this.kind = kind;
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         SetStyle(ControlStyles.Selectable, false);
+        // Otherwise the second of two quick clicks is a "double-click" and doesn't count as a click at all
+        SetStyle(ControlStyles.StandardDoubleClick, false);
         Cursor = Cursors.Hand;
         Margin = new Padding(0, 0, 6, 6);
         Text = text;
@@ -329,6 +331,23 @@ sealed class Timeline : Control
 
     DragKind drag;
     double grabOffset, length;
+    // The strip (thumbnails, selection, tabs) is kept as a picture and only redrawn when something in it changes.
+    // The playhead moves many times a second and is drawn on top.
+    Bitmap? strip;
+    int stripKey, stripVersion;
+
+    /// <summary>The thumbnails changed (they can change in place, so the timeline can't tell by itself)</summary>
+    public void StripChanged()
+    {
+        stripVersion++;
+        Invalidate();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) strip?.Dispose();
+        base.Dispose(disposing);
+    }
 
     public Timeline()
     {
@@ -476,7 +495,23 @@ sealed class Timeline : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        var g = e.Graphics;
+        var key = HashCode.Combine(HashCode.Combine(From, Span, Start, End, Enabled, Focused, Grid), ThumbStart, ThumbSpan, stripVersion, Thumbs);
+        if (strip == null || strip.Width != Width || strip.Height != Height || key != stripKey)
+        {
+            strip?.Dispose();
+            strip = new Bitmap(Math.Max(1, Width), Math.Max(1, Height), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            using var sg = Graphics.FromImage(strip);
+            Render(sg);
+            stripKey = key;
+        }
+        e.Graphics.DrawImageUnscaled(strip, 0, 0);
+        var x = X(Current);
+        if (x >= G - 1 && x <= Width)
+            using (var head = new Pen(Color.White, 2)) e.Graphics.DrawLine(head, x, TabH, x, Height);
+    }
+
+    void Render(Graphics g)
+    {
         g.Clear(Parent?.BackColor ?? Theme.Bg);
         int top = TabH, bodyH = Height - top;
         int left = G, bodyW = Width - left;
@@ -538,8 +573,6 @@ sealed class Timeline : Control
                 for (var i = 0; i < 9; i++)
                     g.FillRectangle(dots, x + (tw - grid) / 2 + i % 3 * (dot + gap), (top - grid) / 2 + i / 3 * (dot + gap), dot, dot);
         }
-        using (var head = new Pen(Color.White, 2))
-            g.DrawLine(head, X(Current), top, X(Current), Height);
         if (Focused)
             using (var focus = new Pen(Color.FromArgb(120, Theme.Brand), 2))
                 g.DrawRectangle(focus, left + 1, top + 1, bodyW - 2, bodyH - 2);
@@ -644,6 +677,26 @@ sealed class VolumeLane : Control
     public int RowHeight { get => rowHeight; set { rowHeight = value; Fit(); } }
     /// <summary>First of two neighbouring points being dragged together (a level stretch); -1 = none</summary>
     int dragStretch = -1;
+
+    // Everything but the playhead is kept as a picture and redrawn only when it changes: drawing the waveform
+    // again for every playhead move, on every track, is what made playback and scrubbing drag
+    Bitmap? face;
+    int faceKey;
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) face?.Dispose();
+        base.Dispose(disposing);
+    }
+
+    int FaceKey()
+    {
+        var h = new HashCode();
+        foreach (var v in new[] { From, Span, Start, End, Volume, Grid, Duration }) h.Add(v);
+        h.Add(Active); h.Add(Silent); h.Add(Enabled); h.Add(dragKey); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Peaks);
+        foreach (var k in Keys) { h.Add(k.T); h.Add(k.V); }
+        return h.ToHashCode();
+    }
 
     int dragKey = -1;
     bool dragFlat;
@@ -823,7 +876,23 @@ sealed class VolumeLane : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        var g = e.Graphics;
+        var key = FaceKey();
+        if (face == null || face.Width != Width || face.Height != Height || key != faceKey)
+        {
+            face?.Dispose();
+            face = new Bitmap(Math.Max(1, Width), Math.Max(1, Height), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            using var fg = Graphics.FromImage(face);
+            Render(fg);
+            faceKey = key;
+        }
+        e.Graphics.DrawImageUnscaled(face, 0, 0);
+        var x = X(Current);
+        if (x >= G && x <= Width)
+            using (var head = new Pen(Color.FromArgb(160, Color.White))) e.Graphics.DrawLine(head, x, 1, x, Height - 2);
+    }
+
+    void Render(Graphics g)
+    {
         g.Clear(Parent?.BackColor ?? Theme.Bg2);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         using var shape = Theme.Round(new RectangleF(G, 0, BodyW - 1, Height - 1), Px(6));
@@ -856,7 +925,6 @@ sealed class VolumeLane : Control
         using (var dot = new SolidBrush(line))
             foreach (var k in Keys) g.FillEllipse(dot, X(k.T) - Px(4), Y(k.V) - Px(4), Px(8), Px(8));
 
-        using (var head = new Pen(Color.FromArgb(160, Color.White))) g.DrawLine(head, X(Current), 0, X(Current), Height);
         g.ResetClip();
 
         // Buttons in the gutter: mute (speaker, struck through when muted) and add a point

@@ -1,4 +1,5 @@
 using System.Collections.Specialized;
+using System.Runtime.InteropServices;
 
 namespace CompressForDiscord;
 
@@ -53,7 +54,14 @@ sealed class MainForm : DarkForm
     readonly CropView preview;
     readonly KeyLane keyLane, posLane, scaleLane;
     readonly TrackScroller scroller;
-    readonly SizeGrip grip;
+    readonly SizeGrip grip, previewGrip;
+    int grabExtra;
+    /// <summary>Above zero while several things are being changed at once: the window is fitted and painted once at the end</summary>
+    int holdFit;
+    // What position and scale's own key points were before they were combined, and what combining made of them,
+    // so that separating again brings the originals back if nothing was changed in between
+    List<(double T, (double X, double Y) Value)>? keptPos, bakedPos;
+    List<(double T, double Value)>? keptScale, bakedScale;
     readonly DarkMenu trackMenu = new(), cropMenu = new();
     /// <summary>Height of every keyframable track, in 96-dpi pixels (Shift + wheel over a track changes it)</summary>
     int trackH = 56;
@@ -118,7 +126,18 @@ sealed class MainForm : DarkForm
         // Deferred: changing the text in the middle of a layout pass leaves the label at its default width
         subtitle.SizeChanged += (_, _) => { if (IsHandleCreated) BeginInvoke(FitSubtitle); };
 
-        preview = new CropView { Size = new Size(ContentWidth, 300), Margin = new Padding(0, 0, 0, 10) };
+        preview = new CropView { Size = new Size(ContentWidth, 300), Margin = Padding.Empty };
+        // Drag the bar under the preview to give it more (or less) of the window
+        previewGrip = new SizeGrip { Size = new Size(ContentWidth, 10), Margin = Padding.Empty };
+        previewGrip.DragStarted += () => grabExtra = extraH;
+        previewGrip.Dragged += by =>
+        {
+            var room = Screen.FromControl(this).WorkingArea.Height - (Height - extraH);
+            var to = Math.Clamp(grabExtra + by, 0, Math.Max(0, room));
+            if (to == extraH || baseW == 0) return;
+            extraH = to;
+            Batch(ApplyStretch);
+        };
         preview.BoxChanged += EditCrop;
         preview.BoxCommitted += () => UpdateSummary();
         preview.Stepped += by => { if (probe != null && encodeCts == null) timeline!.Seek(timeline.Current + by / (probe.Fps > 0 ? probe.Fps : 30)); };
@@ -241,7 +260,7 @@ sealed class MainForm : DarkForm
         grip.DragStarted += () => grabHeight = scroller.Height;
         grip.Dragged += by => { tracksHeight = Math.Max(D(60), grabHeight + by); SizeTracks(); };
         // Tracks get their real height once they exist on screen, so measure again whenever the content changes
-        scroller.Content.SizeChanged += (_, _) => { if (probe != null) SizeTracks(); };
+        scroller.Content.SizeChanged += (_, _) => { if (probe != null && holdFit == 0) SizeTracks(); };
         // The finished sound, always in view under the timeline: its mute button turns the audio off, and its
         // line is the overall volume. The individual tracks are under Advanced.
         masterLane = new VolumeLane { Label = "Audio", Back = Theme.Blend(Theme.Bg3, Theme.Brand, 0.2), Margin = new Padding(0, 4, 0, 0), PixelWidth = ContentWidth, Visible = false };
@@ -285,7 +304,7 @@ sealed class MainForm : DarkForm
         bottom.Controls.Add(info, 0, 0);
         bottom.Controls.Add(buttons, 1, 0);
 
-        root.Controls.AddRange([titleRow, preview, timeRow, zoomBar, timeline, scroller, grip, options, bar, bottom]);
+        root.Controls.AddRange([titleRow, preview, previewGrip, timeRow, zoomBar, timeline, scroller, grip, options, bar, bottom]);
         Controls.Add(root);
         AcceptDrop(f => { if (encodeCts == null && outPath == null) Program.OpenVideo(f, this); });
         // Clicking anywhere else stops typing in the custom size box
@@ -414,6 +433,16 @@ sealed class MainForm : DarkForm
                 case "crop": SetCrop(value); break;
                 case "rate": fpsBox.Text = value; break;
                 case "separate": SetSeparate(true); break;
+                case "spam":
+                    // Toggle Advanced over and over and report how long each took
+                    BeginInvoke(() =>
+                    {
+                        var watch = System.Diagnostics.Stopwatch.StartNew();
+                        var n = int.Parse(value);
+                        for (var i = 0; i < n; i++) { tracksOpen = !tracksOpen; ShowTracks(); }
+                        Text = $"SPAM {watch.ElapsedMilliseconds / (double)n:0.0} ms per toggle, window {Width}x{Height}";
+                    });
+                    break;
                 case "combine": SetSeparate(false); break;
                 case "trackh": SetTrackHeight(int.Parse(value)); break;
                 case "pos": pos.Set(timeline.Current, (double.Parse(value.Split(',')[0]), double.Parse(value.Split(',')[1]))); ShowCrop(); UpdateSummary(); break;
@@ -509,7 +538,7 @@ sealed class MainForm : DarkForm
         {
             if (cts.IsCancellationRequested || IsDisposed) { img.Dispose(); return; }
             fresh[i] = img;
-            if (first) BeginInvoke(timeline.Invalidate);
+            if (first) BeginInvoke(timeline.StripChanged);
         }, cts.Token);
         if (first || IsDisposed) return;
         if (cts.IsCancellationRequested)
@@ -519,7 +548,7 @@ sealed class MainForm : DarkForm
         }
         var old = timeline.Thumbs;
         (timeline.Thumbs, timeline.ThumbStart, timeline.ThumbSpan) = (fresh, start, span);
-        timeline.Invalidate();
+        timeline.StripChanged();
         foreach (var img in old) img?.Dispose();
     }
 
@@ -679,10 +708,46 @@ sealed class MainForm : DarkForm
         masterLane.Invalidate();
     }
 
+    [DllImport("user32.dll")]
+    static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wparam, IntPtr lparam);
+
+    /// <summary>
+    /// Runs a change that shows, hides or resizes several things, then lays the window out, fits it and paints it
+    /// once. Done piece by piece, each step resized and repainted the window, which showed as flashing and made
+    /// quick clicks lag behind.
+    /// </summary>
+    void Batch(Action change)
+    {
+        if (!IsHandleCreated || holdFit > 0) { change(); return; }
+        holdFit++;
+        SendMessage(Handle, 0x000B, 0, 0); // WM_SETREDRAW off
+        root.SuspendLayout();
+        scroller.Content.SuspendLayout();
+        try { change(); }
+        finally
+        {
+            scroller.Content.ResumeLayout(true);
+            root.ResumeLayout(true);
+            root.Size = root.GetPreferredSize(Size.Empty);
+            holdFit--;
+            FitToContent();
+            SendMessage(Handle, 0x000B, 1, 0);
+            Refresh();
+        }
+    }
+
     /// <summary>The Advanced section under the timeline: the position and scale track, then the audio tracks</summary>
-    void ShowTracks()
+    void ShowTracks() => Batch(ShowTracksNow);
+
+    void ShowTracksNow()
     {
         advBtn.On = tracksOpen;
+        // Back to the simple view is always back to the default window size
+        if (!tracksOpen && baseW > 0 && (extraW | extraH) != 0)
+        {
+            (extraW, extraH) = (0, 0);
+            ApplyStretch();
+        }
         var open = tracksOpen && probe != null;
         keyLane.Visible = open && !separate;
         posLane.Visible = scaleLane.Visible = open && separate;
@@ -713,13 +778,26 @@ sealed class MainForm : DarkForm
 
     void SetSeparate(bool on)
     {
-        // Back on one track they share its key points: every time either had one, with the values each had there
+        if (on == separate) return;
         if (!on)
         {
+            // Back on one track they share its key points: every time either had one, with the values each had
+            // there. Their own points are kept aside in case this is undone.
+            (keptPos, keptScale) = ([.. pos.Keys], [.. scale.Keys]);
             var times = KeyTimes.ToList();
             pos.Resample(times);
             scale.Resample(times);
+            (bakedPos, bakedScale) = ([.. pos.Keys], [.. scale.Keys]);
         }
+        else if (keptPos != null && pos.Keys.SequenceEqual(bakedPos!) && scale.Keys.SequenceEqual(bakedScale!))
+        {
+            // Nothing was changed while they were combined: give each track back exactly the points it had
+            pos.Keys.Clear();
+            pos.Keys.AddRange(keptPos);
+            scale.Keys.Clear();
+            scale.Keys.AddRange(keptScale!);
+        }
+        if (on) keptPos = null;
         separate = on;
         ShowTracks();
     }
@@ -783,10 +861,15 @@ sealed class MainForm : DarkForm
 
     void SetTrackHeight(int height)
     {
-        trackH = Math.Clamp(height, 42, 240);
-        foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane)) lane.RowHeight = trackH;
-        foreach (var lane in new[] { keyLane, posLane, scaleLane }) lane.RowHeight = trackH;
-        SizeTracks();
+        height = Math.Clamp(height, 42, 240);
+        if (height == trackH) return;
+        trackH = height;
+        Batch(() =>
+        {
+            foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane)) lane.RowHeight = trackH;
+            foreach (var lane in new[] { keyLane, posLane, scaleLane }) lane.RowHeight = trackH;
+            SizeTracks();
+        });
     }
 
     /// <summary>Zooms the timeline in or out, keeping the moment under the mouse where it is</summary>
@@ -985,7 +1068,7 @@ sealed class MainForm : DarkForm
     {
         var w = baseW + extraW;
         root.SuspendLayout();
-        foreach (var c in new Control[] { titleRow, preview, timeRow, zoomBar, timeline, keyLane, posLane, scaleLane, scroller, grip, bar }) c.Width = w;
+        foreach (var c in new Control[] { titleRow, preview, previewGrip, timeRow, zoomBar, timeline, keyLane, posLane, scaleLane, scroller, grip, bar }) c.Width = w;
         preview.Height = basePreviewH + extraH;
         options.MinimumSize = bottom.MinimumSize = new Size(w, 0);
         foreach (var row in chipRows) row.MaximumSize = new Size(baseChipMax + extraW, 0);
@@ -1004,7 +1087,7 @@ sealed class MainForm : DarkForm
     /// </summary>
     protected override void FitToContent()
     {
-        if (fitting || Controls.Count == 0 || WindowState != FormWindowState.Normal) return;
+        if (fitting || holdFit > 0 || Controls.Count == 0 || WindowState != FormWindowState.Normal) return;
         fitting = true;
         try
         {
