@@ -1877,13 +1877,16 @@ sealed class MainForm : DarkForm
             {
                 redrawHeld = null;
                 SendMessage(held.Handle, 0x000B, 1, 0);
-                // Everything in it, at once
-                held.Refresh();
+                // The whole window, at once: not just the content, or whatever the window showed around it before
+                // the step (where Windows copied the old picture as it resized) is left behind as trails
+                RedrawWindow(Handle, IntPtr.Zero, IntPtr.Zero, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
             }
         }
     }
 
     Control? redrawHeld;
+    const uint RDW_INVALIDATE = 0x1, RDW_ERASE = 0x4, RDW_ALLCHILDREN = 0x80, RDW_UPDATENOW = 0x100, RDW_FRAME = 0x400;
+    [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr hWnd, IntPtr rect, IntPtr region, uint flags);
 
     // Moving to a screen with other scaling: go back to the smallest size and measure again
     protected override void OnDpiChanged(DpiChangedEventArgs e)
