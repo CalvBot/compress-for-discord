@@ -1641,7 +1641,8 @@ sealed class MainForm : DarkForm
             var fps = plan.Fps ?? (int)Math.Round(probe.Fps);
             var (color, hint) = Quality(plan, fps);
             // Just the basics on the line; hovering it shows the whole breakdown
-            summary.Text = $"~{Planner.FormatBytes(plan.EstimateBytes)} · {plan.OutputShortSide}p{fps}{hint}";
+            // The size is the limit picked above, so the line leads with what that buys: the video's bitrate
+            summary.Text = $"{Planner.FormatRate(plan.VideoKbps)} · {plan.OutputShortSide}p{fps}{hint}";
             summary.ForeColor = color;
             var quality = plan.CappedBySource ? "Same as the source"
                 : color == Theme.Green ? "Good"
