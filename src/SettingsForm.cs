@@ -178,16 +178,18 @@ sealed class SettingsForm : DarkForm
         base.OnShown(e);
         ActiveControl = null;
 #if DEBUG
-        // Test screenshots: recenthover=N shows a row hovered, recentmenu=N opens its right-click menu
+        // Test screenshots: recenthover=N shows a row hovered, recentmenu=N opens its right-click menu, recentpage=N
+        // shows that page (from 0)
         foreach (var part in (Environment.GetEnvironmentVariable("CFD_TEST") ?? "").Split(';'))
         {
+            if (part.StartsWith("recentpage=")) recentList.ShowPage(int.Parse(part[11..]));
             if (part.StartsWith("recenthover=")) recentList.Hover(int.Parse(part[12..]));
             if (part.StartsWith("recentmenu=")) BeginInvoke(() => ShowRecentMenu(int.Parse(part[11..]), new Point(recentList.Width / 2, 20)));
         }
 #endif
     }
 
-    /// <summary>One row per recent project, newest first; click to open it, right-click for more. The list scrolls after six.</summary>
+    /// <summary>One row per recent project, newest first; click to open it, right-click for more. Pages of five.</summary>
     void FillRecent()
     {
         var recent = Projects.Recent();
@@ -347,7 +349,8 @@ sealed class SettingsForm : DarkForm
 
     /// <summary>
     /// The recent projects in one rounded box, like the text fields: each row is the video's name and when it was
-    /// saved, a gone video in red. Scrolls (wheel or the thin bar) after six rows.
+    /// saved, a gone video in red. Pages of five, with ‹ › at the bottom right once there's more than one page. The box
+    /// is always five rows tall (a short page leaves blank rows), so it and the arrows stay put while paging.
     /// </summary>
     sealed class RecentList : Control
     {
@@ -356,10 +359,10 @@ sealed class SettingsForm : DarkForm
         public event Action<int>? RowClicked;
         public event Action<int, Point>? RowMenu;
 
-        const int RowH = 34, Shown = 6, Pad = 4, BarW = 6;
-        int hover = -1, scroll;
-        bool overBar;
-        int? dragFrom;
+        const int RowH = 34, PerPage = 5, Pad = 4, FootH = 30, ArrowW = 30;
+        int hover = -1, page;
+        /// <summary>The arrow under the mouse: -1 back, 1 on, 0 neither</summary>
+        int overArrow;
         readonly ToolTip tips = new();
 
         public RecentList()
@@ -370,85 +373,79 @@ sealed class SettingsForm : DarkForm
 
         int Px(float v) => (int)Math.Round(v * DeviceDpi / 96f);
         int Row => Px(RowH);
-        int View => Math.Min(Items.Count, Shown) * Row;
-        int MaxScroll => Math.Max(0, Items.Count * Row - View);
-        bool Scrolls => MaxScroll > 0;
-        Rectangle Track => new(Width - Px(Pad) - Px(BarW), Px(Pad), Px(BarW), View);
-        Rectangle Thumb
+        int Pages => Math.Max(1, (Items.Count + PerPage - 1) / PerPage);
+        bool Paged => Pages > 1;
+        int Rows => PerPage * Row;
+        Rectangle Foot => new(Px(Pad), Px(Pad) + Rows, Width - 2 * Px(Pad), Px(FootH));
+        Rectangle Arrow(int dir)
         {
-            get
-            {
-                var t = Track;
-                var h = Math.Max(Px(24), t.Height * View / Math.Max(1, Items.Count * Row));
-                return new Rectangle(t.X, t.Y + (MaxScroll == 0 ? 0 : (t.Height - h) * scroll / MaxScroll), t.Width, h);
-            }
+            var f = Foot;
+            var w = Px(ArrowW);
+            return new Rectangle(dir < 0 ? f.Right - 2 * w : f.Right - w, f.Y, w, f.Height);
         }
 
-        void Fit() => Height = View + 2 * Px(Pad);
+        void Fit() => Height = Rows + (Paged ? Px(FootH) : 0) + 2 * Px(Pad);
         protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
         protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
 
+        /// <summary>New items; stays on the same page (a removed row shouldn't jump back to the first), if it still has any</summary>
         public void SetItems(IReadOnlyList<Item> items)
         {
             Items = items;
-            (hover, scroll) = (-1, 0);
+            hover = -1;
+            page = Math.Clamp(page, 0, Pages - 1);
             Fit();
             Invalidate();
         }
 
+        void GoTo(int to)
+        {
+            to = Math.Clamp(to, 0, Pages - 1);
+            if (to == page) return;
+            page = to;
+            Invalidate();
+            // The row under the mouse is a different project now
+            var p = PointToClient(MousePosition);
+            OnMouseMove(new MouseEventArgs(MouseButtons.None, 0, p.X, p.Y, 0));
+        }
+
         int RowAt(Point p)
         {
-            if (p.Y < Px(Pad) || p.Y >= Px(Pad) + View || (Scrolls && p.X >= Track.X - Px(2))) return -1;
-            var i = (p.Y - Px(Pad) + scroll) / Row;
+            if (p.Y < Px(Pad) || p.Y >= Px(Pad) + Rows || p.X < Px(Pad) || p.X >= Width - Px(Pad)) return -1;
+            var i = page * PerPage + (p.Y - Px(Pad)) / Row;
             return i < Items.Count ? i : -1;
         }
 
-        void ScrollTo(int to)
+        int ArrowAt(Point p)
         {
-            to = Math.Clamp(to, 0, MaxScroll);
-            if (to == scroll) return;
-            scroll = to;
-            Invalidate();
+            if (!Paged) return 0;
+            if (Arrow(-1).Contains(p)) return page > 0 ? -1 : 0;
+            if (Arrow(1).Contains(p)) return page < Pages - 1 ? 1 : 0;
+            return 0;
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            if (dragFrom is { } from)
-            {
-                // Dragging the thumb: its travel maps onto the whole list
-                var travel = Math.Max(1, Track.Height - Thumb.Height);
-                ScrollTo(from + (e.Y - dragStartY) * MaxScroll / travel);
-                return;
-            }
-            var bar = Scrolls && e.X >= Track.X - Px(2) && Thumb.Contains(Track.X, e.Y);
             var row = RowAt(e.Location);
-            if (row != hover || bar != overBar)
+            var arrow = ArrowAt(e.Location);
+            if (row != hover || arrow != overArrow)
             {
-                (hover, overBar) = (row, bar);
-                Cursor = row >= 0 ? Cursors.Hand : Cursors.Default;
+                (hover, overArrow) = (row, arrow);
+                Cursor = row >= 0 || arrow != 0 ? Cursors.Hand : Cursors.Default;
                 tips.SetToolTip(this, row >= 0 ? Items[row].Project.File : null);
                 Invalidate();
             }
         }
 
-        int dragStartY;
-
-        protected override void OnMouseDown(MouseEventArgs e)
-        {
-            base.OnMouseDown(e);
-            if (e.Button != MouseButtons.Left || !Scrolls || e.X < Track.X - Px(2)) return;
-            var thumb = Thumb;
-            // A click on the track jumps a page towards it; on the thumb, drags it
-            if (e.Y < thumb.Y) ScrollTo(scroll - View);
-            else if (e.Y >= thumb.Bottom) ScrollTo(scroll + View);
-            else (dragFrom, dragStartY) = (scroll, e.Y);
-        }
-
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            if (dragFrom != null) { dragFrom = null; return; }
+            if (e.Button == MouseButtons.Left && ArrowAt(e.Location) is var dir and not 0)
+            {
+                GoTo(page + dir);
+                return;
+            }
             var row = RowAt(e.Location);
             if (row < 0) return;
             if (e.Button == MouseButtons.Left) RowClicked?.Invoke(row);
@@ -458,19 +455,20 @@ sealed class SettingsForm : DarkForm
         protected override void OnMouseWheel(MouseEventArgs e)
         {
             base.OnMouseWheel(e);
-            ScrollTo(scroll - e.Delta / 120 * Row);
-            OnMouseMove(new MouseEventArgs(MouseButtons.None, 0, PointToClient(MousePosition).X, PointToClient(MousePosition).Y, 0));
+            GoTo(page - Math.Sign(e.Delta));
         }
 
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
-            (hover, overBar) = (-1, false);
+            (hover, overArrow) = (-1, 0);
             Invalidate();
         }
 
         /// <summary>Shows a row as hovered (test screenshots)</summary>
         public void Hover(int i) { hover = i; Invalidate(); }
+        /// <summary>Shows this page (test screenshots)</summary>
+        public void ShowPage(int p) => GoTo(p);
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -481,13 +479,11 @@ sealed class SettingsForm : DarkForm
             using (var fill = new SolidBrush(Theme.Bg3)) g.FillPath(fill, box);
 
             var pad = Px(Pad);
-            var right = Scrolls ? Track.X - Px(4) : Width - pad;
-            g.SetClip(new Rectangle(pad, pad, Width - 2 * pad, View));
-            var first = scroll / Row;
-            for (var i = first; i < Items.Count && i * Row - scroll < View; i++)
+            var right = Width - pad;
+            for (var i = page * PerPage; i < Math.Min(Items.Count, (page + 1) * PerPage); i++)
             {
                 var item = Items[i];
-                var r = new Rectangle(pad, pad + i * Row - scroll, right - pad, Row);
+                var r = new Rectangle(pad, pad + (i - page * PerPage) * Row, right - pad, Row);
                 if (i == hover)
                     using (var shape = Theme.Round(new RectangleF(r.X, r.Y + 1, r.Width - 1, r.Height - 2), Px(6)))
                     using (var fill = new SolidBrush(Theme.Bg)) g.FillPath(fill, shape);
@@ -497,15 +493,24 @@ sealed class SettingsForm : DarkForm
                 TextRenderer.DrawText(g, when, Font, new Rectangle(r.Right - text - whenW, r.Y, whenW, r.Height), item.Missing ? Theme.Danger : Theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPrefix);
                 TextRenderer.DrawText(g, System.IO.Path.GetFileName(item.Project.File), Font, new Rectangle(r.X + text, r.Y, r.Width - 3 * text - whenW, r.Height), item.Missing ? Theme.Muted : Theme.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             }
-            g.ResetClip();
 
-            // Thin rounded scrollbar, as on the timeline's tracks
-            if (Scrolls)
+            // Which ones these are, and the arrows to the others
+            if (!Paged) return;
+            var f = Foot;
+            var inset = Px(10);
+            var shown = $"{page * PerPage + 1}–{Math.Min(Items.Count, (page + 1) * PerPage)} of {Items.Count}";
+            TextRenderer.DrawText(g, shown, Font, new Rectangle(f.X + inset, f.Y, f.Width / 2, f.Height), Theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix);
+            foreach (var dir in new[] { -1, 1 })
             {
-                var thumb = Thumb;
-                using var shape = Theme.Round(new RectangleF(thumb.X, thumb.Y, thumb.Width, thumb.Height), thumb.Width / 2f);
-                using var fill = new SolidBrush(overBar || dragFrom != null ? Theme.SecondaryHover : Theme.Secondary);
-                g.FillPath(fill, shape);
+                var a = Arrow(dir);
+                var can = dir < 0 ? page > 0 : page < Pages - 1;
+                if (overArrow == dir)
+                    using (var shape = Theme.Round(new RectangleF(a.X + 1, a.Y + 2, a.Width - 2, a.Height - 4), Px(6)))
+                    using (var fill = new SolidBrush(Theme.Bg)) g.FillPath(fill, shape);
+                // A chevron, drawn so it's the same at any font
+                float cx = a.X + a.Width / 2f, cy = a.Y + a.Height / 2f, s = Px(4);
+                using var pen = new Pen(can ? Theme.Text : Color.FromArgb(70, Theme.Muted), Math.Max(1.5f, Px(2))) { StartCap = System.Drawing.Drawing2D.LineCap.Round, EndCap = System.Drawing.Drawing2D.LineCap.Round, LineJoin = System.Drawing.Drawing2D.LineJoin.Round };
+                g.DrawLines(pen, [new PointF(cx + dir * -s / 2, cy - s), new PointF(cx + dir * s / 2, cy), new PointF(cx + dir * -s / 2, cy + s)]);
             }
         }
     }
