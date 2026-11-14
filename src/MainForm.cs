@@ -679,6 +679,8 @@ sealed class MainForm : DarkForm
                     UpdateSummary();
                     break;
                 // Not SetTarget: a test mustn't change the size remembered in the real settings
+                // Opens the summary's hover details shortly after, for screenshots
+                case "tip": { var t = new System.Windows.Forms.Timer { Interval = 800 }; t.Tick += (_, _) => { t.Dispose(); AppLog.Info("Summary tip: " + tips.GetToolTip(summary).Replace("\n", " | ")); tips.Show(tips.GetToolTip(summary), summary, 0, -D(110), 8000); }; t.Start(); break; }
                 case "size": targetMb = double.Parse(value); SelectChip(sizeChips, targetMb); UpdateSummary(); break;
                 case "trim": timeline.SetEnd(double.Parse(value)); break;
                 case "keys":
@@ -1638,17 +1640,36 @@ sealed class MainForm : DarkForm
         {
             var fps = plan.Fps ?? (int)Math.Round(probe.Fps);
             var (color, hint) = Quality(plan, fps);
-            // The video's own rate, so turning the audio off shows the space it hands to the picture
-            var audio = plan.AudioKbps > 0 ? $" + {plan.AudioKbps}k audio" : " · no audio";
-            summary.Text = $"~{Planner.FormatBytes(plan.EstimateBytes)} · {plan.OutputShortSide}p{fps} · {Planner.FormatRate(plan.VideoKbps)} video{audio}{hint}";
+            // Just the basics on the line; hovering it shows the whole breakdown
+            summary.Text = $"~{Planner.FormatBytes(plan.EstimateBytes)} · {plan.OutputShortSide}p{fps}{hint}";
             summary.ForeColor = color;
+            var quality = plan.CappedBySource ? "Same as the source"
+                : color == Theme.Green ? "Good"
+                : color == Theme.Warn ? "OK, a little soft"
+                : "Low, will look blocky";
+            var encoder = EffectiveEncoder switch { "nvenc" => "GPU (NVIDIA)", "amf" => "GPU (AMD)", _ => "CPU (2 passes)" };
+            SummaryTip(string.Join("\n",
+                $"Size:  ~{Planner.FormatBytes(plan.EstimateBytes)} of {limit}",
+                $"Picture:  {plan.OutputShortSide}p at {fps} fps",
+                // The video's own rate, so turning the audio off shows the room it hands to the picture
+                $"Video:  {Planner.FormatRate(plan.VideoKbps)}",
+                $"Audio:  {(plan.AudioKbps > 0 ? Planner.FormatRate(plan.AudioKbps) : "off")}",
+                $"Quality:  {quality}{(hint != "" ? $" ({hint.TrimStart(' ', '·').Trim()})" : "")}",
+                $"Encoder:  {encoder}"));
         }
         else
         {
             summary.Text = $"Too long for {limit}. Trim to under {Planner.FormatTime(plan.MaxDuration)}.";
             summary.ForeColor = Theme.Danger;
+            SummaryTip(null);
         }
         CanGo(plan.Feasible);
+    }
+
+    /// <summary>Only when it changes: setting it again closes a tip that's open (it updates while trimming)</summary>
+    void SummaryTip(string? text)
+    {
+        if (tips.GetToolTip(summary) != (text ?? "")) tips.SetToolTip(summary, text);
     }
 
     // While compressing, the main button stays live: it's the cancel button
