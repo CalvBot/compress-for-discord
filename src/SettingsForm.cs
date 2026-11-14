@@ -63,6 +63,34 @@ sealed class SettingsForm : DarkForm
         bar = new Bar { Size = new Size(W, 8), Visible = false, Margin = new Padding(0, 8, 0, 0) };
         root.Controls.Add(bar);
 
+        // Encoder
+        root.Controls.Add(Section("Encoder"));
+        var gpu = new Pill("GPU") { Margin = new Padding(0, 0, 6, 0) };
+        var cpu = new Pill("CPU") { Margin = new Padding(0, 0, 12, 0) };
+        var encoderNote = Muted("GPU is much faster. CPU looks slightly better at the same size.");
+        encoderNote.Margin = new Padding(0, 5, 0, 0);
+        void PickEncoder(string value)
+        {
+            cfg.Encoder = value;
+            cfg.Save();
+            (gpu.On, cpu.On) = (value != "x264", value == "x264");
+        }
+        gpu.Click += (_, _) => PickEncoder("auto");
+        cpu.Click += (_, _) => PickEncoder("x264");
+        (gpu.On, cpu.On) = (cfg.Encoder != "x264", cfg.Encoder == "x264");
+        root.Controls.Add(Row(gpu, cpu, encoderNote));
+        // "GPU" means NVIDIA or AMD hardware encoding; say so when this PC has neither
+        Shown += async (_, _) =>
+        {
+            if (Ff.Ffmpeg == "") return;
+            string found;
+            try { found = await Ff.PickEncoder("auto"); } catch { return; }
+            if (IsDisposed || found != "x264") return;
+            gpu.Enabled = false;
+            (gpu.On, cpu.On) = (false, true);
+            encoderNote.Text = "No supported graphics card found, so the CPU is used.";
+        };
+
         // General
         root.Controls.Add(Section("General"));
         var desktop = Check("Desktop shortcut", Shortcut.OnDesktop);

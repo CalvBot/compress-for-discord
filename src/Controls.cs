@@ -41,7 +41,7 @@ static class Theme
 enum PillKind { Chip, Primary, Secondary }
 
 /// <summary>Symbols a chip can show instead of text</summary>
-enum PillIcon { None, Play, Pause, Eye, Sliders }
+enum PillIcon { None, Play, Pause, Eye, Sliders, Gear, Help }
 
 /// <summary>Rounded chip or button, painted like Discord's</summary>
 sealed class Pill : Control
@@ -153,6 +153,21 @@ sealed class Pill : Control
                     g.DrawPath(pen, lids);
                 }
                 g.FillEllipse(fill, cx - 3 * u, cy - 3 * u, 6 * u, 6 * u);
+                break;
+            case PillIcon.Gear:
+                // A ring with eight teeth
+                using (var teeth = new Pen(ink, 2.6f * u))
+                    for (var i = 0; i < 8; i++)
+                    {
+                        var a = i * Math.PI / 4;
+                        float c = (float)Math.Cos(a), sn = (float)Math.Sin(a);
+                        g.DrawLine(teeth, cx + c * 5.5f * u, cy + sn * 5.5f * u, cx + c * 8.2f * u, cy + sn * 8.2f * u);
+                    }
+                using (var ring = new Pen(ink, 2.4f * u)) g.DrawEllipse(ring, cx - 4.6f * u, cy - 4.6f * u, 9.2f * u, 9.2f * u);
+                break;
+            case PillIcon.Help:
+                using (var bold = new Font(Font.FontFamily, Font.Size + 1, FontStyle.Bold))
+                    TextRenderer.DrawText(g, "?", bold, ClientRectangle, ink, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
                 break;
             case PillIcon.Sliders:
                 // Three sliders with their knobs in different places
@@ -331,9 +346,9 @@ sealed class Timeline : Control
     double Span => ViewEnd > ViewStart ? ViewEnd - ViewStart : Duration;
     /// <summary>The stretch of video the thumbnails were made for (they're remade after zooming)</summary>
     public double ThumbStart, ThumbSpan = 1;
-    /// <summary>Mouse wheel: zoom by this factor around this time</summary>
+    /// <summary>Alt + mouse wheel: zoom by this factor around this time</summary>
     public event Action<double, double>? ZoomRequested;
-    /// <summary>Shift + mouse wheel: scroll by this fraction of what's on screen</summary>
+    /// <summary>Mouse wheel: scroll by this fraction of what's on screen</summary>
     public event Action<double>? PanRequested;
 
     /// <summary>Empty strip at the left, so the timeline lines up with the tracks below and their buttons</summary>
@@ -345,8 +360,8 @@ sealed class Timeline : Control
     {
         base.OnMouseWheel(e);
         if (!Enabled) return;
-        if (ModifierKeys.HasFlag(Keys.Shift)) PanRequested?.Invoke(e.Delta > 0 ? -0.15 : 0.15);
-        else ZoomRequested?.Invoke(e.Delta > 0 ? 0.75 : 1 / 0.75, T(e.X));
+        if (ModifierKeys.HasFlag(Keys.Alt)) ZoomRequested?.Invoke(e.Delta > 0 ? 0.75 : 1 / 0.75, T(e.X));
+        else PanRequested?.Invoke(e.Delta > 0 ? -0.15 : 0.15);
     }
 
     public void Reset(double duration)
@@ -580,7 +595,8 @@ sealed class RoundBox : Panel
 /// <summary>
 /// One audio track drawn as a waveform with its volume line on top. Dragging up or down changes the volume.
 /// To its left are two buttons: mute, and add a point at the playhead so the volume can change over time
-/// (Alt+click adds one under the mouse). Right-clicking a point removes it.
+/// (Ctrl+click adds one under the mouse). Right-clicking a point removes it. Holding Shift while dragging a
+/// point keeps its value, and a level stretch between two points at the same value drags as one.
 /// </summary>
 sealed class VolumeLane : Control
 {
@@ -605,6 +621,19 @@ sealed class VolumeLane : Control
     public readonly List<(double T, double V)> Keys = [];
     /// <summary>The volume changed and the mouse was let go</summary>
     public event Action? Committed;
+    /// <summary>Right-clicked somewhere that isn't a point</summary>
+    public event Action<Point>? MenuRequested;
+    /// <summary>Shift + wheel: make the tracks taller (+1) or shorter (-1)</summary>
+    public event Action<int>? HeightRequested;
+    /// <summary>Alt + wheel: zoom the timeline by this factor around this time</summary>
+    public event Action<double, double>? ZoomRequested;
+    public IEnumerable<double> KeyTimes => Keys.Select(k => k.T);
+
+    int rowHeight = 56;
+    /// <summary>Height in 96-dpi pixels; every keyframable track shares it</summary>
+    public int RowHeight { get => rowHeight; set { rowHeight = value; Fit(); } }
+    /// <summary>First of two neighbouring points being dragged together (a level stretch); -1 = none</summary>
+    int dragStretch = -1;
 
     int dragKey = -1;
     bool dragFlat;
@@ -623,7 +652,7 @@ sealed class VolumeLane : Control
     public int PixelWidth { get => pixelWidth; set { pixelWidth = value; Fit(); } }
 
     int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
-    void Fit() => Size = new Size(pixelWidth, Px(56));
+    void Fit() => Size = new Size(pixelWidth, Px(rowHeight));
     protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
     protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
     protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
@@ -667,6 +696,29 @@ sealed class VolumeLane : Control
     Rectangle AddButton => Tracks.Button(this, 1, 2);
     Rectangle Badge => new(G + Px(5), Px(4), Px(10) + TextRenderer.MeasureText(BadgeText, Small, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
 
+    /// <summary>The level stretch under the mouse: two neighbouring points at the same value, with the line between them</summary>
+    int HitStretch(Point p)
+    {
+        for (var i = 0; i + 1 < Keys.Count; i++)
+            if (Math.Abs(Keys[i].V - Keys[i + 1].V) < 0.005 && p.X > X(Keys[i].T) + Px(7) && p.X < X(Keys[i + 1].T) - Px(7) && Math.Abs(p.Y - Y(Keys[i].V)) <= Px(6)) return i;
+        return -1;
+    }
+
+    public void ClearKeys()
+    {
+        Keys.Clear();
+        Invalidate();
+        Committed?.Invoke();
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift)) HeightRequested?.Invoke(Math.Sign(e.Delta));
+        else if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) ZoomRequested?.Invoke(e.Delta > 0 ? 0.75 : 1 / 0.75, T(e.X));
+        else { base.OnMouseWheel(e); return; } // on to the box, which scrolls
+        if (e is HandledMouseEventArgs h) h.Handled = true;
+    }
+
     /// <summary>Adds a point on the line at a time (or finds the one already there); returns its index</summary>
     int AddKey(double t)
     {
@@ -704,14 +756,16 @@ sealed class VolumeLane : Control
             Invalidate();
             Committed?.Invoke();
         }
+        else if (e.Button == MouseButtons.Right) MenuRequested?.Invoke(e.Location);
         else if (e.Button == MouseButtons.Left)
         {
-            // Alt+click puts a new point under the mouse, already held so it can be dragged into place
-            if (k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) k = AddKey(T(e.X));
+            // Ctrl+click puts a new point under the mouse, already held so it can be dragged into place
+            if (k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) k = AddKey(T(e.X));
             dragKey = k;
+            dragStretch = k < 0 ? HitStretch(e.Location) : -1;
             dragFlat = k < 0 && Keys.Count == 0;
             grabY = e.Y;
-            grabVolume = Volume;
+            grabVolume = dragStretch >= 0 ? Keys[dragStretch].V : Volume;
         }
     }
 
@@ -723,7 +777,15 @@ sealed class VolumeLane : Control
             // A point can't pass its neighbours
             var lo = dragKey > 0 ? Keys[dragKey - 1].T + 0.05 : 0;
             var hi = dragKey < Keys.Count - 1 ? Keys[dragKey + 1].T - 0.05 : Duration;
-            Keys[dragKey] = (Math.Clamp(T(e.X), lo, Math.Max(lo, hi)), V(e.Y));
+            // Shift: slide it in time only
+            Keys[dragKey] = (Math.Clamp(T(e.X), lo, Math.Max(lo, hi)), ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift) ? Keys[dragKey].V : V(e.Y));
+            Invalidate();
+        }
+        else if (dragStretch >= 0)
+        {
+            var v = Snap(grabVolume + (grabY - e.Y) / (double)Math.Max(1, Height - 2 * Pad) * 2);
+            Keys[dragStretch] = (Keys[dragStretch].T, v);
+            Keys[dragStretch + 1] = (Keys[dragStretch + 1].T, v);
             Invalidate();
         }
         else if (dragFlat)
@@ -732,14 +794,14 @@ sealed class VolumeLane : Control
             Volume = Snap(grabVolume + (grabY - e.Y) / (double)Math.Max(1, Height - 2 * Pad) * 2);
             Invalidate();
         }
-        else Cursor = e.X < G ? MuteButton.Contains(e.Location) || AddButton.Contains(e.Location) ? Cursors.Hand : Cursors.Default : HitKey(e.Location) >= 0 ? Cursors.SizeAll : Keys.Count == 0 ? Cursors.SizeNS : Cursors.Default;
+        else Cursor = e.X < G ? MuteButton.Contains(e.Location) || AddButton.Contains(e.Location) ? Cursors.Hand : Cursors.Default : HitKey(e.Location) >= 0 ? Cursors.SizeAll : Keys.Count == 0 || HitStretch(e.Location) >= 0 ? Cursors.SizeNS : Cursors.Default;
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        var changed = dragKey >= 0 || (dragFlat && Volume != grabVolume);
-        dragKey = -1;
+        var changed = dragKey >= 0 || dragStretch >= 0 || (dragFlat && Volume != grabVolume);
+        dragKey = dragStretch = -1;
         dragFlat = false;
         if (changed) Committed?.Invoke();
     }
@@ -803,8 +865,8 @@ sealed class VolumeLane : Control
 }
 
 /// <summary>
-/// The video preview. With a crop box set, it's drawn over the frame (everything outside dimmed) and can be
-/// moved by dragging inside it and resized by its corners.
+/// The video preview. With a box set, it's drawn over the frame (everything outside dimmed) and can be moved by
+/// dragging inside it and resized by its corners. The box may hang off the picture: that part comes out black.
 /// </summary>
 sealed class CropView : Control
 {
@@ -812,20 +874,25 @@ sealed class CropView : Control
 
     Image? image;
     RectangleF? box;
+    bool showResult;
     public Image? Image { get => image; set { image = value; Invalidate(); } }
     /// <summary>Width / height of the video, so the box maps to the picture and not the black bars</summary>
     public double FrameAspect = 16 / 9.0;
-    /// <summary>Crop box as fractions of the frame (0..1 each way); null = no crop</summary>
+    /// <summary>The box as fractions of the frame (0..1 is on the picture); null = none</summary>
     public RectangleF? Box { get => box; set { box = value; Invalidate(); } }
     /// <summary>Width / height the box must keep, in those same fractions; 0 = any shape</summary>
     public double BoxAspect;
-    bool showResult;
+    /// <summary>Widest the box may be, as a fraction of the frame</summary>
+    public float MaxBoxWidth = 1;
     /// <summary>Show what the video will look like (just the inside of the box, filling the view) instead of the box over the whole frame</summary>
     public bool ShowResult { get => showResult; set { showResult = value; Invalidate(); } }
     /// <summary>The box is being dragged to this</summary>
     public event Action<RectangleF>? BoxChanged;
     /// <summary>The drag ended</summary>
     public event Action? BoxCommitted;
+    /// <summary>Mouse wheel: one frame forward (+1) or back (-1)</summary>
+    public event Action<int>? Stepped;
+    public event Action<Point>? MenuRequested;
 
     Grab grab;
     PointF grabAt;
@@ -852,7 +919,7 @@ sealed class CropView : Control
     }
 
     RectangleF ToScreen(RectangleF b) { var p = Picture; return new RectangleF(p.X + b.X * p.Width, p.Y + b.Y * p.Height, b.Width * p.Width, b.Height * p.Height); }
-    PointF ToFrame(Point at) { var p = Picture; return new PointF(Math.Clamp((at.X - p.X) / p.Width, 0, 1), Math.Clamp((at.Y - p.Y) / p.Height, 0, 1)); }
+    PointF ToFrame(Point at) { var p = Picture; return new PointF((at.X - p.X) / p.Width, (at.Y - p.Y) / p.Height); }
 
     Grab HitTest(Point at)
     {
@@ -870,6 +937,7 @@ sealed class CropView : Control
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
+        if (e.Button == MouseButtons.Right) { MenuRequested?.Invoke(e.Location); return; }
         if (e.Button != MouseButtons.Left || box is not { } b) return;
         grab = HitTest(e.Location);
         grabAt = ToFrame(e.Location);
@@ -887,23 +955,22 @@ sealed class CropView : Control
         var at = ToFrame(e.Location);
         if (grab == Grab.Move)
         {
-            var x = Math.Clamp(grabBox.X + at.X - grabAt.X, 0, 1 - grabBox.Width);
-            var y = Math.Clamp(grabBox.Y + at.Y - grabAt.Y, 0, 1 - grabBox.Height);
+            // It can leave the picture, as far as its centre reaching the edge
+            var x = Math.Clamp(grabBox.X + at.X - grabAt.X, -grabBox.Width / 2, 1 - grabBox.Width / 2);
+            var y = Math.Clamp(grabBox.Y + at.Y - grabAt.Y, -grabBox.Height / 2, 1 - grabBox.Height / 2);
             BoxChanged?.Invoke(new RectangleF(x, y, grabBox.Width, grabBox.Height));
             return;
         }
         // Resizing: the opposite corner stays put
         bool fromLeft = grab is Grab.TopLeft or Grab.BottomLeft, fromTop = grab is Grab.TopLeft or Grab.TopRight;
         float ax = fromLeft ? grabBox.Right : grabBox.Left, ay = fromTop ? grabBox.Bottom : grabBox.Top;
-        float roomW = fromLeft ? ax : 1 - ax, roomH = fromTop ? ay : 1 - ay;
-        float w = Math.Clamp(fromLeft ? ax - at.X : at.X - ax, 0.05f, roomW), h = Math.Clamp(fromTop ? ay - at.Y : at.Y - ay, 0.05f, roomH);
+        float maxH = BoxAspect > 0 ? (float)(MaxBoxWidth / BoxAspect) : 1;
+        float w = Math.Clamp(fromLeft ? ax - at.X : at.X - ax, 0.05f, MaxBoxWidth), h = Math.Clamp(fromTop ? ay - at.Y : at.Y - ay, 0.05f, maxH);
         if (BoxAspect > 0)
         {
-            // Keep the shape: follow whichever direction was dragged further, then fit inside the frame
-            w = (float)Math.Max(w, h * BoxAspect);
-            if (w > roomW) w = roomW;
+            // Keep the shape: follow whichever direction was dragged further
+            w = (float)Math.Min(Math.Max(w, h * BoxAspect), MaxBoxWidth);
             h = (float)(w / BoxAspect);
-            if (h > roomH) { h = roomH; w = (float)(h * BoxAspect); }
         }
         BoxChanged?.Invoke(new RectangleF(fromLeft ? ax - w : ax, fromTop ? ay - h : ay, w, h));
     }
@@ -916,37 +983,38 @@ sealed class CropView : Control
         BoxCommitted?.Invoke();
     }
 
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        Stepped?.Invoke(e.Delta > 0 ? -1 : 1);
+        if (e is HandledMouseEventArgs h) h.Handled = true;
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.Clear(Color.Black);
+        g.InterpolationMode = InterpolationMode.Bilinear;
         if (showResult && image != null && box is { } shown)
         {
-            // The inside of the box, as large as fits
+            // The inside of the box, as large as fits. Whatever part of it is off the picture stays black.
             var shape = shown.Width / shown.Height * FrameAspect;
             var fit = Math.Min(Width / shape, Height);
-            float w = (float)(fit * shape), h = (float)fit;
-            g.InterpolationMode = InterpolationMode.Bilinear;
-            g.DrawImage(image, new RectangleF((Width - w) / 2, (Height - h) / 2, w, h),
-                new RectangleF(shown.X * image.Width, shown.Y * image.Height, shown.Width * image.Width, shown.Height * image.Height), GraphicsUnit.Pixel);
+            float w = (float)(fit * shape), h = (float)fit, left = (Width - w) / 2, top = (Height - h) / 2;
+            var on = RectangleF.Intersect(shown, new RectangleF(0, 0, 1, 1));
+            if (on.Width > 0 && on.Height > 0)
+                g.DrawImage(image,
+                    new RectangleF(left + (on.X - shown.X) / shown.Width * w, top + (on.Y - shown.Y) / shown.Height * h, on.Width / shown.Width * w, on.Height / shown.Height * h),
+                    new RectangleF(on.X * image.Width, on.Y * image.Height, on.Width * image.Width, on.Height * image.Height), GraphicsUnit.Pixel);
             return;
         }
         var pic = Picture;
-        if (image != null)
-        {
-            g.InterpolationMode = InterpolationMode.Bilinear;
-            g.DrawImage(image, pic);
-        }
+        if (image != null) g.DrawImage(image, pic);
         if (box is not { } b) return;
         var r = Rectangle.Round(ToScreen(b));
-        var all = Rectangle.Round(pic);
-        using (var dim = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
-        {
-            g.FillRectangle(dim, all.Left, all.Top, all.Width, r.Top - all.Top);
-            g.FillRectangle(dim, all.Left, r.Bottom, all.Width, all.Bottom - r.Bottom);
-            g.FillRectangle(dim, all.Left, r.Top, r.Left - all.Left, r.Height);
-            g.FillRectangle(dim, r.Right, r.Top, all.Right - r.Right, r.Height);
-        }
+        // Dim everything outside the box
+        g.ExcludeClip(r);
+        using (var dim = new SolidBrush(Color.FromArgb(150, 0, 0, 0))) g.FillRectangle(dim, ClientRectangle);
+        g.ResetClip();
         using (var frame = new Pen(Color.White, Math.Max(1, Px(2)))) g.DrawRectangle(frame, r);
         var hs = Px(9);
         foreach (var c in new[] { new Point(r.Left, r.Top), new Point(r.Right, r.Top), new Point(r.Left, r.Bottom), new Point(r.Right, r.Bottom) })
@@ -990,7 +1058,7 @@ static class KeyButton
 
 /// <summary>
 /// Track for the picture's position and scale. Each key point is a diamond, and the line through them shows the
-/// zoom (higher = closer in). Alt+click, or the button at the start, adds a point; dragging moves it in time,
+/// value (for scale, higher = closer in). Ctrl+click, or the button at the start, adds a point; dragging moves it in time,
 /// right-click removes it, clicking jumps to it. What a point holds is set by the box on the preview.
 /// </summary>
 sealed class KeyLane : Control
@@ -1008,6 +1076,23 @@ sealed class KeyLane : Control
     public Color Back = Theme.Bg3;
     /// <summary>Right-clicked somewhere that isn't a key point</summary>
     public event Action<Point>? MenuRequested;
+    /// <summary>Shift + wheel: make the tracks taller (+1) or shorter (-1)</summary>
+    public event Action<int>? HeightRequested;
+    /// <summary>Alt + wheel: zoom the timeline by this factor around this time</summary>
+    public event Action<double, double>? ZoomRequested;
+    public IEnumerable<double> KeyTimes => Keys;
+
+    int rowHeight = 56;
+    /// <summary>Height in 96-dpi pixels; every keyframable track shares it</summary>
+    public int RowHeight { get => rowHeight; set { rowHeight = value; Fit(); } }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift)) HeightRequested?.Invoke(Math.Sign(e.Delta));
+        else if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) ZoomRequested?.Invoke(e.Delta > 0 ? 0.75 : 1 / 0.75, T(e.X));
+        else { base.OnMouseWheel(e); return; } // on to the box, which scrolls
+        if (e is HandledMouseEventArgs h) h.Handled = true;
+    }
     /// <summary>A point wanted at this time</summary>
     public event Action<double>? AddRequested;
     public event Action<int>? RemoveRequested, Picked;
@@ -1023,7 +1108,7 @@ sealed class KeyLane : Control
     }
 
     int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
-    void Fit() => Height = Px(44);
+    void Fit() => Height = Px(rowHeight);
     protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
     protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
     protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
@@ -1055,7 +1140,7 @@ sealed class KeyLane : Control
         var k = HitKey(e.X);
         if (e.Button == MouseButtons.Right && k >= 0) RemoveRequested?.Invoke(k);
         else if (e.Button == MouseButtons.Right) MenuRequested?.Invoke(e.Location);
-        else if (e.Button == MouseButtons.Left && k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) AddRequested?.Invoke(T(e.X));
+        else if (e.Button == MouseButtons.Left && k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) AddRequested?.Invoke(T(e.X));
         else if (e.Button == MouseButtons.Left) { dragKey = k; moved = false; }
     }
 
@@ -1256,8 +1341,10 @@ sealed class TrackScroller : Panel
     }
 
     int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
-    // A pixel or two over is rounding, not something to scroll to
-    int Hidden => Content.Height - Height > 2 ? Content.Height - Height : 0;
+    bool scrolls = true;
+    /// <summary>Off when the box is sized to hold everything in it, so a pixel of rounding never brings up the bar</summary>
+    public bool Scrolls { get => scrolls; set { scrolls = value; ScrollTo(offset); } }
+    int Hidden => scrolls && Content.Height - Height > 2 ? Content.Height - Height : 0;
 
     public void ScrollTo(int to)
     {

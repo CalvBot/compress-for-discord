@@ -36,6 +36,8 @@ sealed class EncodeRequest
     public List<(double T, double X, double Y, double W)>? Crop;
     /// <summary>Size of the smallest crop box. The output is this (times the scale), so nothing is ever enlarged.</summary>
     public int CropW, CropH;
+    /// <summary>Size of the source frame, to tell when the box hangs off it</summary>
+    public int SrcW, SrcH;
 }
 
 static class Ff
@@ -297,6 +299,19 @@ static class Ff
     static IEnumerable<string> CropFilters(EncodeRequest o)
     {
         var c = o.Crop!;
+        // The box may hang off the frame. Pad the frame with black by as far as it ever does, and shift the box to match.
+        if (o.SrcW > 0 && o.SrcH > 0)
+        {
+            static int Even(double v) => (int)Math.Ceiling(Math.Max(0, v) / 2) * 2;
+            double Height(double w) => w * o.CropH / o.CropW;
+            int left = Even(-c.Min(k => k.X)), top = Even(-c.Min(k => k.Y));
+            int right = Even(c.Max(k => k.X + k.W) - o.SrcW), bottom = Even(c.Max(k => k.Y + Height(k.W)) - o.SrcH);
+            if (left + top + right + bottom > 0)
+            {
+                yield return $"pad={o.SrcW + left + right}:{o.SrcH + top + bottom}:{left}:{top}:black";
+                c = c.Select(k => (k.T, k.X + left, k.Y + top, k.W)).ToList();
+            }
+        }
         // Output size: the smallest box, times the chosen scale, kept even for H.264
         var f = o.ScaleShortSide is { } s ? s / (double)Math.Min(o.CropW, o.CropH) : 1;
         int outW = Math.Max(2, (int)Math.Round(o.CropW * f) & ~1), outH = Math.Max(2, (int)Math.Round(o.CropH * f) & ~1);

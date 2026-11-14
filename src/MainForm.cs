@@ -40,7 +40,8 @@ sealed class MainForm : DarkForm
 
     CancellationTokenSource? encodeCts, frameCts, playCts;
     readonly CancellationTokenSource lifetime = new();
-    readonly System.Windows.Forms.Timer frameTimer = new() { Interval = 50 };
+    /// <summary>A preview frame is being fetched; the next one wanted goes straight after it</summary>
+    bool frameBusy;
     double pendingFrame;
     /// <summary>Where the current playback stops when it isn't the end of the trim (double-click play)</summary>
     double? playTo;
@@ -51,7 +52,11 @@ sealed class MainForm : DarkForm
     readonly KeyLane keyLane, posLane, scaleLane;
     readonly TrackScroller scroller;
     readonly SizeGrip grip;
-    readonly DarkMenu splitMenu = new();
+    readonly DarkMenu trackMenu = new(), cropMenu = new();
+    /// <summary>Height of every keyframable track, in 96-dpi pixels (Shift + wheel over a track changes it)</summary>
+    int trackH = 56;
+    /// <summary>The track the mouse is over: the arrow keys then jump between its key points</summary>
+    Control? hoverTrack;
     /// <summary>Height of the track box while Advanced is open; the grip under it changes it</summary>
     int tracksHeight, grabHeight;
     readonly ZoomBar zoomBar;
@@ -61,7 +66,7 @@ sealed class MainForm : DarkForm
     /// <summary>Waits for zooming to settle before remaking the thumbnails</summary>
     readonly System.Windows.Forms.Timer thumbTimer = new() { Interval = 350 };
     readonly Timeline timeline;
-    readonly FlowLayoutPanel sizeChips, resChips, cropChips, fpsChips, encChips, buttons;
+    readonly FlowLayoutPanel sizeChips, resChips, cropChips, fpsChips, buttons;
     readonly VolumeLane masterLane;
     readonly TextBox customMb, fpsBox, timeBox;
     readonly RoundBox fpsField;
@@ -93,15 +98,19 @@ sealed class MainForm : DarkForm
         root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, Location = new Point(18, 14), Margin = Padding.Empty };
 
         // Top row: the file's details on the left; update link, Settings and Help on the right
-        titleRow = new Panel { Size = new Size(ContentWidth, 26), Margin = new Padding(0, 0, 0, 8) };
+        titleRow = new Panel { Size = new Size(ContentWidth, 30), Margin = new Padding(0, 0, 0, 8) };
         details = $" · {Planner.FormatBytes(fileSize)}";
         subtitle = new Label { Text = Path.GetFileName(file) + details, Dock = DockStyle.Fill, UseMnemonic = false, ForeColor = Theme.Header, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
-        var links = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Dock = DockStyle.Right, Padding = new Padding(8, 3, 0, 0) };
-        links.Controls.Add(UpdateLink(this));
-        links.Controls.Add(Link("Settings", ShowSettings));
-        var help = Link("Help", ShowHelp);
-        help.Margin = Padding.Empty;
-        links.Controls.Add(help);
+        var links = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Dock = DockStyle.Right, Padding = new Padding(8, 0, 0, 0) };
+        var update = UpdateLink(this);
+        update.Margin = new Padding(0, 5, 10, 0);
+        var settingsIcon = new Pill("Settings") { Icon = PillIcon.Gear, Margin = new Padding(0, 0, 6, 0) };
+        var helpIcon = new Pill("Help") { Icon = PillIcon.Help, Margin = Padding.Empty };
+        settingsIcon.Click += (_, _) => ShowSettings();
+        helpIcon.Click += (_, _) => ShowHelp();
+        tips.SetToolTip(settingsIcon, "Settings");
+        tips.SetToolTip(helpIcon, "Help and shortcuts (F1)");
+        links.Controls.AddRange([update, settingsIcon, helpIcon]);
         titleRow.Controls.Add(subtitle);
         titleRow.Controls.Add(links);
         // Deferred: changing the text in the middle of a layout pass leaves the label at its default width
@@ -110,18 +119,25 @@ sealed class MainForm : DarkForm
         preview = new CropView { Size = new Size(ContentWidth, 300), Margin = new Padding(0, 0, 0, 10) };
         preview.BoxChanged += EditCrop;
         preview.BoxCommitted += () => UpdateSummary();
+        preview.Stepped += by => { if (probe != null && encodeCts == null) timeline!.Seek(timeline.Current + by / (probe.Fps > 0 ? probe.Fps : 30)); };
+        // Right-click: reset the picture, or change its shape
+        cropMenu.Add("Reset crop", "", ResetCrop);
+        cropMenu.Items.Add(new ToolStripSeparator());
+        var shapes = new[] { ("Original", "src"), ("16:9", "16:9"), ("1:1", "1:1"), ("9:16", "9:16"), ("Free", "free") }
+            .Select(shape => (Item: cropMenu.Add(shape.Item1, "", () => SetCrop(shape.Item2)), Mode: shape.Item2)).ToList();
+        cropMenu.Opening += (_, _) => { foreach (var (item, mode) in shapes) item.ShortcutKeyDisplayString = mode == cropMode ? "✓" : null; };
+        preview.MenuRequested += at => { if (probe != null && encodeCts == null) cropMenu.Show(preview, at); };
 
-        timeline = new Timeline { Size = new Size(ContentWidth, 68), Enabled = false, Margin = Padding.Empty };
+        // Its strip is as tall as a track (the 14 is the row of tabs above it); unlike the tracks it never changes height
+        timeline = new Timeline { Size = new Size(ContentWidth, 14 + 56), Enabled = false, Margin = Padding.Empty };
         timeline.RangeChanged += () => { UpdateTimeLabel(); UpdateSummary(); };
         // Key points of the crop, shown only while cropping
         // Position and scale: one track for both, or (right-click) one each
         var warm = Theme.Blend(Theme.Bg3, Theme.Warn, 0.13);
-        KeyLane Lane(string label) => new() { Label = label, Back = warm, Size = new Size(ContentWidth, 44), Margin = new Padding(0, 4, 0, 0), Visible = false };
+        KeyLane Lane(string label) => new() { Label = label, Back = warm, Size = new Size(ContentWidth, 56), Margin = new Padding(0, 4, 0, 0), Visible = false };
         keyLane = Lane("Position & scale");
         posLane = Lane("Position");
         scaleLane = Lane("Scale");
-        var split = splitMenu.Add("", "", () => SetSeparate(!separate));
-        splitMenu.Opening += (_, _) => split.Text = separate ? "Combine position and scale" : "Separate position and scale";
         Wire(keyLane, () => [pos, scale]);
         Wire(posLane, () => [pos]);
         Wire(scaleLane, () => [scale]);
@@ -135,7 +151,7 @@ sealed class MainForm : DarkForm
         // The whole video with a window on it: drag the window's ends to zoom the timeline, the middle to scroll
         zoomBar = new ZoomBar { Size = new Size(ContentWidth, 16), Margin = new Padding(0, 0, 0, 4) };
         zoomBar.ViewChanged += (a, b) => SetView(a, b);
-        timeline.ZoomRequested += (factor, around) => { var span = (viewEnd - viewStart) * factor; SetView(around - (around - viewStart) * factor, around - (around - viewStart) * factor + span); };
+        timeline.ZoomRequested += ZoomBy;
         timeline.PanRequested += by => { var shift = (viewEnd - viewStart) * by; SetView(viewStart + shift, viewEnd + shift, keepSpan: true); };
         thumbTimer.Tick += (_, _) => { thumbTimer.Stop(); _ = LoadThumbnails(); };
         playBtn = new Pill("Play") { Icon = PillIcon.Play, Dock = DockStyle.Left, Enabled = false };
@@ -209,16 +225,10 @@ sealed class MainForm : DarkForm
 
         resChips = ChipRow();
         fpsChips = ChipRow();
-        encChips = ChipRow();
         cropChips = ChipRow();
         foreach (var (label, value) in new[] { ("Original", "src"), ("16:9", "16:9"), ("1:1", "1:1"), ("9:16", "9:16"), ("Free", "free") })
             cropChips.Controls.Add(Chip(label, value, cropChips, v => SetCrop((string)v!)));
         SelectChip(cropChips, "src");
-        // "GPU" means NVIDIA or AMD hardware encoding when this PC has it (the default); the chip hides itself if it doesn't
-        foreach (var (label, value) in new[] { ("GPU", "auto"), ("CPU", "x264") })
-            encChips.Controls.Add(Chip(label, value, encChips, v => { cfg.Encoder = (string)v!; cfg.Save(); UpdateSummary(); }));
-        SelectChip(encChips, cfg.Encoder == "x264" ? "x264" : "auto");
-
         // Under the timeline: position and scale, the result audio, then every audio track, all as wide as the
         // timeline so times line up. Closed, only the result audio shows. Open, it's a box that scrolls, with a
         // grip under it to make it taller.
@@ -233,6 +243,7 @@ sealed class MainForm : DarkForm
         masterLane = new VolumeLane { Label = "Audio", Back = Theme.Blend(Theme.Bg3, Theme.Brand, 0.2), Margin = new Padding(0, 4, 0, 0), PixelWidth = ContentWidth, Visible = false };
         // Top to bottom: position and scale (one track or two), then the result audio; the audio tracks follow
         foreach (var lane in new Control[] { keyLane, posLane, scaleLane, masterLane }) scroller.Content.Controls.Add(lane);
+        HookTrack(masterLane);
         masterLane.MuteToggled += () => { UpdateSummary(); RestartIfPlaying(); };
         masterLane.Committed += RestartIfPlaying;
 
@@ -240,7 +251,6 @@ sealed class MainForm : DarkForm
         options.Controls.Add(OptLabel("Scale"), 0, 1); options.Controls.Add(resChips, 1, 1);
         options.Controls.Add(OptLabel("Crop"), 0, 2); options.Controls.Add(cropChips, 1, 2);
         options.Controls.Add(OptLabel("Frame rate"), 0, 3); options.Controls.Add(fpsChips, 1, 3);
-        options.Controls.Add(OptLabel("Encoder"), 0, 4); options.Controls.Add(encChips, 1, 4);
 
         bar = new Bar { Size = new Size(ContentWidth, 8), Visible = false, Margin = new Padding(0, 0, 0, 8) };
 
@@ -284,7 +294,6 @@ sealed class MainForm : DarkForm
         }
         HookClicks(this);
 
-        frameTimer.Tick += (_, _) => LoadFrame();
         ResumeLayout(false);
         PerformLayout();
     }
@@ -345,7 +354,8 @@ sealed class MainForm : DarkForm
         // Only the first track plays to begin with (in an OBS recording that's the full mix).
         foreach (var t in probe.AudioTracks)
         {
-            var lane = new VolumeLane { Label = t.Label, Margin = new Padding(0, 4, 0, 0), Duration = probe.Duration, End = probe.Duration, Active = t.Index == 0 };
+            var lane = new VolumeLane { Label = t.Label, RowHeight = trackH, Margin = new Padding(0, 4, 0, 0), Duration = probe.Duration, End = probe.Duration, Active = t.Index == 0 };
+            HookTrack(lane);
             lane.MuteToggled += () => { UpdateMasterPeaks(); UpdateSummary(); RestartIfPlaying(); };
             lane.Committed += UpdateMasterPeaks;
             // Hear a volume change once the mouse is let go
@@ -398,6 +408,10 @@ sealed class MainForm : DarkForm
                 case "res": scalePct = int.Parse(value); SelectChip(resChips, scalePct); UpdateSummary(); break;
                 case "crop": SetCrop(value); break;
                 case "separate": SetSeparate(true); break;
+                case "combine": SetSeparate(false); break;
+                case "trackh": SetTrackHeight(int.Parse(value)); break;
+                case "pos": pos.Set(timeline.Current, (double.Parse(value.Split(',')[0]), double.Parse(value.Split(',')[1]))); ShowCrop(); UpdateSummary(); break;
+                case "resetcrop": ResetCrop(); break;
                 case "zoom": SetView(double.Parse(value.Split('-')[0]), double.Parse(value.Split('-')[1])); break;
                 case "preview": SetPreview(true); break;
                 case "goto": timeBox.Text = value; if (ParseTime(value) is { } go) timeline.Seek(go); break;
@@ -421,6 +435,7 @@ sealed class MainForm : DarkForm
                         lane.Invalidate();
                     }
                     break;
+                case "settings": BeginInvoke(ShowSettings); break;
                 case "menu": BeginInvoke(() => moreBtn.GetType().GetMethod("OnClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(moreBtn, [EventArgs.Empty])); break;
                 case "save": BeginInvoke(() => Go(save: true, value)); break;
             }
@@ -432,15 +447,7 @@ sealed class MainForm : DarkForm
     {
         try { autoEncoder = await Ff.PickEncoder("auto"); } catch { return; }
         if (IsDisposed) return;
-        BeginInvoke(() =>
-        {
-            if (autoEncoder == "x264")
-            {
-                encChips.Controls.OfType<Pill>().First(p => (string?)p.Tag == "auto").Visible = false;
-                SelectChip(encChips, "x264");
-            }
-            UpdateSummary();
-        });
+        BeginInvoke(() => UpdateSummary());
     }
 
     /// <summary>
@@ -506,21 +513,35 @@ sealed class MainForm : DarkForm
     {
         pendingFrame = t;
         UpdateTimeLabel();
-        frameTimer.Stop();
-        frameTimer.Start();
+        if (!frameBusy) LoadFrames();
     }
 
-    async void LoadFrame()
+    /// <summary>
+    /// Fetches the frame that's wanted, then (if the playhead has moved on meanwhile) the one wanted now, and so on.
+    /// So dragging along the timeline shows frames as fast as they can be decoded instead of only once you stop.
+    /// </summary>
+    async void LoadFrames()
     {
-        frameTimer.Stop();
-        frameCts?.Cancel();
-        var cts = frameCts = new CancellationTokenSource();
-        var img = await Ff.Frame(file, pendingFrame, DecodeSize().Height, cts.Token);
-        if (cts.IsCancellationRequested || IsDisposed) { img?.Dispose(); return; }
-        if (img == null) return;
-        var old = preview.Image;
-        preview.Image = img;
-        old?.Dispose();
+        frameBusy = true;
+        try
+        {
+            while (!IsDisposed)
+            {
+                var wanted = pendingFrame;
+                var cts = frameCts = new CancellationTokenSource();
+                var img = await Ff.Frame(file, wanted, DecodeSize().Height, cts.Token);
+                if (IsDisposed) { img?.Dispose(); return; }
+                if (cts.IsCancellationRequested || img == null) img?.Dispose();
+                else
+                {
+                    var old = preview.Image;
+                    preview.Image = img;
+                    old?.Dispose();
+                }
+                if (pendingFrame == wanted || playCts != null) break;
+            }
+        }
+        finally { frameBusy = false; }
     }
 
     // ---------- playback ----------
@@ -555,7 +576,6 @@ sealed class MainForm : DarkForm
     {
         playTo = to;
         var cts = playCts = new CancellationTokenSource();
-        frameTimer.Stop();
         frameCts?.Cancel();
         playBtn.Icon = PillIcon.Pause;
         try
@@ -665,14 +685,13 @@ sealed class MainForm : DarkForm
     /// </summary>
     void SizeTracks()
     {
-        // Lay the tracks out first, so this is their height now and not from before one was shown or hidden
-        scroller.Content.PerformLayout();
-        var all = scroller.Content.Height;
+        var all = scroller.Content.GetPreferredSize(Size.Empty).Height;
         var open = tracksOpen && probe != null;
         // Short to begin with: the first two tracks and a sliver of the next, so it's clear there's more
         if (tracksHeight == 0) tracksHeight = D(132);
         scroller.Visible = all > 0;
         scroller.Height = open ? Math.Clamp(tracksHeight, Math.Min(all, D(60)), all) : all;
+        scroller.Scrolls = open && scroller.Height < all;
         grip.Visible = open && all > D(60);
     }
 
@@ -702,7 +721,74 @@ sealed class MainForm : DarkForm
         lane.RemoveRequested += i => { foreach (var k in tracks()) if (i < k.Count) k.RemoveAt(i); ShowCrop(); UpdateSummary(); };
         lane.MoveRequested += (i, t) => { foreach (var k in tracks()) if (i < k.Count) k.Move(i, t, timeline.Duration); ShowCrop(); };
         lane.Picked += i => { if (i < tracks()[0].Count) timeline.Seek(tracks()[0].TimeAt(i)); };
-        lane.MenuRequested += at => splitMenu.Show(lane, at);
+        HookTrack(lane);
+    }
+
+    /// <summary>What every keyframable track shares: its right-click menu, the wheel shortcuts, and knowing the mouse is over it</summary>
+    void HookTrack(Control track)
+    {
+        track.MouseEnter += (_, _) => hoverTrack = track;
+        track.MouseLeave += (_, _) => { if (hoverTrack == track) hoverTrack = null; };
+        void Taller(int by) => SetTrackHeight(trackH + by * 14);
+        if (track is VolumeLane v)
+        {
+            v.HeightRequested += Taller;
+            v.ZoomRequested += ZoomBy;
+            v.MenuRequested += at => ShowTrackMenu(track, at);
+        }
+        else if (track is KeyLane k)
+        {
+            k.HeightRequested += Taller;
+            k.ZoomRequested += ZoomBy;
+            k.MenuRequested += at => ShowTrackMenu(track, at);
+        }
+    }
+
+    void ShowTrackMenu(Control track, Point at)
+    {
+        if (probe == null || encodeCts != null) return;
+        trackMenu.Items.Clear();
+        trackMenu.Add("Clear keyframes", "", () => ClearKeys(track));
+        if (track is KeyLane) trackMenu.Add(separate ? "Combine position and scale" : "Separate position and scale", "", () => SetSeparate(!separate));
+        trackMenu.Show(track, at);
+    }
+
+    /// <summary>Back to no key points. For audio that's a level volume line; for position and scale, the whole frame.</summary>
+    void ClearKeys(Control track)
+    {
+        if (track is VolumeLane v) { v.ClearKeys(); if (track != masterLane) UpdateMasterPeaks(); return; }
+        if (track != scaleLane) pos.Reset((0.5, 0.5));
+        if (track != posLane) scale.Reset(MaxCropW);
+        ShowCrop();
+        UpdateSummary();
+    }
+
+    IEnumerable<double> KeyTimesOf(Control track) => track is VolumeLane v ? v.KeyTimes : track is KeyLane k ? k.KeyTimes : [];
+
+    void SetTrackHeight(int height)
+    {
+        trackH = Math.Clamp(height, 42, 240);
+        foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane)) lane.RowHeight = trackH;
+        foreach (var lane in new[] { keyLane, posLane, scaleLane }) lane.RowHeight = trackH;
+        SizeTracks();
+    }
+
+    /// <summary>Zooms the timeline in or out, keeping the moment under the mouse where it is</summary>
+    void ZoomBy(double factor, double around)
+    {
+        var start = around - (around - viewStart) * factor;
+        SetView(start, start + (viewEnd - viewStart) * factor);
+    }
+
+    /// <summary>The whole frame again, in its own shape. While the picture is animated, that's a key point at the playhead.</summary>
+    void ResetCrop()
+    {
+        if (!Cropping) return;
+        SetCrop("src");
+        pos.Set(timeline.Current, (0.5, 0.5));
+        scale.Set(timeline.Current, MaxCropW);
+        ShowCrop();
+        UpdateSummary();
     }
 
     void SetPreview(bool on)
@@ -768,16 +854,20 @@ sealed class MainForm : DarkForm
     double MaxCropW => Math.Min(1, cropAspect / SrcAspect);
     bool Cropping => probe != null && pos.Count > 0 && scale.Count > 0;
     /// <summary>The picture is anything other than the whole frame: another shape, or zoomed in at some point</summary>
-    bool Reframed => Cropping && (Math.Abs(cropAspect - SrcAspect) > 1e-6 || scale.Keys.Any(k => k.Value < MaxCropW - 1e-6));
+    bool Reframed => Cropping && (Math.Abs(cropAspect - SrcAspect) > 1e-6 || scale.Keys.Any(k => k.Value < MaxCropW - 1e-6)
+        || pos.Keys.Any(k => Math.Abs(k.Value.X - 0.5) > 1e-6 || Math.Abs(k.Value.Y - 0.5) > 1e-6));
     /// <summary>Every time either track has a key point, in order</summary>
     IEnumerable<double> KeyTimes => pos.Keys.Select(k => k.T).Concat(scale.Keys.Select(k => k.T)).Distinct().Order();
 
-    /// <summary>The picture at a time, as a rectangle in fractions of the frame, kept inside it</summary>
+    /// <summary>
+    /// The picture at a time, as a rectangle in fractions of the frame. It may hang off the frame (that part is
+    /// black in the result), as far as its centre reaching the edge.
+    /// </summary>
     RectangleF CropRectAt(double t)
     {
         var (cx, cy) = pos.At(t);
         double w = Math.Min(scale.At(t), MaxCropW), h = w * SrcAspect / cropAspect;
-        return new RectangleF((float)Math.Clamp(cx - w / 2, 0, 1 - w), (float)Math.Clamp(cy - h / 2, 0, 1 - h), (float)w, (float)h);
+        return new RectangleF((float)(Math.Clamp(cx, 0, 1) - w / 2), (float)(Math.Clamp(cy, 0, 1) - h / 2), (float)w, (float)h);
     }
 
     void ClampCropWidths()
@@ -809,6 +899,7 @@ sealed class MainForm : DarkForm
     {
         if (!Cropping) return;
         preview.BoxAspect = cropMode == "free" ? 0 : cropAspect / SrcAspect;
+        preview.MaxBoxWidth = (float)(cropMode == "free" ? 1 : MaxCropW);
         // The box stays out of the way until it's wanted: Advanced is open, or the picture has been reframed
         preview.Box = tracksOpen || Reframed ? CropRectAt(timeline.Current) : null;
         // How far zoomed in: 0 at the widest the shape allows
@@ -906,14 +997,21 @@ sealed class MainForm : DarkForm
                 int dw = ClientSize.Width - (c.Right + c.Left), dh = ClientSize.Height - (c.Bottom + c.Top);
                 if (dw != 0 || dh != 0)
                 {
-                    (extraW, extraH) = (Math.Max(0, extraW + dw), Math.Max(0, extraH + dh));
+                    extraW = Math.Max(0, extraW + dw);
+                    // Height goes to the track box while it's open, so closing Advanced leaves the window as it was
+                    if (tracksOpen) tracksHeight = Math.Max(D(60), scroller.Height + dh);
+                    else extraH = Math.Max(0, extraH + dh);
                     ApplyStretch();
+                    if (tracksOpen) SizeTracks();
+                    root.Size = root.GetPreferredSize(Size.Empty);
                 }
             }
             // The minimum is the size with nothing stretched; lift it first so the window can also shrink to fit
             MinimumSize = Size.Empty;
             base.FitToContent();
-            if (baseW > 0) MinimumSize = new Size(Width - extraW, Height - extraH);
+            // With the track box open, it can also be dragged down to its smallest
+            var slack = tracksOpen ? Math.Max(0, scroller.Height - D(60)) : 0;
+            if (baseW > 0) MinimumSize = new Size(Width - extraW, Height - extraH - slack);
         }
         finally { fitting = false; }
     }
@@ -1062,6 +1160,8 @@ sealed class MainForm : DarkForm
                 ScaleShortSide = plan.ScaleShortSide,
                 Fps = plan.Fps,
                 Portrait = probe.Height > probe.Width,
+                SrcW = probe.Width,
+                SrcH = probe.Height,
                 Crop = CropForEncode(),
                 CropW = PlanSource.Width,
                 CropH = PlanSource.Height,
@@ -1115,7 +1215,7 @@ sealed class MainForm : DarkForm
         playBtn.Enabled = !busy;
         customMb.Enabled = fpsBox.Enabled = timeBox.Enabled = !busy;
         foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane)) lane.Enabled = !busy;
-        foreach (var p in new[] { sizeChips, resChips, cropChips, fpsChips, encChips }.SelectMany(g => g.Controls.OfType<Pill>())) p.Enabled = !busy;
+        foreach (var p in new[] { sizeChips, resChips, cropChips, fpsChips }.SelectMany(g => g.Controls.OfType<Pill>())) p.Enabled = !busy;
         preview.Enabled = keyLane.Enabled = posLane.Enabled = scaleLane.Enabled = !busy;
         // The button keeps its size and says what's happening; hovering turns it into Cancel
         goBtn.AltText = busy ? "Compressing…" : null;
@@ -1230,6 +1330,12 @@ sealed class MainForm : DarkForm
         switch (key)
         {
             case Keys.Space: TogglePlay(); break;
+            // Over a track with key points, the arrows go from one to the next
+            case Keys.Left or Keys.Right when mods == Keys.None && hoverTrack is { Visible: true } && KeyTimesOf(hoverTrack).ToList() is { Count: > 0 } times:
+                var back = key == Keys.Left;
+                var to = back ? times.Where(t => t < timeline.Current - 0.01).Select(t => (double?)t).LastOrDefault() : times.Where(t => t > timeline.Current + 0.01).Select(t => (double?)t).FirstOrDefault();
+                if (to is { } there) timeline.Seek(there);
+                break;
             case Keys.Left: timeline.Seek(timeline.Current - step); break;
             case Keys.Right: timeline.Seek(timeline.Current + step); break;
             case Keys.Q or Keys.I: timeline.SetStart(timeline.Current); break;
@@ -1247,7 +1353,6 @@ sealed class MainForm : DarkForm
         lifetime.Cancel();
         encodeCts?.Cancel();
         frameCts?.Cancel();
-        frameTimer.Stop();
         base.OnFormClosing(e);
     }
 }
