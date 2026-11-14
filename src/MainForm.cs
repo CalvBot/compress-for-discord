@@ -233,14 +233,21 @@ sealed class MainForm : DarkForm
         }
         Label OptLabel(string t) => new() { Text = t, AutoSize = true, ForeColor = Theme.Muted, Margin = new Padding(0, 5, 16, 0) };
 
+        // A "Custom" box at the end of a row of chips; anything it can't read is cleared when it loses focus
+        (TextBox Box, RoundBox Field) CustomField(Func<string, bool> valid)
+        {
+            var box = new TextBox { BackColor = Theme.Bg2, ForeColor = Theme.Text, BorderStyle = BorderStyle.None, PlaceholderText = "Custom", TextAlign = HorizontalAlignment.Center };
+            var field = new RoundBox { Margin = new Padding(0, 0, 6, 6), Cursor = Cursors.IBeam };
+            box.GotFocus += (_, _) => field.Invalidate();
+            box.LostFocus += (_, _) => field.Invalidate();
+            box.Leave += (_, _) => { if (box.Text != "" && !valid(box.Text)) box.Text = ""; };
+            field.Controls.Add(box);
+            field.Click += (_, _) => box.Focus();
+            return (box, field);
+        }
+
         sizeChips = ChipRow();
-        customMb = new TextBox { BackColor = Theme.Bg2, ForeColor = Theme.Text, BorderStyle = BorderStyle.None, PlaceholderText = "Custom", TextAlign = HorizontalAlignment.Center };
-        var customBox = new RoundBox { Margin = new Padding(0, 0, 6, 6), Cursor = Cursors.IBeam };
-        customMb.GotFocus += (_, _) => customBox.Invalidate();
-        customMb.LostFocus += (_, _) => customBox.Invalidate();
-        customBox.Controls.Add(customMb);
-        customBox.Click += (_, _) => customMb.Focus();
-        customMb.Leave += (_, _) => { if (customMb.Text != "" && !double.TryParse(customMb.Text, out _)) customMb.Text = ""; };
+        (customMb, var customBox) = CustomField(t => double.TryParse(t, out var n) && n > 0);
         foreach (var mb in Planner.LimitPresets) sizeChips.Controls.Add(Chip(Planner.FormatBytes(mb * Planner.MB), mb, sizeChips, v => { customMb.Text = ""; SetTarget((double)v!); }));
         sizeChips.Controls.Add(customBox);
         if (!Planner.LimitPresets.Contains(targetMb)) customMb.Text = targetMb.ToString("0.##");
@@ -253,12 +260,7 @@ sealed class MainForm : DarkForm
         };
 
         // Frame rate: the usual ones as chips, anything else typed in
-        fpsBox = new TextBox { BackColor = Theme.Bg2, ForeColor = Theme.Text, BorderStyle = BorderStyle.None, PlaceholderText = "Custom", TextAlign = HorizontalAlignment.Center };
-        fpsField = new RoundBox { Margin = new Padding(0, 0, 6, 6), Cursor = Cursors.IBeam };
-        fpsBox.GotFocus += (_, _) => fpsField.Invalidate();
-        fpsBox.LostFocus += (_, _) => fpsField.Invalidate();
-        fpsField.Controls.Add(fpsBox);
-        fpsField.Click += (_, _) => fpsBox.Focus();
+        (fpsBox, fpsField) = CustomField(t => int.TryParse(t, out var n) && n > 0);
         fpsBox.TextChanged += (_, _) =>
         {
             if (probe == null || !int.TryParse(fpsBox.Text, out var n) || n < 1) return;
@@ -269,12 +271,7 @@ sealed class MainForm : DarkForm
         };
 
         // Scale: 100, 75 and 50% as chips, any other percentage typed in
-        resBox = new TextBox { BackColor = Theme.Bg2, ForeColor = Theme.Text, BorderStyle = BorderStyle.None, PlaceholderText = "Custom", TextAlign = HorizontalAlignment.Center };
-        resField = new RoundBox { Margin = new Padding(0, 0, 6, 6), Cursor = Cursors.IBeam };
-        resBox.GotFocus += (_, _) => resField.Invalidate();
-        resBox.LostFocus += (_, _) => resField.Invalidate();
-        resField.Controls.Add(resBox);
-        resField.Click += (_, _) => resBox.Focus();
+        (resBox, resField) = CustomField(t => int.TryParse(t.Trim().TrimEnd('%'), out var n) && n > 0);
         resBox.TextChanged += (_, _) =>
         {
             if (probe == null || !int.TryParse(resBox.Text.Trim().TrimEnd('%'), out var n) || n < 1) return;
@@ -655,6 +652,7 @@ sealed class MainForm : DarkForm
                     }
                     break;
                 case "settings": BeginInvoke(ShowSettings); break;
+                case "help": BeginInvoke(ShowHelp); break;
                 case "menu": BeginInvoke(() => moreBtn.GetType().GetMethod("OnClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(moreBtn, [EventArgs.Empty])); break;
                 case "save": BeginInvoke(() => Go(save: true, value)); break;
             }

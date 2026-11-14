@@ -3,35 +3,42 @@ namespace CompressForDiscord;
 /// <summary>How to use the app and every hotkey</summary>
 sealed class HelpForm : DarkForm
 {
-    static readonly (string Keys, string What)[] Hotkeys =
+    static readonly (string Section, (string Keys, string What)[] Rows)[] Hotkeys =
     [
-        ("Space", "Play / pause"),
-        ("← / →", "Step a frame (Shift: 5 seconds)"),
-        ("Q  or  I", "Set start"),
-        ("E  or  O", "Set end"),
-        ("Home / End", "Jump to start / end"),
-        ("Double-click timeline", "Play from there"),
-        ("Alt + wheel", "Zoom the timeline"),
-        ("Wheel on preview", "Step a frame"),
-        ("Shift + wheel on a track", "Taller / shorter tracks"),
-        ("← / → over a track", "Previous / next key point"),
-        ("Shift + drag a tab", "Keep the playhead, snap to it"),
-        ("Ctrl + click a track", "Add a key point"),
-        ("Shift + click key points", "Select several; drag one to move them all"),
-        ("Ctrl + drag a volume point", "Change the level only"),
-        ("Ctrl+C / Ctrl+V", "Copy key points; paste at the playhead"),
-        ("Del", "Delete the selected key points"),
-        ("Right-click a key point", "Linear, smooth, ease or hold"),
-        ("Button left of the timeline", "Frame lock: stop on whole frames"),
-        ("Settings > Recent projects", "Open a video as you last set it up"),
-        ("Right-click a recent project", "Locate a moved video, or swap in another"),
-        ("Ctrl / Shift + drag picture", "Snap to edges / one direction"),
-        ("Ctrl / Shift / Alt + drag corner", "Snap / from centre / reshape"),
-        ("Enter", "Compress & copy"),
-        ("Ctrl+S", "Compress & save…"),
-        ("Ctrl+O", "Open another video"),
-        ("F1", "This help"),
-        ("Esc", "Cancel / close"),
+        ("Playback", [
+            ("Space", "Play / pause"),
+            ("← / →", "Step a frame (Shift: 5 seconds)"),
+            ("Wheel on preview", "Step a frame"),
+            ("Home / End", "Jump to start / end"),
+        ]),
+        ("Timeline", [
+            ("Q / E  (or I / O)", "Set start / end"),
+            ("Shift + drag a tab", "Snap it to the playhead"),
+            ("Double-click", "Play from there"),
+            ("Wheel / Alt + wheel", "Scroll / zoom"),
+            ("Double-click zoom bar", "Show the whole video"),
+            ("Lock button, left", "Stop on whole frames"),
+        ]),
+        ("Tracks", [
+            ("Shift + wheel", "Taller / shorter tracks"),
+            ("Ctrl + click", "Add a key point"),
+            ("Shift + click", "Select several; drag to move them all"),
+            ("Ctrl / Shift + drag", "Volume: level only / time only"),
+            ("← / → over a track", "Previous / next key point"),
+            ("Ctrl+C / Ctrl+V", "Copy / paste at the playhead"),
+            ("Del", "Delete selected key points"),
+            ("Right-click a point", "Linear, smooth, ease or hold"),
+        ]),
+        ("Picture", [
+            ("Ctrl / Shift + drag", "Snap to edges / one direction"),
+            ("Ctrl / Shift / Alt + corner", "Snap / from centre / reshape"),
+        ]),
+        ("App", [
+            ("Enter / Ctrl+S", "Compress & copy / save…"),
+            ("Ctrl+O", "Open another video"),
+            ("Esc", "Cancel / close"),
+            ("F1", "This help"),
+        ]),
     ];
 
     public HelpForm()
@@ -45,12 +52,20 @@ sealed class HelpForm : DarkForm
         var root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, Location = new Point(20, 14), Margin = Padding.Empty };
         root.Controls.Add(Heading("Keys"));
         var keys = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, BackColor = Theme.Bg2, Padding = new Padding(12, 10, 12, 8), Margin = new Padding(0, 4, 0, 12), MinimumSize = new Size(W, 0) };
-        keys.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
         keys.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        foreach (var (k, what) in Hotkeys)
+        keys.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var firstSection = true;
+        foreach (var (section, rows) in Hotkeys)
         {
-            keys.Controls.Add(new Label { Text = k, AutoSize = true, ForeColor = Theme.Header, Font = new Font("Segoe UI Semibold", 10f), Margin = new Padding(0, 3, 0, 3) });
-            keys.Controls.Add(new Label { Text = what, UseMnemonic = false, AutoSize = true, ForeColor = Theme.Text, Margin = new Padding(0, 3, 0, 3) });
+            var title = new Label { Text = section.ToUpperInvariant(), AutoSize = true, ForeColor = Theme.Muted, Font = new Font("Segoe UI Semibold", 8.5f), Margin = new Padding(0, firstSection ? 0 : 10, 0, 2) };
+            keys.Controls.Add(title);
+            keys.SetColumnSpan(title, 2);
+            firstSection = false;
+            foreach (var (k, what) in rows)
+            {
+                keys.Controls.Add(new Label { Text = k, UseMnemonic = false, AutoSize = true, ForeColor = Theme.Header, Font = new Font("Segoe UI Semibold", 10f), Margin = new Padding(0, 3, 16, 3) });
+                keys.Controls.Add(new Label { Text = what, UseMnemonic = false, AutoSize = true, ForeColor = Theme.Text, Margin = new Padding(0, 3, 0, 3) });
+            }
         }
         root.Controls.Add(keys);
 
