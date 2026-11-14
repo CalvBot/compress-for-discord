@@ -510,8 +510,14 @@ sealed class VolumeLane : Control
     /// <summary>Loudest sample in each slice of the track, 0..1; null until measured</summary>
     public float[]? Peaks;
     public double Duration = 1, Start, End = 1, Current;
-    /// <summary>False for a track that isn't part of the mix (drawn grey)</summary>
+    /// <summary>False for a muted track (drawn grey, left out of the mix)</summary>
     public bool Active = true;
+    /// <summary>The track's name, shown on a badge at the left that also mutes and unmutes it</summary>
+    public string Label = "";
+    /// <summary>Nothing audible in this track; said on the badge</summary>
+    public bool Silent;
+    /// <summary>The badge was clicked: Active has flipped</summary>
+    public event Action? MuteToggled;
     /// <summary>Volume while there are no points: 1 = unchanged, 0 = silent, 2 = double</summary>
     public double Volume = 1;
     /// <summary>Volume points in time order; empty = the same volume throughout</summary>
@@ -568,10 +574,20 @@ sealed class VolumeLane : Control
         return -1;
     }
 
+    string BadgeText => Label + (Silent ? " · silent" : "");
+    Rectangle Badge => new(Px(4), Px(4), Px(22) + TextRenderer.MeasureText(BadgeText, Small, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
+
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
         if (!Enabled) return;
+        if (e.Button == MouseButtons.Left && Badge.Contains(e.Location))
+        {
+            Active = !Active;
+            Invalidate();
+            MuteToggled?.Invoke();
+            return;
+        }
         var k = HitKey(e.Location);
         if (e.Button == MouseButtons.Right && k >= 0)
         {
@@ -605,7 +621,7 @@ sealed class VolumeLane : Control
             Volume = Snap(grabVolume + (grabY - e.Y) / (double)Math.Max(1, Height - 2 * Pad) * 2);
             Invalidate();
         }
-        else Cursor = HitKey(e.Location) >= 0 ? Cursors.SizeAll : Keys.Count == 0 ? Cursors.SizeNS : Cursors.Default;
+        else Cursor = Badge.Contains(e.Location) ? Cursors.Hand : HitKey(e.Location) >= 0 ? Cursors.SizeAll : Keys.Count == 0 ? Cursors.SizeNS : Cursors.Default;
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -620,7 +636,7 @@ sealed class VolumeLane : Control
     protected override void OnMouseDoubleClick(MouseEventArgs e)
     {
         base.OnMouseDoubleClick(e);
-        if (!Enabled || e.Button != MouseButtons.Left || HitKey(e.Location) >= 0) return;
+        if (!Enabled || e.Button != MouseButtons.Left || HitKey(e.Location) >= 0 || Badge.Contains(e.Location)) return;
         var t = T(e.X);
         var i = Keys.FindIndex(k => k.T > t);
         Keys.Insert(i < 0 ? Keys.Count : i, (t, GainAt(t)));
@@ -663,6 +679,19 @@ sealed class VolumeLane : Control
 
         using (var head = new Pen(Color.FromArgb(160, Color.White))) g.DrawLine(head, X(Current), 0, X(Current), Height);
         g.ResetClip();
+
+        // Badge: speaker (struck through when muted) and the track's name. Click it to mute or unmute.
+        var badge = Badge;
+        using (var back = Theme.Round(badge, Px(4)))
+        using (var fill = new SolidBrush(Color.FromArgb(215, Theme.Bg2))) g.FillPath(fill, back);
+        var ink = Active ? Theme.Text : Theme.Muted;
+        float s = Px(10), ix = badge.X + Px(5), iy = badge.Y + (badge.Height - s) / 2f;
+        using (var speaker = new SolidBrush(ink))
+            g.FillPolygon(speaker, [new PointF(ix, iy + s * 0.3f), new PointF(ix + s * 0.35f, iy + s * 0.3f), new PointF(ix + s * 0.8f, iy), new PointF(ix + s * 0.8f, iy + s), new PointF(ix + s * 0.35f, iy + s * 0.7f), new PointF(ix, iy + s * 0.7f)]);
+        if (!Active)
+            using (var strike = new Pen(Theme.Danger, Math.Max(1.5f, Px(2)))) g.DrawLine(strike, ix - 1, iy + s, ix + s, iy);
+        TextRenderer.DrawText(g, BadgeText, Small, new Rectangle(badge.X + Px(18), badge.Y, badge.Width, badge.Height), ink, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+
         var label = dragKey >= 0 ? $"{Keys[dragKey].V * 100:0}%" : Keys.Count == 0 ? $"{Volume * 100:0}%" : "";
         TextRenderer.DrawText(g, label, Small, new Rectangle(0, Px(2), Width - Px(6), Height), Theme.Muted, TextFormatFlags.Right | TextFormatFlags.Top | TextFormatFlags.NoPrefix);
     }
@@ -819,6 +848,7 @@ sealed class KeyLane : Control
     public event Action<int>? RemoveRequested, Picked;
     public event Action<int, double>? MoveRequested;
 
+    static readonly Font SmallFont = new("Segoe UI", 8f);
     int dragKey = -1;
     bool moved;
 
@@ -881,6 +911,7 @@ sealed class KeyLane : Control
         using (var track = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), Px(5)))
         using (var bg = new SolidBrush(Theme.Bg3)) g.FillPath(bg, track);
         float mid = Height / 2f, d = Height / 2f - Px(2);
+        TextRenderer.DrawText(g, "Crop", SmallFont, new Rectangle(Px(6), 0, Width, Height), Theme.Muted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         if (Keys.Count > 1)
             using (var line = new Pen(Color.FromArgb(150, Theme.Brand), Math.Max(1, Px(2)))) g.DrawLine(line, X(Keys[0]), mid, X(Keys[^1]), mid);
         using (var head = new Pen(Color.FromArgb(160, Color.White))) g.DrawLine(head, X(Current), 0, X(Current), Height);

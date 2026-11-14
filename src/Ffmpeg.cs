@@ -8,14 +8,8 @@ namespace CompressForDiscord;
 
 sealed record AudioTrack(int Index, string Codec, int Channels, string Layout, string Title, string Language, bool IsDefault)
 {
-    public string Label
-    {
-        get
-        {
-            var layout = Layout != "" ? Layout : Channels == 1 ? "mono" : Channels == 2 ? "stereo" : $"{Channels} ch";
-            return string.Join(" · ", new[] { $"Track {Index + 1}", Title, layout, Language }.Where(s => s != ""));
-        }
-    }
+    /// <summary>The track's own name ("Game", "Mic"); "Track 3" when it has none, or only its number</summary>
+    public string Label => Title != "" && Title != (Index + 1).ToString() ? Title : $"Track {Index + 1}";
 }
 
 sealed record ProbeResult(double Duration, int Width, int Height, double Fps, long Bitrate, long VideoBitrate, string VideoCodec, List<AudioTrack> AudioTracks);
@@ -204,9 +198,11 @@ static class Ff
 
         var audio = streams.Where(s => Str(s["codec_type"]) == "audio").Select((s, i) =>
         {
-            var title = Str(s["tags"]?["title"] ?? s["tags"]?["handler_name"]);
-            // Container tool names ("SoundHandler") aren't real titles
-            if (title.Contains("handler", StringComparison.OrdinalIgnoreCase)) title = "";
+            // OBS writes its track names ("Game", "Mic") to "name"; other tools use "title", and remuxes can leave it in
+            // "handler_name". Skip what's only the name of the tool that wrote the file ("SoundHandler").
+            string[] toolNames = ["handler", "mainconcept", "iso media"];
+            var title = new[] { "title", "name", "handler_name" }.Select(k => Str(s["tags"]?[k]).Trim())
+                .FirstOrDefault(v => v != "" && !toolNames.Any(tool => v.Contains(tool, StringComparison.OrdinalIgnoreCase))) ?? "";
             var lang = Str(s["tags"]?["language"]);
             return new AudioTrack(i, Str(s["codec_name"]), (int)Num(s["channels"]), Str(s["channel_layout"]), title.Trim(), lang == "und" ? "" : lang, Num(s["disposition"]?["default"]) == 1);
         }).ToList();

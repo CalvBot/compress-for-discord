@@ -83,7 +83,7 @@ class DarkForm : Form
 
     public static LinkLabel Link(string text, Action onClick)
     {
-        var l = new LinkLabel { Text = text, AutoSize = true, LinkColor = Theme.Link, ActiveLinkColor = Theme.Header, VisitedLinkColor = Theme.Link, LinkBehavior = LinkBehavior.HoverUnderline, Margin = new Padding(0, 0, 14, 0) };
+        var l = new LinkLabel { Text = text, UseMnemonic = false, AutoSize = true, LinkColor = Theme.Link, ActiveLinkColor = Theme.Header, VisitedLinkColor = Theme.Link, LinkBehavior = LinkBehavior.HoverUnderline, Margin = new Padding(0, 0, 14, 0) };
         l.LinkClicked += (_, _) => onClick();
         return l;
     }
