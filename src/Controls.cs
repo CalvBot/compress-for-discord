@@ -632,8 +632,9 @@ sealed class RoundBox : Panel
 /// <summary>
 /// One audio track drawn as a waveform with its volume line on top. Dragging up or down changes the volume.
 /// To its left are two buttons: mute, and add a point at the playhead so the volume can change over time
-/// (Ctrl+click adds one under the mouse). Right-clicking a point removes it. Holding Shift while dragging a
-/// point keeps its value, and a level stretch between two points at the same value drags as one.
+/// (Ctrl+click adds one under the mouse), or removes the one the playhead is on. Clicking a point selects it
+/// and Del removes it. Holding Shift while dragging a point keeps its value, and a level stretch between two
+/// points at the same value drags as one.
 /// </summary>
 sealed class VolumeLane : Control
 {
@@ -672,6 +673,33 @@ sealed class VolumeLane : Control
     double OnFrame(double t) => Grid > 0 ? Math.Clamp(Math.Round(t / Grid) * Grid, 0, Duration) : t;
     int grabX;
     double grabT;
+    /// <summary>The key point that's selected (Del removes it); -1 = none</summary>
+    public int SelectedKey { get; private set; } = -1;
+    /// <summary>A key point on this track was selected (so any selected on another track can be let go)</summary>
+    public event Action? KeySelected;
+
+    public void Select(int index)
+    {
+        if (SelectedKey == index) return;
+        SelectedKey = index;
+        Invalidate();
+        if (index >= 0) KeySelected?.Invoke();
+    }
+
+    /// <summary>How close the playhead has to be to a key point to count as on it: within half a frame</summary>
+    double Near => Grid > 0 ? Grid / 2 : 0.02;
+    /// <summary>The key point under the playhead, or -1</summary>
+    int OnKey => Keys.FindIndex(k => Math.Abs(k.T - Current) <= Near);
+
+    public void DeleteSelected()
+    {
+        if (SelectedKey < 0 || SelectedKey >= Keys.Count) return;
+        Keys.RemoveAt(SelectedKey);
+        SelectedKey = -1;
+        Invalidate();
+        Committed?.Invoke();
+    }
+
     int rowHeight = 56;
     /// <summary>Height in 96-dpi pixels; every keyframable track shares it</summary>
     public int RowHeight { get => rowHeight; set { rowHeight = value; Fit(); } }
@@ -693,7 +721,7 @@ sealed class VolumeLane : Control
     {
         var h = new HashCode();
         foreach (var v in new[] { From, Span, Start, End, Volume, Grid, Duration }) h.Add(v);
-        h.Add(Active); h.Add(Silent); h.Add(Enabled); h.Add(dragKey); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Peaks);
+        h.Add(Active); h.Add(Silent); h.Add(Enabled); h.Add(dragKey); h.Add(SelectedKey); h.Add(OnKey >= 0); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Peaks);
         foreach (var k in Keys) { h.Add(k.T); h.Add(k.V); }
         return h.ToHashCode();
     }
@@ -769,6 +797,7 @@ sealed class VolumeLane : Control
 
     public void ClearKeys()
     {
+        SelectedKey = -1;
         Keys.Clear();
         Invalidate();
         Committed?.Invoke();
@@ -777,6 +806,7 @@ sealed class VolumeLane : Control
     /// <summary>Back to 100% throughout: no points, and the level line where it started</summary>
     public void ResetLevel()
     {
+        SelectedKey = -1;
         Keys.Clear();
         Volume = 1;
         Invalidate();
@@ -809,7 +839,14 @@ sealed class VolumeLane : Control
         if (!Enabled) return;
         if (e.Button == MouseButtons.Left && AddButton.Contains(e.Location))
         {
-            AddKey(Current);
+            // The button adds a point at the playhead, or takes away the one that's already there
+            if (OnKey is >= 0 and var there)
+            {
+                Keys.RemoveAt(there);
+                SelectedKey = -1;
+                Invalidate();
+            }
+            else AddKey(Current);
             Committed?.Invoke();
             return;
         }
@@ -822,17 +859,16 @@ sealed class VolumeLane : Control
         }
         if (e.X < G) return;
         var k = HitKey(e.Location);
-        if (e.Button == MouseButtons.Right && k >= 0)
+        if (e.Button == MouseButtons.Right)
         {
-            Keys.RemoveAt(k);
-            Invalidate();
-            Committed?.Invoke();
+            if (k >= 0) Select(k);
+            MenuRequested?.Invoke(e.Location);
         }
-        else if (e.Button == MouseButtons.Right) MenuRequested?.Invoke(e.Location);
         else if (e.Button == MouseButtons.Left)
         {
             // Ctrl+click puts a new point under the mouse, already held so it can be dragged into place
             if (k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) k = AddKey(OnFrame(T(e.X)));
+            Select(k);
             dragKey = k;
             grabX = e.X;
             grabT = k >= 0 ? Keys[k].T : 0;
@@ -933,6 +969,9 @@ sealed class VolumeLane : Control
         using (var pen = new Pen(line, 1.5f)) g.DrawLines(pen, pts.ToArray());
         using (var dot = new SolidBrush(line))
             foreach (var k in Keys) g.FillEllipse(dot, X(k.T) - Px(4), Y(k.V) - Px(4), Px(8), Px(8));
+        if (SelectedKey >= 0 && SelectedKey < Keys.Count)
+            using (var ring = new Pen(Theme.Warn, Math.Max(1.5f, Px(2))))
+                g.DrawEllipse(ring, X(Keys[SelectedKey].T) - Px(6), Y(Keys[SelectedKey].V) - Px(6), Px(12), Px(12));
 
         g.ResetClip();
 
@@ -945,7 +984,7 @@ sealed class VolumeLane : Control
             g.FillPolygon(speaker, [new PointF(ix, iy + s * 0.3f), new PointF(ix + s * 0.35f, iy + s * 0.3f), new PointF(ix + s * 0.8f, iy), new PointF(ix + s * 0.8f, iy + s), new PointF(ix + s * 0.35f, iy + s * 0.7f), new PointF(ix, iy + s * 0.7f)]);
         if (!Active)
             using (var strike = new Pen(Theme.Danger, Math.Max(1.5f, Px(2)))) g.DrawLine(strike, ix - 2, iy + s, ix + s, iy);
-        KeyButton.Draw(g, AddButton, Enabled);
+        KeyButton.Draw(g, AddButton, Enabled, OnKey >= 0);
 
         // The track's name on the lane
         var badge = Badge;
@@ -1225,14 +1264,17 @@ static class Tracks
     }
 }
 
-/// <summary>The "add a key point at the playhead" button each track has</summary>
+/// <summary>
+/// The key point button each track has. It adds a point at the playhead; when the playhead is already on one it
+/// turns orange, and then takes that point away.
+/// </summary>
 static class KeyButton
 {
-    public static void Draw(Graphics g, Rectangle r, bool enabled)
+    public static void Draw(Graphics g, Rectangle r, bool enabled, bool onKey)
     {
         Tracks.DrawButton(g, r);
         float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f, d = r.Height * 0.25f;
-        using var ink = new SolidBrush(enabled ? Theme.Text : Theme.Muted);
+        using var ink = new SolidBrush(onKey ? Theme.Warn : enabled ? Theme.Text : Theme.Muted);
         g.FillPolygon(ink, [new PointF(cx, cy - d), new PointF(cx + d, cy), new PointF(cx, cy + d), new PointF(cx - d, cy)]);
     }
 }
@@ -1240,7 +1282,8 @@ static class KeyButton
 /// <summary>
 /// Track for the picture's position and scale. Each key point is a diamond, and the line through them shows the
 /// value (for scale, higher = closer in). Ctrl+click, or the button at the start, adds a point; dragging moves it in time,
-/// right-click removes it, clicking jumps to it. What a point holds is set by the box on the preview.
+/// clicking selects it and jumps to it, Del removes it. The button also takes away the point the playhead is
+/// on. What a point holds is set by the box on the preview.
 /// </summary>
 sealed class KeyLane : Control
 {
@@ -1266,6 +1309,31 @@ sealed class KeyLane : Control
     /// <summary>Length of one frame at the chosen frame rate, in seconds. Frames are marked once zoomed in far enough.</summary>
     public double Grid;
     double OnFrame(double t) => Grid > 0 ? Math.Clamp(Math.Round(t / Grid) * Grid, 0, Duration) : t;
+    /// <summary>The key point that's selected (Del removes it); -1 = none</summary>
+    public int SelectedKey { get; private set; } = -1;
+    /// <summary>A key point on this track was selected (so any selected on another track can be let go)</summary>
+    public event Action? KeySelected;
+
+    public void Select(int index)
+    {
+        if (SelectedKey == index) return;
+        SelectedKey = index;
+        Invalidate();
+        if (index >= 0) KeySelected?.Invoke();
+    }
+
+    /// <summary>How close the playhead has to be to a key point to count as on it: within half a frame</summary>
+    double Near => Grid > 0 ? Grid / 2 : 0.02;
+    int OnKey { get { for (var i = 0; i < Keys.Count; i++) if (Math.Abs(Keys[i] - Current) <= Near) return i; return -1; } }
+
+    public void DeleteSelected()
+    {
+        if (SelectedKey < 0 || SelectedKey >= Keys.Count) return;
+        var index = SelectedKey;
+        SelectedKey = -1;
+        RemoveRequested?.Invoke(index);
+    }
+
     int rowHeight = 56;
     /// <summary>Height in 96-dpi pixels; every keyframable track shares it</summary>
     public int RowHeight { get => rowHeight; set { rowHeight = value; Fit(); } }
@@ -1319,13 +1387,22 @@ sealed class KeyLane : Control
     {
         base.OnMouseDown(e);
         if (!Enabled) return;
-        if (e.Button == MouseButtons.Left && AddButton.Contains(e.Location)) { AddRequested?.Invoke(Current); return; }
+        if (e.Button == MouseButtons.Left && AddButton.Contains(e.Location))
+        {
+            // Adds a point at the playhead, or takes away the one that's already there
+            if (OnKey is >= 0 and var there) { SelectedKey = -1; RemoveRequested?.Invoke(there); }
+            else AddRequested?.Invoke(Current);
+            return;
+        }
         if (e.X < G) return;
         var k = HitKey(e.X);
-        if (e.Button == MouseButtons.Right && k >= 0) RemoveRequested?.Invoke(k);
-        else if (e.Button == MouseButtons.Right) MenuRequested?.Invoke(e.Location);
+        if (e.Button == MouseButtons.Right)
+        {
+            if (k >= 0) Select(k);
+            MenuRequested?.Invoke(e.Location);
+        }
         else if (e.Button == MouseButtons.Left && k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) AddRequested?.Invoke(OnFrame(T(e.X)));
-        else if (e.Button == MouseButtons.Left) { dragKey = k; moved = false; }
+        else if (e.Button == MouseButtons.Left) { Select(k); dragKey = k; moved = false; }
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -1376,13 +1453,19 @@ sealed class KeyLane : Control
         for (var i = 0; i < Keys.Count; i++)
         {
             float x = X(Keys[i]), y = Y(Level(i));
-            // White when the playhead is on it: that's the point the box on the preview edits
-            using var fill = new SolidBrush(Math.Abs(Keys[i] - Current) < 0.02 ? Color.White : Theme.Brand);
+            // White when the playhead is on it: that's the point the box on the preview edits. Ringed when selected.
+            using var fill = new SolidBrush(Math.Abs(Keys[i] - Current) <= Near ? Color.White : Theme.Brand);
             g.FillPolygon(fill, [new PointF(x, y - d), new PointF(x + d, y), new PointF(x, y + d), new PointF(x - d, y)]);
+            if (i == SelectedKey)
+            {
+                var r = d + Px(3);
+                using var ring = new Pen(Theme.Warn, Math.Max(1.5f, Px(2)));
+                g.DrawPolygon(ring, [new PointF(x, y - r), new PointF(x + r, y), new PointF(x, y + r), new PointF(x - r, y)]);
+            }
         }
         g.ResetClip();
 
-        KeyButton.Draw(g, AddButton, Enabled);
+        KeyButton.Draw(g, AddButton, Enabled, OnKey >= 0);
         var name = Label;
         var badge = new Rectangle(G + Px(5), Px(4), Px(10) + TextRenderer.MeasureText(name, SmallFont, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
         using (var back = Theme.Round(badge, Px(4)))

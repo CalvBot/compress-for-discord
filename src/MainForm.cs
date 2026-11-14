@@ -434,6 +434,8 @@ sealed class MainForm : DarkForm
                 case "crop": SetCrop(value); break;
                 case "rate": fpsBox.Text = value; break;
                 case "separate": SetSeparate(true); break;
+                case "select": keyLane.Select(int.Parse(value)); break;
+                case "del": DeleteSelectedKey(); break;
                 case "gripspam":
                     // Drag the track box's grip up and down fast, as a quick hand would
                     BeginInvoke(() =>
@@ -851,14 +853,25 @@ sealed class MainForm : DarkForm
         track.MouseEnter += (_, _) => hoverTrack = track;
         track.MouseLeave += (_, _) => { if (hoverTrack == track) hoverTrack = null; };
         void Taller(int by) => SetTrackHeight(trackH + by * 14);
+        // One selected key point at a time, across all the tracks
+        void LetGoOthers()
+        {
+            foreach (var other in AllTracks.Where(t => t != track))
+            {
+                if (other is VolumeLane a) a.Select(-1);
+                else if (other is KeyLane b) b.Select(-1);
+            }
+        }
         if (track is VolumeLane v)
         {
+            v.KeySelected += LetGoOthers;
             v.HeightRequested += Taller;
             v.ZoomRequested += ZoomBy;
             v.MenuRequested += at => ShowTrackMenu(track, at);
         }
         else if (track is KeyLane k)
         {
+            k.KeySelected += LetGoOthers;
             k.HeightRequested += Taller;
             k.ZoomRequested += ZoomBy;
             k.MenuRequested += at => ShowTrackMenu(track, at);
@@ -883,6 +896,24 @@ sealed class MainForm : DarkForm
         if (track != posLane) scale.Reset(MaxCropW);
         ShowCrop();
         UpdateSummary();
+    }
+
+    IEnumerable<Control> AllTracks => new Control[] { keyLane, posLane, scaleLane, masterLane }.Concat(trackUi.Select(t => t.Lane));
+
+    /// <summary>Del: removes the selected key point, whichever track it's on. False if none is selected.</summary>
+    bool DeleteSelectedKey()
+    {
+        foreach (var track in AllTracks)
+        {
+            if (track is VolumeLane { SelectedKey: >= 0 } a)
+            {
+                a.DeleteSelected();
+                if (a != masterLane) UpdateMasterPeaks();
+                return true;
+            }
+            if (track is KeyLane { SelectedKey: >= 0 } b) { b.DeleteSelected(); return true; }
+        }
+        return false;
     }
 
     IEnumerable<double> KeyTimesOf(Control track) => track is VolumeLane v ? v.KeyTimes : track is KeyLane k ? k.KeyTimes : [];
@@ -1484,6 +1515,7 @@ sealed class MainForm : DarkForm
             case Keys.Right: timeline.Seek(timeline.Current + step); break;
             case Keys.Q or Keys.I: timeline.SetStart(timeline.Current); break;
             case Keys.E or Keys.O: timeline.SetEnd(timeline.Current); break;
+            case Keys.Delete: if (!DeleteSelectedKey()) return false; break;
             case Keys.Home: timeline.Seek(timeline.Start); break;
             case Keys.End: timeline.Seek(timeline.End); break;
             default: return false;

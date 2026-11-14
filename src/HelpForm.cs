@@ -17,6 +17,7 @@ sealed class HelpForm : DarkForm
         ("← / → over a track", "Previous / next key point"),
         ("Shift + drag a tab", "Keep the playhead, snap to it"),
         ("Ctrl + click a track", "Add a key point"),
+        ("Del", "Delete the selected key point"),
         ("Ctrl / Shift + drag picture", "Snap to edges / one direction"),
         ("Ctrl / Shift / Alt + drag corner", "Snap / from centre / reshape"),
         ("Enter", "Compress & copy"),
