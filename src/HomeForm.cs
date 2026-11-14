@@ -16,12 +16,18 @@ sealed class HomeForm : DarkForm
         var top = new Panel { Size = new Size(W, 36), Margin = Padding.Empty };
         var title = Heading("Compress for Discord");
         title.Dock = DockStyle.Left;
-        var links = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Dock = DockStyle.Right, Padding = new Padding(0, 9, 0, 0) };
-        links.Controls.Add(UpdateLink(this));
-        links.Controls.Add(Link("Settings", () => new SettingsForm().ShowDialog(this)));
-        var help = Link("Help", () => new HelpForm().ShowDialog(this));
-        help.Margin = Padding.Empty;
-        links.Controls.Add(help);
+        // Same icon buttons as the main window
+        var links = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Dock = DockStyle.Right, Padding = new Padding(8, 0, 0, 0) };
+        var update = UpdateLink(this);
+        update.Margin = new Padding(0, 5, 10, 0);
+        var settings = new Pill("Settings") { Icon = PillIcon.Gear, Margin = new Padding(0, 0, 6, 0) };
+        var help = new Pill("Help") { Icon = PillIcon.Help, Margin = Padding.Empty };
+        settings.Click += (_, _) => new SettingsForm().ShowDialog(this);
+        help.Click += (_, _) => new HelpForm().ShowDialog(this);
+        var tips = new ToolTip();
+        tips.SetToolTip(settings, "Settings");
+        tips.SetToolTip(help, "Help and shortcuts (F1)");
+        links.Controls.AddRange([update, settings, help]);
         top.Controls.Add(title);
         top.Controls.Add(links);
         root.Controls.Add(top);
