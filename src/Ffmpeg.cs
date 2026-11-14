@@ -12,7 +12,11 @@ sealed record AudioTrack(int Index, string Codec, int Channels, string Layout, s
     public string Label => Title != "" && Title != (Index + 1).ToString() ? Title : $"Track {Index + 1}";
 }
 
-sealed record ProbeResult(double Duration, int Width, int Height, double Fps, long Bitrate, long VideoBitrate, string VideoCodec, List<AudioTrack> AudioTracks);
+sealed record ProbeResult(double Duration, int Width, int Height, double Fps, long Bitrate, long VideoBitrate, string VideoCodec, List<AudioTrack> AudioTracks)
+{
+    /// <summary>The file's video and audio streams in order, "v" or "a" each (other kinds left out)</summary>
+    public string StreamKinds { get; init; } = "";
+}
 
 /// <param name="Volume">1 = unchanged; used when there are no Keys</param>
 /// <param name="Keys">volume points in source time, in order; the volume moves between them the way each point's Ease says</param>
@@ -241,7 +245,10 @@ static class Ff
         if (!(duration > 0)) throw new Exception("Couldn't tell how long this video is. Try remuxing it first, or it may be an image.");
         if (w <= 0 || h <= 0) throw new Exception("Couldn't read this video's picture size.");
         if (duration > MaxHours * 3600) throw new Exception($"This video is over {MaxHours} hours long. Cut it into shorter parts first.");
-        return new ProbeResult(duration, swap ? h : w, swap ? w : h, fps, (long)Num(root["format"]?["bit_rate"]), (long)Num(v["bit_rate"]), Str(v["codec_name"]), audio);
+        // The file's video and audio streams in order ("vaaa"): Windows' reader can list them differently
+        var kinds = string.Concat(streams.Select(s => Str(s["codec_type"]) switch { "video" => "v", "audio" => "a", _ => "" }));
+        return new ProbeResult(duration, swap ? h : w, swap ? w : h, fps, (long)Num(root["format"]?["bit_rate"]), (long)Num(v["bit_rate"]), Str(v["codec_name"]), audio)
+            { StreamKinds = kinds };
     }
 
     // ---------- frames ----------

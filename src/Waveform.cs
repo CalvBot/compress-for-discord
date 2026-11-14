@@ -8,7 +8,7 @@ namespace CompressForDiscord;
 /// millisecond (so zoomed all the way in, where a frame is ~50 px wide, it still has detail); each level above holds
 /// the loudest of two below it, so drawing any zoom reads only a sample or two per pixel (like a video editor's
 /// waveform levels of detail). Levels are stored as one byte each, the square root of the level, which is the scale
-/// it's drawn at: a 65-minute recording takes ~8 MB a track. Measured in 30-second chunks: the part on screen first,
+/// it's drawn at: a 65-minute recording takes ~8 MB a track. Measured in 10-second chunks: the part on screen first,
 /// then outwards from it, so a long recording's waveform pops in where you're looking.
 /// The loader threads write while the window reads; a stale read only means a chunk shows a moment late.
 /// </summary>
@@ -17,9 +17,9 @@ sealed class Waveform
     /// <summary>Finest slices a second (1 ms each)</summary>
     public const int Rate = 1000;
     const int SampleRate = 8000, PerSlice = SampleRate / Rate;
-    const int ChunkSeconds = 30, ChunkSlices = ChunkSeconds * Rate;
+    const int ChunkSeconds = 10, ChunkSlices = ChunkSeconds * Rate;
     /// <summary>Longest stretch decoded in one go: shorter means the loader follows the view sooner</summary>
-    const int MaxRunChunks = 20;
+    const int MaxRunChunks = 30;
     /// <summary>ffmpegs measuring at once, each its own stretch: decoding the sound is what takes the time, at one core each</summary>
     static int Workers => Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
 
@@ -42,9 +42,37 @@ sealed class Waveform
     /// <summary>ffmpeg couldn't read this track at all</summary>
     public bool Failed { get; private set; }
 
+    // A rough sketch, read straight from the file at spots spread over the recording (see AudioSketch), shown where
+    // the measuring hasn't got to yet. Spot i is the sound around SketchTime(i).
+    readonly byte[] sketch;
+    readonly bool[] sketched;
+    int sketchedCount;
+
+    /// <summary>How many spots the sketch has room for (a power of two)</summary>
+    public int SketchPoints => sketch.Length;
+    public double SketchTime(int i) => (i + 0.5) * Duration / sketch.Length;
+
+    /// <summary>The time t is measured properly already</summary>
+    public bool Measured(double t) => known[Math.Clamp((int)(t / ChunkSeconds), 0, known.Length - 1)];
+
+    /// <summary>The loudest sample (0..32768) read around SketchTime(i)</summary>
+    public void Sketch(int i, int sample)
+    {
+        sketch[i] = Encode(sample);
+        Volatile.Write(ref sketched[i], true);
+        Interlocked.Increment(ref sketchedCount);
+        Interlocked.Increment(ref version);
+    }
+
     public Waveform(double duration)
     {
         Duration = duration;
+        // Room for a spot every ~1/8 s (up to 32768, a spot every ~8 s for a 72-hour recording): how fine it gets
+        // depends on how far in you zoom, since the sketch stops at about two pixels between spots
+        var points = 16;
+        while (points < 1 << 15 && points < duration * 8) points *= 2;
+        sketch = new byte[points];
+        sketched = new bool[points];
         slices = Math.Max(1, (int)Math.Ceiling(duration * Rate));
         known = new bool[(slices + ChunkSlices - 1) / ChunkSlices];
         claimed = new bool[known.Length];
@@ -59,9 +87,10 @@ sealed class Waveform
 
     /// <summary>
     /// The loudest sample from t0 to t1 (0..1), read from the level where that's a sample or two.
-    /// Measured = false while none of it has been measured yet.
+    /// Measured = false while none of it has been measured yet; until then it's the sketch's guess (rough = true)
+    /// once there is one.
     /// </summary>
-    public float Max(double t0, double t1, out bool measured)
+    public float Max(double t0, double t1, out bool measured, out bool rough)
     {
         var s0 = t0 * Rate;
         var s1 = Math.Max(t1 * Rate, s0 + 1e-9);
@@ -75,7 +104,40 @@ sealed class Waveform
         int c0 = Math.Clamp((int)(s0 / ChunkSlices), 0, known.Length - 1), c1 = Math.Clamp((int)((s1 - 1e-6) / ChunkSlices), c0, known.Length - 1);
         measured = false;
         for (var c = c0; c <= c1 && !measured; c++) measured = known[c];
-        return Decode(peak);
+        rough = false;
+        if (measured || Volatile.Read(ref sketchedCount) == 0) return Decode(peak);
+        measured = rough = true;
+        return Decode(SketchMax(t0, t1));
+    }
+
+    /// <summary>The loudest sketched spot from t0 to t1, or the nearest one if none is in there yet</summary>
+    byte SketchMax(double t0, double t1)
+    {
+        var n = sketch.Length;
+        var per = n / Duration;
+        int i0 = Math.Max(0, (int)Math.Ceiling(t0 * per - 0.5)), i1 = Math.Min(n - 1, (int)Math.Floor(t1 * per - 0.5));
+        byte peak = 0;
+        var any = false;
+        for (var i = i0; i <= i1; i++)
+            if (sketched[i])
+            {
+                any = true;
+                if (sketch[i] > peak) peak = sketch[i];
+            }
+        if (any) return peak;
+        // None under this pixel yet: the nearest spot. Spots are read coarse to fine, so look at the two either side
+        // on each pass's spacing, finest first (a few checks, where walking out one by one could take thousands)
+        var tm = (t0 + t1) / 2 * per;
+        var mid = Math.Clamp((int)tm, 0, n - 1);
+        for (var stride = 1; stride <= n; stride *= 2)
+        {
+            int left = mid / stride * stride, right = left + stride;
+            bool l = sketched[left], r = right < n && sketched[right];
+            if (l && r) return Math.Abs(left + 0.5 - tm) <= Math.Abs(right + 0.5 - tm) ? sketch[left] : sketch[right];
+            if (l) return sketch[left];
+            if (r) return sketch[right];
+        }
+        return 0;
     }
 
     static float Decode(byte b) => b / 255f * (b / 255f);
@@ -117,7 +179,7 @@ sealed class Waveform
         if (count > 1) graph += ";" + string.Concat(Enumerable.Range(0, count).Select(i => $"[w{i}]")) + $"amerge=inputs={count}[w]";
         var output = count > 1 ? "[w]" : "[w0]";
 
-        async Task WhilePaused() { while (paused()) await Task.Delay(250, ct).ConfigureAwait(false); }
+        async Task WhilePaused() { while (paused()) await Task.Delay(100, ct).ConfigureAwait(false); }
 
         var read = await Task.WhenAll(Enumerable.Range(0, workers).Select(_ => Task.Run(Work, ct)));
         if (read.All(ok => ok))
@@ -146,7 +208,12 @@ sealed class Waveform
                     if (lead.Next(view()) is not { } next) return true;
                     first = next;
                     run = 1;
-                    while (run < MaxRunChunks && lead.Free(first + run)) run++;
+                    // At most a fair share of what's left, so a short recording is split between the workers
+                    // rather than the first one taking all of it
+                    var free = 0;
+                    for (var c = 0; c < lead.known.Length; c++) if (lead.Free(c)) free++;
+                    var most = Math.Clamp((free + workers - 1) / workers, 1, MaxRunChunks);
+                    while (run < most && lead.Free(first + run)) run++;
                     for (var c = first; c < first + run; c++) lead.claimed[c] = true;
                 }
                 Interlocked.Increment(ref runs);
@@ -226,7 +293,8 @@ sealed class Waveform
                     // The stream ended: the rest of the run is past the end of the sound (silent), or the slice still
                     // being filled is the last
                     if (inSlice > 0) Store();
-                    for (; done < first + run; done++) foreach (var w in waves) w.Finish(done);                }
+                    for (; done < first + run; done++) foreach (var w in waves) w.Finish(done);
+                }
                 finally
                 {
                     // Whatever it didn't get to is free for the next worker (or this one) to take

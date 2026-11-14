@@ -1257,19 +1257,20 @@ sealed class VolumeLane : KeyTrackLane
         if (sources.Count > 0)
         {
             // A one-pixel column per pixel across, gathered and filled in three goes rather than drawn one by one
-            List<RectangleF> inside = [], outside = [], waiting = [];
+            List<RectangleF> inside = [], outside = [], waiting = [], roughIn = [], roughOut = [];
             var step = Span / BodyW;
             for (var x = 0; x < BodyW; x++)
             {
                 var t = From + x * step;
                 // The loudest sample under this pixel: zoomed out, a short peak still shows
                 var peak = 0.0;
-                var measured = false;
+                bool measured = false, rough = false;
                 for (var j = 0; j < sources.Count; j++)
                 {
                     var (wave, gain) = sources[j];
-                    var p = wave.Max(t, t + step, out var m);
+                    var p = wave.Max(t, t + step, out var m, out var r);
                     measured |= m;
+                    rough |= r;
                     if (m && p > 0) peak = Math.Max(peak, p * (gain?.Invoke(t) ?? 1));
                 }
                 // Not measured yet: a faint stub on the base line until it pops in
@@ -1282,7 +1283,8 @@ sealed class VolumeLane : KeyTrackLane
                 // fairly. Square root so quiet sound still shows; full scale at 100% reaches about 70%, leaving room
                 // to show a boost.
                 var h = (float)Math.Min(1, Math.Sqrt(peak * GainAt(t) / 2)) * reach;
-                if (h >= 0.5f) (t >= Start && t <= End ? inside : outside).Add(mirrored ? new RectangleF(G + x, mid - h, 1, 2 * h) : new RectangleF(G + x, floor - h, 1, h));
+                // Only sketched so far: drawn fainter until the measured shape replaces it
+                if (h >= 0.5f) (t >= Start && t <= End ? rough ? roughIn : inside : rough ? roughOut : outside).Add(mirrored ? new RectangleF(G + x, mid - h, 1, 2 * h) : new RectangleF(G + x, floor - h, 1, h));
             }
             // Columns line up with pixels, so smoothing only blurs them
             g.SmoothingMode = SmoothingMode.None;
@@ -1294,6 +1296,8 @@ sealed class VolumeLane : KeyTrackLane
             }
             Fill(inside, Active ? Theme.Brand : Theme.Secondary);
             Fill(outside, Color.FromArgb(90, Active ? Theme.Brand : Theme.Secondary));
+            Fill(roughIn, Color.FromArgb(150, Active ? Theme.Brand : Theme.Secondary));
+            Fill(roughOut, Color.FromArgb(50, Active ? Theme.Brand : Theme.Secondary));
             Fill(waiting, Color.FromArgb(40, Theme.Text));
             g.SmoothingMode = SmoothingMode.AntiAlias;
         }

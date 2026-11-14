@@ -426,6 +426,8 @@ sealed class MainForm : DarkForm
     bool loading, reloadWanted;
     /// <summary>Playing has been asked for and its first frame isn't in yet (the waveforms hold off meanwhile)</summary>
     volatile bool playStarting;
+    /// <summary>The waveform sketch is making its first passes over the view (the exact measuring holds off meanwhile)</summary>
+    volatile bool sketchLeading;
     /// <summary>The video's read as soon as the window starts being made, rather than once it's shown</summary>
     Task<ProbeResult>? earlyProbe;
     /// <summary>A size was typed into the custom box since it was last left</summary>
@@ -1769,13 +1771,27 @@ sealed class MainForm : DarkForm
             tracks.Add((wave, track.Index));
         }
         var path = file;
+        var kinds = probe?.StreamKinds ?? "";
         // All tracks from one read of the file. Held back while compressing, so the encode has the disk to itself,
         // and while scrubbing: reading a huge recording alongside the preview cut the frames shown from ~29 a second to ~8.
         // and while playing starts: decoding its first frame alongside took a 5-track recording from ~0.16 s to ~0.5 s
         bool Paused() => encodeCts != null || frameBusy || playStarting || Environment.TickCount64 - lastFrameRequest < 400;
+        // First a rough sketch of what's on screen, coarse to fine, so there's a shape to work with straight away;
+        // the exact measuring waits for its first few passes, then they share the time
+        sketchLeading = true;
+#if DEBUG
+        if (Environment.GetEnvironmentVariable("CFD_TEST")?.Contains("nosketch") == true) sketchLeading = false;
+        else
+#endif
+        _ = Task.Run(() =>
+        {
+            try { AudioSketch.Run(path, kinds, tracks, () => (viewStart, viewEnd), Paused, on => sketchLeading = on, lifetime.Token); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { AppLog.Error("Waveform sketch", ex); }
+        });
         _ = Task.Run(async () =>
         {
-            try { await Waveform.LoadAll(path, tracks, () => (viewStart, viewEnd), Paused, lifetime.Token); }
+            try { await Waveform.LoadAll(path, tracks, () => (viewStart, viewEnd), () => sketchLeading || Paused(), lifetime.Token); }
             catch (OperationCanceledException) { }
             catch (Exception ex) { AppLog.Error("Waveforms", ex); }
         });
