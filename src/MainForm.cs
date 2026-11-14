@@ -721,6 +721,42 @@ sealed class MainForm : DarkForm
                 // Zooms back out to the whole video this many ms later
                 case "unzoom": { var t = new System.Windows.Forms.Timer { Interval = int.Parse(value) }; t.Tick += (_, _) => { t.Dispose(); SetView(0, timeline.Duration); }; t.Start(); break; }
                 case "preview": SetPreview(true); break;
+                case "sizesim":
+                    // Drags the bottom edge up well past the smallest the window can be, then down well past the
+                    // tallest the tracks fill, then the right edge in; logs any step where it went the wrong way
+                    BeginInvoke(() =>
+                    {
+                        var log = new List<string>();
+                        void Drag(int dx, int dy, int steps)
+                        {
+                            OnResizeBegin(EventArgs.Empty);
+                            for (var i = 0; i < steps; i++)
+                            {
+                                var before = Size;
+                                var asked = new Size(Width + dx, Height + dy);
+                                Size = asked;
+                                Application.DoEvents();
+                                // Moving the edge one way must never move the window the other way, and a size the
+                                // minimum allows must be kept (else Windows and the fit fight: it flickers)
+                                if ((dy != 0 && Math.Sign(Height - before.Height) == -Math.Sign(dy)) || (dx != 0 && Math.Sign(Width - before.Width) == -Math.Sign(dx))
+                                    || (asked.Height >= MinimumSize.Height && asked.Width >= MinimumSize.Width && Size != asked && dy <= 0 && dx <= 0))
+                                    log.Add($"step {i} ({dx},{dy}): {before.Width}x{before.Height} asked {asked.Width}x{asked.Height} -> {Width}x{Height}, min {MinimumSize.Width}x{MinimumSize.Height}");
+                            }
+                            OnResizeEnd(EventArgs.Empty);
+                            Application.DoEvents();
+                        }
+                        // As if the window was made bigger before Advanced was opened
+                        if (int.TryParse(value, out var pre)) { extraH = pre; ApplyStretch(); FitToContent(); Application.DoEvents(); }
+                        var start = Size;
+                        Drag(0, -40, 40);
+                        var small = Size;
+                        Drag(0, 40, 60);
+                        var tall = Size;
+                        Drag(-40, 0, 40);
+                        AppLog.Info($"Size: start {start.Width}x{start.Height}, shrunk {small.Width}x{small.Height} (min {MinimumSize.Height}), grown {tall.Width}x{tall.Height}, narrowed {Width}x{Height} (min {MinimumSize.Width}), {log.Count} wrong-way steps");
+                        foreach (var l in log.Take(6)) AppLog.Info("Size:   " + l);
+                    });
+                    break;
                 case "dragsim":
                 {
                     // dragsim=<seconds>: drags the playhead back and forth like a fast mouse would (a move arrives
@@ -1244,14 +1280,21 @@ sealed class MainForm : DarkForm
     /// Closed, the box is exactly its one lane. Open, it's as tall as the grip was dragged (short to begin with)
     /// and scrolls for the rest.
     /// </summary>
-    void SizeTracks()
+    /// <summary>How short and how tall the open track box can be: from a sliver down to every track showing</summary>
+    (int Min, int Max) TrackBoxRange()
     {
         var all = scroller.Content.GetPreferredSize(Size.Empty).Height;
+        return (Math.Min(all, D(60)), all);
+    }
+
+    void SizeTracks()
+    {
+        var (lo, all) = TrackBoxRange();
         var open = tracksOpen && probe != null;
         // Short to begin with: the first two tracks and a sliver of the next, so it's clear there's more
         if (tracksHeight == 0) tracksHeight = D(132);
         scroller.Visible = all > 0;
-        scroller.Height = open ? Math.Clamp(tracksHeight, Math.Min(all, D(60)), all) : all;
+        scroller.Height = open ? Math.Clamp(tracksHeight, lo, all) : all;
         scroller.Scrolls = open && scroller.Height < all;
         grip.Visible = open && all > D(60);
     }
@@ -1259,8 +1302,8 @@ sealed class MainForm : DarkForm
     /// <summary>The grip under the track box was dragged: make the box this tall (within what it holds)</summary>
     void DragTracks(int height)
     {
-        var all = scroller.Content.GetPreferredSize(Size.Empty).Height;
-        height = Math.Clamp(height, Math.Min(all, D(60)), all);
+        var (lo, hi) = TrackBoxRange();
+        height = Math.Clamp(height, lo, hi);
         if (height == scroller.Height) return;
         tracksHeight = height;
         // One layout, one fit, one paint per step: a fast drag otherwise piles up resizes and leaves the window torn
@@ -1776,8 +1819,16 @@ sealed class MainForm : DarkForm
                 if (dw != 0 || dh != 0)
                 {
                     extraW = Math.Max(0, extraW + dw);
-                    // Height goes to the track box while it's open, so closing Advanced leaves the window as it was
-                    if (tracksOpen) tracksHeight = Math.Max(D(60), scroller.Height + dh);
+                    // Height goes to the track box while it's open, so closing Advanced leaves the window as it was.
+                    // What the box can't take (it's at its smallest, or already shows every track) goes to the
+                    // preview, or the window would be held at a size it can't fit and flick back and forth.
+                    if (tracksOpen)
+                    {
+                        var (lo, hi) = TrackBoxRange();
+                        var want = scroller.Height + dh;
+                        tracksHeight = Math.Clamp(want, lo, hi);
+                        extraH = Math.Max(0, extraH + want - tracksHeight);
+                    }
                     else extraH = Math.Max(0, extraH + dh);
                     ApplyStretch();
                     if (tracksOpen) SizeTracks();
@@ -1788,7 +1839,7 @@ sealed class MainForm : DarkForm
             MinimumSize = Size.Empty;
             base.FitToContent();
             // With the track box open, it can also be dragged down to its smallest
-            var slack = tracksOpen ? Math.Max(0, scroller.Height - D(60)) : 0;
+            var slack = tracksOpen ? Math.Max(0, scroller.Height - TrackBoxRange().Min) : 0;
             if (baseW > 0) MinimumSize = new Size(Width - extraW, Height - extraH - slack);
         }
         finally { fitting = false; }
