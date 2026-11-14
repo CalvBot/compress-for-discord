@@ -916,7 +916,8 @@ sealed class MainForm : DarkForm
         // Showing a track can move it in the list, so put the first four back in order every time
         var fixedOrder = new Control[] { keyLane, posLane, scaleLane, masterLane };
         for (var i = 0; i < fixedOrder.Length; i++) scroller.Content.Controls.SetChildIndex(fixedOrder[i], i);
-        foreach (var (_, lane) in trackUi) lane.Visible = open;
+        // A single audio track is the same sound as the master lane, so only show tracks when there are several
+        foreach (var (_, lane) in trackUi) lane.Visible = open && trackUi.Count > 1;
         masterLane.Visible = trackUi.Count > 0;
         SizeTracks();
         ShowCrop();
