@@ -867,6 +867,8 @@ sealed class VolumeLane : Control
 /// <summary>
 /// The video preview. With a box set, it's drawn over the frame (everything outside dimmed) and can be moved by
 /// dragging inside it and resized by its corners. The box may hang off the picture: that part comes out black.
+/// Moving: Ctrl snaps to the picture's edges, Shift keeps to one direction. Resizing: Shift works from the
+/// centre instead of the opposite corner, Alt lets the shape change.
 /// </summary>
 sealed class CropView : Control
 {
@@ -953,25 +955,47 @@ sealed class CropView : Control
             return;
         }
         var at = ToFrame(e.Location);
+        var pic = Picture;
+        bool shift = ModifierKeys.HasFlag(Keys.Shift), ctrl = ModifierKeys.HasFlag(Keys.Control), alt = ModifierKeys.HasFlag(Keys.Alt);
         if (grab == Grab.Move)
         {
+            float dx = at.X - grabAt.X, dy = at.Y - grabAt.Y;
+            // Shift: only along whichever way it's been dragged further, so it stays lined up with where it was
+            if (shift) { if (Math.Abs(dx * pic.Width) >= Math.Abs(dy * pic.Height)) dy = 0; else dx = 0; }
             // It can leave the picture, as far as its centre reaching the edge
-            var x = Math.Clamp(grabBox.X + at.X - grabAt.X, -grabBox.Width / 2, 1 - grabBox.Width / 2);
-            var y = Math.Clamp(grabBox.Y + at.Y - grabAt.Y, -grabBox.Height / 2, 1 - grabBox.Height / 2);
+            var x = Math.Clamp(grabBox.X + dx, -grabBox.Width / 2, 1 - grabBox.Width / 2);
+            var y = Math.Clamp(grabBox.Y + dy, -grabBox.Height / 2, 1 - grabBox.Height / 2);
+            if (ctrl)
+            {
+                // Ctrl: stick to the picture's edges when close
+                float nearX = Px(12) / pic.Width, nearY = Px(12) / pic.Height;
+                if (Math.Abs(x) < nearX) x = 0; else if (Math.Abs(x + grabBox.Width - 1) < nearX) x = 1 - grabBox.Width;
+                if (Math.Abs(y) < nearY) y = 0; else if (Math.Abs(y + grabBox.Height - 1) < nearY) y = 1 - grabBox.Height;
+            }
             BoxChanged?.Invoke(new RectangleF(x, y, grabBox.Width, grabBox.Height));
             return;
         }
-        // Resizing: the opposite corner stays put
+        // Resizing. Alt lets the shape change; otherwise it keeps its shape.
+        var locked = BoxAspect > 0 && !alt;
+        float maxW = locked ? MaxBoxWidth : 1, maxH = locked ? (float)(MaxBoxWidth / BoxAspect) : 1;
         bool fromLeft = grab is Grab.TopLeft or Grab.BottomLeft, fromTop = grab is Grab.TopLeft or Grab.TopRight;
-        float ax = fromLeft ? grabBox.Right : grabBox.Left, ay = fromTop ? grabBox.Bottom : grabBox.Top;
-        float maxH = BoxAspect > 0 ? (float)(MaxBoxWidth / BoxAspect) : 1;
-        float w = Math.Clamp(fromLeft ? ax - at.X : at.X - ax, 0.05f, MaxBoxWidth), h = Math.Clamp(fromTop ? ay - at.Y : at.Y - ay, 0.05f, maxH);
-        if (BoxAspect > 0)
+        float w, h;
+        if (shift)
         {
-            // Keep the shape: follow whichever direction was dragged further
-            w = (float)Math.Min(Math.Max(w, h * BoxAspect), MaxBoxWidth);
-            h = (float)(w / BoxAspect);
+            // Shift: grow and shrink around the centre
+            float cx = grabBox.X + grabBox.Width / 2, cy = grabBox.Y + grabBox.Height / 2;
+            w = Math.Clamp(2 * Math.Abs(at.X - cx), 0.05f, maxW);
+            h = Math.Clamp(2 * Math.Abs(at.Y - cy), 0.05f, maxH);
+            if (locked) { w = (float)Math.Min(Math.Max(w, h * BoxAspect), maxW); h = (float)(w / BoxAspect); }
+            BoxChanged?.Invoke(new RectangleF(cx - w / 2, cy - h / 2, w, h));
+            return;
         }
+        // Otherwise the opposite corner stays put
+        float ax = fromLeft ? grabBox.Right : grabBox.Left, ay = fromTop ? grabBox.Bottom : grabBox.Top;
+        w = Math.Clamp(fromLeft ? ax - at.X : at.X - ax, 0.05f, maxW);
+        h = Math.Clamp(fromTop ? ay - at.Y : at.Y - ay, 0.05f, maxH);
+        // Keeping the shape: follow whichever direction was dragged further
+        if (locked) { w = (float)Math.Min(Math.Max(w, h * BoxAspect), maxW); h = (float)(w / BoxAspect); }
         BoxChanged?.Invoke(new RectangleF(fromLeft ? ax - w : ax, fromTop ? ay - h : ay, w, h));
     }
 

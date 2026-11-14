@@ -18,7 +18,7 @@ sealed class MainForm : DarkForm
     int? scalePct;
     int? frameRate;
 
-    /// <summary>Shape of the picture: src (the video's own), 16:9, 1:1, 9:16 or free</summary>
+    /// <summary>Shape of the picture: src (the video's own), 16:9, 1:1, 9:16, or free once it's been reshaped by hand (Alt + drag a corner)</summary>
     string cropMode = "src";
     /// <summary>The preview shows the result, not the editing view</summary>
     bool showResult;
@@ -42,6 +42,8 @@ sealed class MainForm : DarkForm
     readonly CancellationTokenSource lifetime = new();
     /// <summary>A preview frame is being fetched; the next one wanted goes straight after it</summary>
     bool frameBusy;
+    /// <summary>When a click on the timeline last stopped playback, so the same click can't also count towards a double-click that starts it again</summary>
+    long stoppedByClick;
     double pendingFrame;
     /// <summary>Where the current playback stops when it isn't the end of the trim (double-click play)</summary>
     double? playTo;
@@ -66,7 +68,7 @@ sealed class MainForm : DarkForm
     /// <summary>Waits for zooming to settle before remaking the thumbnails</summary>
     readonly System.Windows.Forms.Timer thumbTimer = new() { Interval = 350 };
     readonly Timeline timeline;
-    readonly FlowLayoutPanel sizeChips, resChips, cropChips, fpsChips, buttons;
+    readonly FlowLayoutPanel sizeChips, resChips, fpsChips, buttons;
     readonly VolumeLane masterLane;
     readonly TextBox customMb, fpsBox, timeBox;
     readonly RoundBox fpsField;
@@ -98,7 +100,7 @@ sealed class MainForm : DarkForm
         root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, Location = new Point(18, 14), Margin = Padding.Empty };
 
         // Top row: the file's details on the left; update link, Settings and Help on the right
-        titleRow = new Panel { Size = new Size(ContentWidth, 30), Margin = new Padding(0, 0, 0, 8) };
+        titleRow = new Panel { Size = new Size(ContentWidth, 36), Margin = new Padding(0, 0, 0, 6) };
         details = $" · {Planner.FormatBytes(fileSize)}";
         subtitle = new Label { Text = Path.GetFileName(file) + details, Dock = DockStyle.Fill, UseMnemonic = false, ForeColor = Theme.Header, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
         var links = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Dock = DockStyle.Right, Padding = new Padding(8, 0, 0, 0) };
@@ -123,7 +125,7 @@ sealed class MainForm : DarkForm
         // Right-click: reset the picture, or change its shape
         cropMenu.Add("Reset crop", "", ResetCrop);
         cropMenu.Items.Add(new ToolStripSeparator());
-        var shapes = new[] { ("Original", "src"), ("16:9", "16:9"), ("1:1", "1:1"), ("9:16", "9:16"), ("Free", "free") }
+        var shapes = new[] { ("Original", "src"), ("16:9", "16:9"), ("1:1", "1:1"), ("9:16", "9:16") }
             .Select(shape => (Item: cropMenu.Add(shape.Item1, "", () => SetCrop(shape.Item2)), Mode: shape.Item2)).ToList();
         cropMenu.Opening += (_, _) => { foreach (var (item, mode) in shapes) item.ShortcutKeyDisplayString = mode == cropMode ? "✓" : null; };
         preview.MenuRequested += at => { if (probe != null && encodeCts == null) cropMenu.Show(preview, at); };
@@ -141,6 +143,12 @@ sealed class MainForm : DarkForm
         Wire(keyLane, () => [pos, scale]);
         Wire(posLane, () => [pos]);
         Wire(scaleLane, () => [scale]);
+
+        // Clicking or dragging on the strip: stop if it's playing, and show that frame
+        timeline.Seeked += t => { if (playCts != null) stoppedByClick = Environment.TickCount64; StopPlayback(); RequestFrame(t); };
+        // Double-click plays from that spot to the end of the video, so you can watch what's outside the trim.
+        // Not when the first click of the two was what stopped it playing: then it just stays stopped there.
+        timeline.PlayRequested += t => { if (probe != null && encodeCts == null && Environment.TickCount64 - stoppedByClick > 800) { StopPlayback(); _ = PlayFrom(t, probe.Duration); } };
 
         var timelineMenu = new DarkMenu();
         timelineMenu.Add("Clear in and out", "", () => { timeline.Start = 0; timeline.End = timeline.Duration; timeline.Invalidate(); UpdateTimeLabel(); UpdateSummary(); });
@@ -225,10 +233,6 @@ sealed class MainForm : DarkForm
 
         resChips = ChipRow();
         fpsChips = ChipRow();
-        cropChips = ChipRow();
-        foreach (var (label, value) in new[] { ("Original", "src"), ("16:9", "16:9"), ("1:1", "1:1"), ("9:16", "9:16"), ("Free", "free") })
-            cropChips.Controls.Add(Chip(label, value, cropChips, v => SetCrop((string)v!)));
-        SelectChip(cropChips, "src");
         // Under the timeline: position and scale, the result audio, then every audio track, all as wide as the
         // timeline so times line up. Closed, only the result audio shows. Open, it's a box that scrolls, with a
         // grip under it to make it taller.
@@ -249,8 +253,7 @@ sealed class MainForm : DarkForm
 
         options.Controls.Add(OptLabel("Size"), 0, 0); options.Controls.Add(sizeChips, 1, 0);
         options.Controls.Add(OptLabel("Scale"), 0, 1); options.Controls.Add(resChips, 1, 1);
-        options.Controls.Add(OptLabel("Crop"), 0, 2); options.Controls.Add(cropChips, 1, 2);
-        options.Controls.Add(OptLabel("Frame rate"), 0, 3); options.Controls.Add(fpsChips, 1, 3);
+        options.Controls.Add(OptLabel("Frame rate"), 0, 2); options.Controls.Add(fpsChips, 1, 2);
 
         bar = new Bar { Size = new Size(ContentWidth, 8), Visible = false, Margin = new Padding(0, 0, 0, 8) };
 
@@ -878,7 +881,6 @@ sealed class MainForm : DarkForm
     void SetCrop(string mode)
     {
         cropMode = mode;
-        SelectChip(cropChips, mode);
         if (probe != null)
         {
             cropAspect = mode switch { "16:9" => 16 / 9.0, "1:1" => 1, "9:16" => 9 / 16.0, "free" when cropAspect > 0 => cropAspect, _ => SrcAspect };
@@ -898,8 +900,9 @@ sealed class MainForm : DarkForm
     void ShowCrop()
     {
         if (!Cropping) return;
-        preview.BoxAspect = cropMode == "free" ? 0 : cropAspect / SrcAspect;
-        preview.MaxBoxWidth = (float)(cropMode == "free" ? 1 : MaxCropW);
+        // The box keeps its shape while it's resized, unless Alt is held
+        preview.BoxAspect = cropAspect / SrcAspect;
+        preview.MaxBoxWidth = (float)MaxCropW;
         // The box stays out of the way until it's wanted: Advanced is open, or the picture has been reframed
         preview.Box = tracksOpen || Reframed ? CropRectAt(timeline.Current) : null;
         // How far zoomed in: 0 at the widest the shape allows
@@ -927,10 +930,11 @@ sealed class MainForm : DarkForm
     void EditCrop(RectangleF r)
     {
         if (!Cropping) return;
-        if (cropMode == "free")
+        // Reshaped (Alt + drag): that's now the shape at every moment, or the output would change size mid-video
+        var shape = r.Width / r.Height * SrcAspect;
+        if (Math.Abs(shape - cropAspect) > cropAspect * 0.002)
         {
-            // Any shape goes, but it's the shape at every moment, or the output would change size mid-video
-            cropAspect = r.Width / r.Height * SrcAspect;
+            (cropAspect, cropMode) = (shape, "free");
             ClampCropWidths();
         }
         var t = timeline.Current;
@@ -1215,7 +1219,7 @@ sealed class MainForm : DarkForm
         playBtn.Enabled = !busy;
         customMb.Enabled = fpsBox.Enabled = timeBox.Enabled = !busy;
         foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane)) lane.Enabled = !busy;
-        foreach (var p in new[] { sizeChips, resChips, cropChips, fpsChips }.SelectMany(g => g.Controls.OfType<Pill>())) p.Enabled = !busy;
+        foreach (var p in new[] { sizeChips, resChips, fpsChips }.SelectMany(g => g.Controls.OfType<Pill>())) p.Enabled = !busy;
         preview.Enabled = keyLane.Enabled = posLane.Enabled = scaleLane.Enabled = !busy;
         // The button keeps its size and says what's happening; hovering turns it into Cancel
         goBtn.AltText = busy ? "Compressing…" : null;
