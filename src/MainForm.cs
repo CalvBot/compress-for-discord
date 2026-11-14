@@ -107,6 +107,7 @@ sealed class MainForm : DarkForm
     {
         this.file = file;
         restore = project;
+        if (Ff.Locate(cfg.FfmpegPath) == null) earlyProbe = Task.Run(() => Ff.Probe(file));
         fileSize = new FileInfo(file).Length;
         targetMb = cfg.TargetMb;
 
@@ -386,7 +387,7 @@ sealed class MainForm : DarkForm
 
     // ---------- startup ----------
 
-    // Appears once the video's been read and its first frame is in, rather than empty and then filling in.
+    // Appears once the video's been read and the window laid out for it, rather than empty and then filling in.
     // A second at most, so a slow read still shows the window (saying it's reading).
     protected override bool RevealWhenShown => false;
 
@@ -423,6 +424,10 @@ sealed class MainForm : DarkForm
     }
 
     bool loading, reloadWanted;
+    /// <summary>Playing has been asked for and its first frame isn't in yet (the waveforms hold off meanwhile)</summary>
+    volatile bool playStarting;
+    /// <summary>The video's read as soon as the window starts being made, rather than once it's shown</summary>
+    Task<ProbeResult>? earlyProbe;
     /// <summary>A size was typed into the custom box since it was last left</summary>
     bool typedSize;
 
@@ -438,7 +443,9 @@ sealed class MainForm : DarkForm
         goBtn.Visible = moreBtn.Visible = !missing;
         if (err != null) { ShowStatus(err, Theme.Danger); Reveal(); return; }
         ShowStatus("Reading video…", Theme.Muted);
-        try { probe = await Ff.Probe(file); }
+        var early = earlyProbe;
+        earlyProbe = null;
+        try { probe = await (early ?? Ff.Probe(file)); }
         catch (Exception ex) { AppLog.Error($"Couldn't read {file}", ex); ShowStatus(ex.Message, Theme.Danger); goBtn.Enabled = false; Reveal(); return; }
         if (IsDisposed) return;
         AppLog.Info($"Loaded {file}: {probe.Width}x{probe.Height} {probe.Fps:0.##} fps, {probe.Duration:0.00} s, {probe.AudioTracks.Count} audio track(s)");
@@ -470,6 +477,8 @@ sealed class MainForm : DarkForm
         Batch(() => SetUp(probe, fps));
         baseline = StateKey();
         RequestFrame(timeline.Current);
+        // Laid out in full now: show it, with the picture to follow
+        Reveal();
         _ = ResolveAutoEncoder();
         _ = LoadThumbnails();
 #if DEBUG
@@ -1178,7 +1187,6 @@ sealed class MainForm : DarkForm
         var old = preview.Image;
         preview.Image = img;
         old?.Dispose();
-        Reveal();
     }
 
     /// <summary>Windows' decoder with the video kept open (opened in the background once the video is read); null until then or if it can't</summary>
@@ -1242,10 +1250,12 @@ sealed class MainForm : DarkForm
         frameCts?.Cancel();
         playBtn.Icon = PillIcon.Pause;
         AppLog.Info($"Playing from {from:0.00} s at {PlaybackFps:0.##} fps{(showResult ? " (preview)" : "")}");
+        playStarting = true;
         try
         {
             await Player.Play(file, from, to ?? timeline.End, Mix(), Master, DecodeSize(), probe!.Width, probe.Height, PlaybackFps, (bmp, t) =>
             {
+                playStarting = false;
                 if (cts.IsCancellationRequested || IsDisposed) { bmp.Dispose(); return; }
                 // Playing to the out point, and it was moved in while playing: stop there now
                 if (to == null && t >= timeline.End) { bmp.Dispose(); StopPlayback(); return; }
@@ -1256,6 +1266,7 @@ sealed class MainForm : DarkForm
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { AppLog.Error("Playback failed", ex); if (!IsDisposed) ShowStatus(ex.Message, Theme.Danger); }
+        playStarting = false;
         if (playCts == cts) StopPlayback();
         cts.Dispose();
     }
@@ -1758,7 +1769,8 @@ sealed class MainForm : DarkForm
         var path = file;
         // All tracks from one read of the file. Held back while compressing, so the encode has the disk to itself,
         // and while scrubbing: reading a huge recording alongside the preview cut the frames shown from ~29 a second to ~8.
-        bool Paused() => encodeCts != null || frameBusy || Environment.TickCount64 - lastFrameRequest < 400;
+        // and while playing starts: decoding its first frame alongside took a 5-track recording from ~0.16 s to ~0.5 s
+        bool Paused() => encodeCts != null || frameBusy || playStarting || Environment.TickCount64 - lastFrameRequest < 400;
         _ = Task.Run(async () =>
         {
             try { await Waveform.LoadAll(path, tracks, () => (viewStart, viewEnd), Paused, lifetime.Token); }
