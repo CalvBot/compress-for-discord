@@ -105,13 +105,13 @@ sealed class Waveform
         measured = false;
         for (var c = c0; c <= c1 && !measured; c++) measured = known[c];
         rough = false;
-        if (measured || Volatile.Read(ref sketchedCount) == 0) return Decode(peak);
+        if (measured || Volatile.Read(ref sketchedCount) == 0 || SketchMax(t0, t1) is not { } guess) return Decode(peak);
         measured = rough = true;
-        return Decode(SketchMax(t0, t1));
+        return Decode(guess);
     }
 
-    /// <summary>The loudest sketched spot from t0 to t1, or the nearest one if none is in there yet</summary>
-    byte SketchMax(double t0, double t1)
+    /// <summary>The loudest sketched spot from t0 to t1, or the nearest one if none is in there yet; null if none is near</summary>
+    byte? SketchMax(double t0, double t1)
     {
         var n = sketch.Length;
         var per = n / Duration;
@@ -137,7 +137,7 @@ sealed class Waveform
             if (l) return sketch[left];
             if (r) return sketch[right];
         }
-        return 0;
+        return null;
     }
 
     static float Decode(byte b) => b / 255f * (b / 255f);

@@ -1698,7 +1698,6 @@ sealed class MainForm : DarkForm
         });
     }
 
-    /// <summary>Zooms the timeline in or out, keeping the moment under the mouse where it is</summary>
     /// <summary>
     /// Alt + wheel: zooms around the playhead (keeping it where it is on screen, or bringing it to the middle if it's
     /// off screen). With Shift too, around the mouse (at time cursor) instead.

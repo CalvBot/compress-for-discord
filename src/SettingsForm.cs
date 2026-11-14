@@ -388,7 +388,7 @@ sealed class SettingsForm : DarkForm
         static string Key(Item item) => item.Path + "|" + item.Project.File;
         Bitmap[]? Thumbs(Item item) => thumbs.GetValueOrDefault(Key(item));
 
-        /// <summary>Makes the missing thumbnails, the shown page first</summary>
+        /// <summary>Makes the shown page's missing thumbnails (not every project's: keeping 50 would be ~50 MB and a minute of decoding)</summary>
         async void FillThumbs()
         {
             if (filling) return;
@@ -397,14 +397,19 @@ sealed class SettingsForm : DarkForm
             {
                 while (!life.IsCancellationRequested)
                 {
-                    var next = Items.Skip(page * PerPage).Take(PerPage).Concat(Items).FirstOrDefault(i => !i.Missing && !thumbs.ContainsKey(Key(i)));
+                    var next = Items.Skip(page * PerPage).Take(PerPage).FirstOrDefault(i => !i.Missing && !thumbs.ContainsKey(Key(i)));
                     if (next == null) break;
                     thumbs[Key(next)] = null;
                     var frames = await Task.Run(() => ProjectThumbs.LoadOrMake(next.Path, next.Project, life.Token));
                     if (life.IsCancellationRequested) { foreach (var b in frames ?? []) b.Dispose(); break; }
                     thumbs[Key(next)] = frames;
                     Invalidate();
-                    if (hover >= 0) ShowPeek();
+                    if (hover >= 0 && hover < Items.Count && Items[hover] == next && frames != null)
+                    {
+                        // The preview shows the path now
+                        tips.SetToolTip(this, null);
+                        ShowPeek();
+                    }
                 }
             }
             catch (Exception ex) { AppLog.Info($"Project thumbnails stopped: {ex.Message}"); }
@@ -640,7 +645,7 @@ sealed class SettingsForm : DarkForm
         /// <summary>Shows a row as hovered, at this thumbnail (test screenshots)</summary>
         public void Hover(int i, int frame = -1) { (hover, hoverFrame) = (i, frame); Invalidate(); ShowPeek(); }
         /// <summary>Whether every project on the page has its thumbnails (or can't have any)</summary>
-        public bool ThumbsDone => !filling && Items.All(i => i.Missing || thumbs.ContainsKey(Key(i)));
+        public bool ThumbsDone => !filling && Items.Skip(page * PerPage).Take(PerPage).All(i => i.Missing || thumbs.ContainsKey(Key(i)));
         /// <summary>Shows this page (test screenshots)</summary>
         public void ShowPage(int p) => GoTo(p);
 
