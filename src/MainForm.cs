@@ -678,7 +678,8 @@ sealed class MainForm : DarkForm
                     ShowCrop();
                     UpdateSummary();
                     break;
-                case "size": targetMb = double.Parse(value); UpdateSummary(); break;
+                // Not SetTarget: a test mustn't change the size remembered in the real settings
+                case "size": targetMb = double.Parse(value); SelectChip(sizeChips, targetMb); UpdateSummary(); break;
                 case "trim": timeline.SetEnd(double.Parse(value)); break;
                 case "keys":
                     foreach (var (_, lane) in trackUi.Take(3))
@@ -1637,7 +1638,9 @@ sealed class MainForm : DarkForm
         {
             var fps = plan.Fps ?? (int)Math.Round(probe.Fps);
             var (color, hint) = Quality(plan, fps);
-            summary.Text = $"~{Planner.FormatBytes(plan.EstimateBytes)} · {plan.OutputShortSide}p{fps} · {Planner.FormatRate(plan.VideoKbps + plan.AudioKbps)}{hint}";
+            // The video's own rate, so turning the audio off shows the space it hands to the picture
+            var audio = plan.AudioKbps > 0 ? $" + {plan.AudioKbps}k audio" : " · no audio";
+            summary.Text = $"~{Planner.FormatBytes(plan.EstimateBytes)} · {plan.OutputShortSide}p{fps} · {Planner.FormatRate(plan.VideoKbps)} video{audio}{hint}";
             summary.ForeColor = color;
         }
         else
