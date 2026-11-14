@@ -18,7 +18,7 @@ sealed class HelpForm : DarkForm
         ("Shift + drag a tab", "Keep the playhead, snap to it"),
         ("Ctrl + click a track", "Add a key point"),
         ("Ctrl / Shift + drag picture", "Snap to edges / one direction"),
-        ("Shift / Alt + drag corner", "From centre / change shape"),
+        ("Ctrl / Shift / Alt + drag corner", "Snap / from centre / reshape"),
         ("Enter", "Compress & copy"),
         ("Ctrl+S", "Compress & save…"),
         ("Ctrl+O", "Open another video"),

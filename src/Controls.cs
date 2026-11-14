@@ -885,7 +885,7 @@ sealed class VolumeLane : Control
 /// The video preview. With a box set, it's drawn over the frame (everything outside dimmed) and can be moved by
 /// dragging inside it and resized by its corners. The box may hang off the picture: that part comes out black.
 /// Moving: Ctrl snaps to the picture's edges, Shift keeps to one direction. Resizing: Shift works from the
-/// centre instead of the opposite corner, Alt lets the shape change.
+/// centre instead of the opposite corner, Alt lets the shape change, Ctrl snaps the dragged edges to the picture's.
 /// </summary>
 sealed class CropView : Control
 {
@@ -995,6 +995,23 @@ sealed class CropView : Control
         // Resizing. Alt lets the shape change; otherwise it keeps its shape.
         var locked = BoxAspect > 0 && !alt;
         float maxW = locked ? MaxBoxWidth : 1, maxH = locked ? (float)(MaxBoxWidth / BoxAspect) : 1;
+        // Ctrl: the edges being dragged stick to the picture's edges when close
+        bool snapX = false, snapY = false;
+        if (ctrl)
+        {
+            float nearX = Px(12) / pic.Width, nearY = Px(12) / pic.Height;
+            if (Math.Abs(at.X) < nearX) (at.X, snapX) = (0, true); else if (Math.Abs(at.X - 1) < nearX) (at.X, snapX) = (1, true);
+            if (Math.Abs(at.Y) < nearY) (at.Y, snapY) = (0, true); else if (Math.Abs(at.Y - 1) < nearY) (at.Y, snapY) = (1, true);
+        }
+        // Keeping the shape: follow whichever direction was dragged further, unless one edge has snapped, then that one decides
+        void KeepShape(ref float w, ref float h)
+        {
+            if (!locked) return;
+            if (snapY && !snapX) w = (float)(h * BoxAspect);
+            else if (!snapX || snapY) w = (float)Math.Max(w, h * BoxAspect);
+            w = Math.Min(w, maxW);
+            h = (float)(w / BoxAspect);
+        }
         bool fromLeft = grab is Grab.TopLeft or Grab.BottomLeft, fromTop = grab is Grab.TopLeft or Grab.TopRight;
         float w, h;
         if (shift)
@@ -1003,7 +1020,7 @@ sealed class CropView : Control
             float cx = grabBox.X + grabBox.Width / 2, cy = grabBox.Y + grabBox.Height / 2;
             w = Math.Clamp(2 * Math.Abs(at.X - cx), 0.05f, maxW);
             h = Math.Clamp(2 * Math.Abs(at.Y - cy), 0.05f, maxH);
-            if (locked) { w = (float)Math.Min(Math.Max(w, h * BoxAspect), maxW); h = (float)(w / BoxAspect); }
+            KeepShape(ref w, ref h);
             BoxChanged?.Invoke(new RectangleF(cx - w / 2, cy - h / 2, w, h));
             return;
         }
@@ -1011,8 +1028,7 @@ sealed class CropView : Control
         float ax = fromLeft ? grabBox.Right : grabBox.Left, ay = fromTop ? grabBox.Bottom : grabBox.Top;
         w = Math.Clamp(fromLeft ? ax - at.X : at.X - ax, 0.05f, maxW);
         h = Math.Clamp(fromTop ? ay - at.Y : at.Y - ay, 0.05f, maxH);
-        // Keeping the shape: follow whichever direction was dragged further
-        if (locked) { w = (float)Math.Min(Math.Max(w, h * BoxAspect), maxW); h = (float)(w / BoxAspect); }
+        KeepShape(ref w, ref h);
         BoxChanged?.Invoke(new RectangleF(fromLeft ? ax - w : ax, fromTop ? ay - h : ay, w, h));
     }
 
