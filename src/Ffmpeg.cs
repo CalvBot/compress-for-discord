@@ -246,16 +246,18 @@ static class Ff
 
     // ---------- frames ----------
 
-    public static async Task<Image?> Frame(string path, double time, int height, CancellationToken ct = default)
+    /// <param name="keyOnly">the keyframe at or before the time is enough (quicker: nothing after it is decoded)</param>
+    public static async Task<Image?> Frame(string path, double time, int height, CancellationToken ct = default, bool keyOnly = false)
     {
         try
         {
+            string[] seek = keyOnly ? ["-skip_frame", "nokey", "-noaccurate_seek", "-ss", F3(time)] : ["-ss", F3(time)];
             var (code, stdout, _) = await Run(Ffmpeg, [
-                "-hide_banner", "-loglevel", "error", "-ss", F3(time), "-i", path,
+                "-hide_banner", "-loglevel", "error", .. seek, "-i", path, "-an", "-sn",
                 "-frames:v", "1", "-vf", $"scale=-2:{height}", "-q:v", "4", "-f", "image2pipe", "-c:v", "mjpeg", "-"
             ], ct, 20000);
             // A seek at the very end of a short clip can land past the last frame; take an earlier one instead
-            if ((code != 0 || stdout.Length == 0) && time > 0) return await Frame(path, Math.Max(0, time - 1), height, ct);
+            if ((code != 0 || stdout.Length == 0) && time > 0) return await Frame(path, Math.Max(0, time - 1), height, ct, keyOnly);
             if (code != 0 || stdout.Length == 0) return null;
             using var ms = new MemoryStream(stdout);
             using var img = Image.FromStream(ms);

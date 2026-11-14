@@ -68,6 +68,11 @@ sealed class HelpForm : DarkForm
             }
         }
         root.Controls.Add(keys);
+        root.Controls.Add(new Label
+        {
+            Text = "Videos up to 10 hours long. On long recordings the waveforms fill in as they're measured, starting with the part on screen.",
+            AutoSize = true, MaximumSize = new Size(W, 0), ForeColor = Theme.Muted, Margin = new Padding(0, 0, 0, 12),
+        });
 
         var footer = new FlowLayoutPanel { AutoSize = true, Margin = Padding.Empty, WrapContents = false };
         footer.Controls.Add(new Label { Text = $"Version {Updater.Current}", AutoSize = true, ForeColor = Theme.Muted, Margin = new Padding(0, 0, 14, 0) });

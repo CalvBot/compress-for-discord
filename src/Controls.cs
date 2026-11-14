@@ -1191,8 +1191,6 @@ sealed class VolumeLane : KeyTrackLane
         float mid = Height / 2f, half = Height / 2f - 2;
         if (Sources.Count > 0)
         {
-            // Scaled to the loudest measured so far, so it may grow a little as the rest comes in
-            var loudest = Math.Max(0.02f, Sources.Max(s => s.Wave.Loudest));
             using var inside = new Pen(Active ? Theme.Brand : Theme.Secondary);
             using var outside = new Pen(Color.FromArgb(90, Active ? Theme.Brand : Theme.Secondary));
             // Not measured yet: a faint stub on the middle line until it pops in
@@ -1215,8 +1213,10 @@ sealed class VolumeLane : KeyTrackLane
                     g.DrawLine(waiting, G + x + 0.5f, mid - Px(2), G + x + 0.5f, mid + Px(2));
                     continue;
                 }
-                // Half height at 100% so there's room to show a boost
-                var h = (float)Math.Min(1, peak / loudest * 0.5 * GainAt(t)) * half;
+                // A fixed scale (not scaled to the loudest), so it doesn't shift as the rest pops in and tracks compare
+                // fairly. Square root so quiet sound still shows; full scale at 100% reaches about 70%, leaving room
+                // to show a boost.
+                var h = (float)Math.Min(1, Math.Sqrt(peak * GainAt(t) / 2)) * half;
                 if (h >= 0.5f) g.DrawLine(t >= Start && t <= End ? inside : outside, G + x + 0.5f, mid - h, G + x + 0.5f, mid + h);
             }
         }

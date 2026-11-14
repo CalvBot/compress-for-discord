@@ -11,6 +11,8 @@ Right-click a video → **Compress for Discord**. Trim it, pick a size, press **
 
 If you're on Windows 11 and don't see the option, it might be under **Show more options**.
 
+Videos can be up to 10 hours long. On long recordings the audio waveforms fill in as they're measured, starting with the part on screen, and scrubbing uses the GPU through Windows Media Foundation where it can (falling back to ffmpeg).
+
 ## Building
 
 Needs the [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0).

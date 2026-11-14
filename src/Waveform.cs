@@ -71,30 +71,60 @@ sealed class Waveform
     }
 
     /// <summary>
-    /// Measures the whole track, the chunks in view first. View gives the part of the video on screen;
-    /// it's checked again after every chunk, so scrolling somewhere new is filled in next.
+    /// Measures these tracks' waveforms, the chunks in view first. One ffmpeg reads them all together, so a long
+    /// recording's file is read once rather than once per track; if that can't work (one track won't decode),
+    /// they're measured one at a time instead. View gives the part of the video on screen, and is checked again
+    /// after every chunk so scrolling somewhere new is filled in next. While Paused says so (compressing), it waits.
     /// </summary>
-    public async Task Load(string path, int track, Func<(double From, double To)> view, CancellationToken ct)
+    public static async Task LoadAll(string path, IReadOnlyList<(Waveform Wave, int Track)> tracks, Func<(double From, double To)> view,
+        Func<bool> paused, CancellationToken ct)
     {
-        var buf = new byte[PerSlice * 2 * 256];
+        if (tracks.Count == 0) return;
+        if (await Load(path, tracks, view, paused, ct) || tracks.Count == 1) return;
+        AppLog.Warn("Couldn't measure the audio tracks together; measuring them one at a time");
+        await Task.WhenAll(tracks.Select(t => Load(path, [t], view, paused, ct)));
+    }
+
+    /// <returns>false if not a single sample could be read (a lone track is then marked Failed)</returns>
+    static async Task<bool> Load(string path, IReadOnlyList<(Waveform Wave, int Track)> tracks, Func<(double From, double To)> view,
+        Func<bool> paused, CancellationToken ct)
+    {
+        // Every wave here is measured over the same chunks, so the first one says what's still to do
+        var lead = tracks[0].Wave;
+        var waves = tracks.Select(t => t.Wave).ToArray();
+        var count = waves.Length;
+        var frame = 2 * count; // one sample of every track
+        var buf = new byte[frame * PerSlice * 64];
+        var peak = new int[count];
         var clock = Stopwatch.StartNew();
         var runs = 0;
+        var names = string.Join(", ", tracks.Select(t => t.Track + 1));
+        // Each track to mono at 4 kHz; several are padded (so one ending early doesn't end the others) and merged,
+        // one track per channel
+        var graph = string.Join(";", tracks.Select((t, i) =>
+            $"[0:a:{t.Track}]aresample={SampleRate},aformat=sample_fmts=s16:channel_layouts=mono{(count > 1 ? ",apad" : "")}[w{i}]"));
+        if (count > 1) graph += ";" + string.Concat(Enumerable.Range(0, count).Select(i => $"[w{i}]")) + $"amerge=inputs={count}[w]";
+        var output = count > 1 ? "[w]" : "[w0]";
+
+        async Task WhilePaused() { while (paused()) await Task.Delay(250, ct).ConfigureAwait(false); }
+
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            if (Next(view()) is not { } first)
+            await WhilePaused();
+            if (lead.Next(view()) is not { } first)
             {
-                AppLog.Info($"Waveform of audio track {track + 1} measured in {clock.Elapsed.TotalSeconds:0.0}s ({runs} runs)");
-                return;
+                AppLog.Info($"Waveforms of audio track(s) {names} measured in {clock.Elapsed.TotalSeconds:0.0}s ({runs} runs)");
+                return true;
             }
             runs++;
             var run = 1;
-            while (run < MaxRunChunks && first + run < known.Length && !known[first + run]) run++;
+            while (run < MaxRunChunks && first + run < lead.known.Length && !lead.known[first + run]) run++;
             var start = first * ChunkSeconds;
             var psi = new ProcessStartInfo(Ff.Ffmpeg) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
             foreach (var arg in new[] { "-hide_banner", "-loglevel", "error", "-ss", start.ToString(CultureInfo.InvariantCulture), "-i", path,
-                "-map", $"0:a:{track}", "-t", (run * ChunkSeconds).ToString(CultureInfo.InvariantCulture), "-vn", "-sn",
-                "-ac", "1", "-ar", SampleRate.ToString(CultureInfo.InvariantCulture), "-f", "s16le", "-" }) psi.ArgumentList.Add(arg);
+                "-filter_complex", graph, "-map", output, "-t", (run * ChunkSeconds).ToString(CultureInfo.InvariantCulture), "-f", "s16le", "-" })
+                psi.ArgumentList.Add(arg);
 
             using var p = Process.Start(psi)!;
             var err = p.StandardError.ReadToEndAsync(CancellationToken.None);
@@ -103,8 +133,14 @@ sealed class Waveform
             long got = 0; // bytes read in this run
             var slice = first * ChunkSlices; // slice being filled
             var done = first; // next chunk of the run to finish
-            int peak = 0, inSlice = 0, leftover = 0;
+            int inSlice = 0, leftover = 0;
+            Array.Clear(peak);
             var moved = false;
+            void Store()
+            {
+                for (var c = 0; c < count; c++)
+                    if (slice < waves[c].slices) waves[c].levels[0][slice] = (ushort)Math.Min(65535, peak[c] * 2);
+            }
             try
             {
                 while (!moved)
@@ -116,41 +152,48 @@ sealed class Waveform
                     got += n;
                     n += leftover;
                     var i = 0;
-                    for (; i + 1 < n && !moved; i += 2)
+                    for (; i + frame <= n && !moved; i += frame)
                     {
-                        var v = Math.Abs((int)BitConverter.ToInt16(buf, i));
-                        if (v > peak) peak = v;
+                        for (var c = 0; c < count; c++)
+                        {
+                            var v = Math.Abs((int)BitConverter.ToInt16(buf, i + 2 * c));
+                            if (v > peak[c]) peak[c] = v;
+                        }
                         if (++inSlice < PerSlice) continue;
                         // A slice's worth of samples: store it
-                        if (slice < slices) levels[0][slice] = (ushort)Math.Min(65535, peak * 2);
-                        (peak, inSlice) = (0, 0);
+                        Store();
+                        Array.Clear(peak);
+                        inSlice = 0;
                         slice++;
                         if (slice % ChunkSlices != 0 || done >= first + run) continue;
-                        Finish(done++);
+                        foreach (var w in waves) w.Finish(done);
+                        done++;
+                        await WhilePaused();
                         // Something in view still needs measuring and this run won't reach it next: go there instead
-                        moved = done < first + run && MissingInView(view()) is { } want && want != done;
+                        moved = done < first + run && lead.MissingInView(view()) is { } want && want != done;
                     }
-                    // An odd byte waits for its other half
+                    // Part of a sample waits for the rest
                     leftover = n - i;
-                    if (leftover > 0) buf[0] = buf[i];
+                    Array.Copy(buf, i, buf, 0, leftover);
                 }
             }
             finally { try { if (!p.HasExited) p.Kill(true); } catch { } }
             ct.ThrowIfCancellationRequested();
             if (moved) continue;
             await p.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-            if (got == 0 && p.ExitCode != 0 && knownCount == 0)
+            if (got == 0 && p.ExitCode != 0 && lead.knownCount == 0)
             {
-                // Nothing at all from the first try: this track can't be read. Mark it so the window stops waiting.
-                AppLog.Warn($"Waveform of audio track {track + 1} failed: {(await err).Trim()}");
-                Failed = true;
-                Interlocked.Increment(ref version);
-                return;
+                // Nothing at all from the first try: can't be read like this
+                AppLog.Warn($"Waveform of audio track(s) {names} failed: {(await err).Trim()}");
+                if (count > 1) return false;
+                lead.Failed = true;
+                Interlocked.Increment(ref lead.version);
+                return true;
             }
-            // The stream ended: the rest of the run is past the end of this track's sound (silent), or the slice
-            // still being filled is its last
-            if (peak > 0 && slice < slices) levels[0][slice] = (ushort)Math.Min(65535, peak * 2);
-            while (done < first + run) Finish(done++);
+            // The stream ended: the rest of the run is past the end of the sound (silent), or the slice still
+            // being filled is the last
+            if (inSlice > 0) Store();
+            for (; done < first + run; done++) foreach (var w in waves) w.Finish(done);
         }
     }
 

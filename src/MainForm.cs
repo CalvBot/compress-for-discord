@@ -435,6 +435,9 @@ sealed class MainForm : DarkForm
         catch (Exception ex) { AppLog.Error($"Couldn't read {file}", ex); ShowStatus(ex.Message, Theme.Danger); goBtn.Enabled = false; return; }
         if (IsDisposed) return;
         AppLog.Info($"Loaded {file}: {probe.Width}x{probe.Height} {probe.Fps:0.##} fps, {probe.Duration:0.00} s, {probe.AudioTracks.Count} audio track(s)");
+        // Ready in the background for scrubbing; until it is (or if Windows can't read it), frames come from ffmpeg
+        var (path, srcFps) = (file, probe.Fps);
+        frameReader = Task.Run(() => FrameReader.Open(path, srcFps));
 
         var shortSide = Math.Min(probe.Width, probe.Height);
         var fps = (int)Math.Round(probe.Fps);
@@ -718,6 +721,46 @@ sealed class MainForm : DarkForm
                 // Zooms back out to the whole video this many ms later
                 case "unzoom": { var t = new System.Windows.Forms.Timer { Interval = int.Parse(value) }; t.Tick += (_, _) => { t.Dispose(); SetView(0, timeline.Duration); }; t.Start(); break; }
                 case "preview": SetPreview(true); break;
+                case "scrubbench":
+                {
+                    // scrubbench=<png to save a frame to>: times Windows' decoder against ffmpeg on this video
+                    var (path, p, png) = (file, probe!, value);
+                    _ = Task.Run(async () =>
+                    {
+                        try { await Bench(); } catch (Exception ex) { AppLog.Error("Bench", ex); }
+                    });
+                    async Task Bench()
+                    {
+                        var d = p.Duration;
+                        double[] spots = [d * 0.5 + 0.95, d * 0.2 + 0.4, d * 0.8 + 0.7, d * 0.33 + 0.99, d * 0.61 + 0.2];
+                        foreach (var gpu in new[] { true, false })
+                        {
+                        var sw = System.Diagnostics.Stopwatch.StartNew();
+                        using var r = FrameReader.Open(path, p.Fps, gpu);
+                        AppLog.Info($"Bench: open {sw.ElapsedMilliseconds} ms, {(r == null ? "unsupported" : r.Gpu ? "GPU" : "CPU")}");
+                        var size = new Size(Math.Max(2, (int)Math.Round(540.0 * p.Width / p.Height)) & ~1, 540);
+                        double Ms(Func<object?> f) { var s = System.Diagnostics.Stopwatch.StartNew(); (f() as IDisposable)?.Dispose(); return s.Elapsed.TotalMilliseconds; }
+                        if (r != null)
+                        {
+                            AppLog.Info("Bench: MF exact " + string.Join(", ", spots.Select(t => $"{Ms(() => r.Get(t, size, true, default)):0}")));
+                            AppLog.Info("Bench: MF keyframe " + string.Join(", ", spots.Select(t => $"{Ms(() => r.Get(t + 3, size, false, default)):0}")));
+                            var steps = Enumerable.Range(1, 30).Select(i => Ms(() => r.Get(d * 0.5 + 10 + i / p.Fps, size, true, default))).ToList();
+                            AppLog.Info($"Bench: MF step forward avg {steps.Skip(1).Average():0.0} ms, first {steps[0]:0}");
+                            var drag = Enumerable.Range(1, 30).Select(i => Ms(() => r.Get(d * 0.5 + 20 + i * 0.37, size, false, default))).ToList();
+                            AppLog.Info($"Bench: MF drag forward 0.37 s steps avg {drag.Average():0.0} ms");
+                            var back = Enumerable.Range(1, 20).Select(i => Ms(() => r.Get(d * 0.5 + 40 - i * 0.37, size, false, default))).ToList();
+                            AppLog.Info($"Bench: MF drag backward avg {back.Average():0.0} ms");
+                            using var shot = r.Get(d * 0.5, size, true, default);
+                            shot?.Save(png.Replace(".png", gpu ? "-gpu.png" : "-cpu.png"));
+                        }
+                        }
+                        var ff = new List<double>();
+                        foreach (var t in spots) { var s = System.Diagnostics.Stopwatch.StartNew(); (await Ff.Frame(path, t, 540))?.Dispose(); ff.Add(s.Elapsed.TotalMilliseconds); }
+                        AppLog.Info("Bench: ffmpeg exact " + string.Join(", ", ff.Select(v => $"{v:0}")));
+                        AppLog.Info("Bench: done");
+                    }
+                    break;
+                }
                 case "play": TogglePlay(); break;
                 case "goto": timeBox.Text = value; if (ParseTime(value) is { } go) timeline.Seek(go); break;
                 case "cropkeys":
@@ -896,17 +939,19 @@ sealed class MainForm : DarkForm
     /// <summary>
     /// Fetches the frame that's wanted, then (if the playhead has moved on meanwhile) the one wanted now, and so on.
     /// So dragging along the timeline shows frames as fast as they can be decoded instead of only once you stop.
+    /// While it's being dragged the nearest keyframe will do (much quicker); once it stops, the exact frame.
     /// </summary>
     async void LoadFrames()
     {
         frameBusy = true;
+        var dragging = false;
         try
         {
             while (!IsDisposed)
             {
                 var wanted = pendingFrame;
                 var cts = frameCts = new CancellationTokenSource();
-                var img = await Ff.Frame(file, wanted, DecodeSize().Height, cts.Token);
+                var img = await GetFrame(wanted, exact: !dragging, cts.Token);
                 if (IsDisposed) { img?.Dispose(); return; }
                 if (cts.IsCancellationRequested || img == null) img?.Dispose();
                 else
@@ -915,10 +960,39 @@ sealed class MainForm : DarkForm
                     preview.Image = img;
                     old?.Dispose();
                 }
-                if (pendingFrame == wanted || playCts != null) break;
+                if (playCts != null) break;
+                if (pendingFrame != wanted) dragging = true;
+                else if (dragging) dragging = false; // stopped: now the exact frame
+                else break;
             }
         }
         finally { frameBusy = false; }
+    }
+
+    /// <summary>Windows' decoder with the video kept open (opened in the background once the video is read); null until then or if it can't</summary>
+    Task<FrameReader?>? frameReader;
+
+    async Task<Image?> GetFrame(double t, bool exact, CancellationToken ct)
+    {
+        var height = DecodeSize().Height;
+        if (frameReader is { IsCompletedSuccessfully: true, Result: { } reader } && probe != null)
+        {
+            // Never larger than the source, and in its shape
+            height = Math.Max(2, Math.Min(height, probe.Height)) & ~1;
+            var size = new Size(Math.Max(2, (int)Math.Round(height * probe.Width / (double)probe.Height)) & ~1, height);
+            try
+            {
+                var bmp = await Task.Run(() => reader.Get(t, size, exact, ct));
+                if (bmp != null || ct.IsCancellationRequested) return bmp;
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warn($"Windows' decoder failed at {t:0.00} s, using ffmpeg for the preview: {ex.Message}");
+                frameReader = null;
+                _ = Task.Run(reader.Dispose);
+            }
+        }
+        return await Ff.Frame(file, t, height, ct, keyOnly: !exact);
     }
 
     // ---------- playback ----------
@@ -1423,19 +1497,25 @@ sealed class MainForm : DarkForm
     /// </summary>
     void LoadPeaks()
     {
+#if DEBUG
+        // Timing tests that mustn't share the disk with the waveforms
+        if (Environment.GetEnvironmentVariable("CFD_TEST")?.Contains("nowaves") == true) return;
+#endif
+        var tracks = new List<(Waveform, int)>();
         foreach (var (track, lane) in trackUi)
         {
             var wave = new Waveform(timeline.Duration);
             lane.Sources = [(wave, null)];
-            var path = file;
-            // One track that can't be decoded mustn't cost the others their waveforms
-            _ = Task.Run(async () =>
-            {
-                try { await wave.Load(path, track.Index, () => (viewStart, viewEnd), lifetime.Token); }
-                catch (OperationCanceledException) { }
-                catch (Exception ex) { AppLog.Error($"Waveform of audio track {track.Index + 1}", ex); }
-            });
+            tracks.Add((wave, track.Index));
         }
+        var path = file;
+        // All tracks from one read of the file; held back while compressing so the encode has the disk to itself
+        _ = Task.Run(async () =>
+        {
+            try { await Waveform.LoadAll(path, tracks, () => (viewStart, viewEnd), () => encodeCts != null, lifetime.Token); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { AppLog.Error("Waveforms", ex); }
+        });
         UpdateMasterPeaks();
         if (trackUi.Count == 0) return;
         var seen = -1;
@@ -2058,5 +2138,6 @@ sealed class MainForm : DarkForm
         timeline.Thumbs = [];
         foreach (var img in thumbCache.Values) img.Dispose();
         thumbCache.Clear();
+        if (frameReader is { } open) _ = open.ContinueWith(t => { if (t.IsCompletedSuccessfully) t.Result?.Dispose(); }, TaskScheduler.Default);
     }
 }
