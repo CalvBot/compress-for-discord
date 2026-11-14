@@ -155,6 +155,11 @@ sealed class SettingsForm : DarkForm
             : found ? (custom ? "Using this folder." : "Found automatically.", Theme.Muted)
             : ("Not found. Download it, or paste its folder above.", Theme.Danger);
         openBtn.Enabled = found;
+        // Offer the download only when it's wanted: nothing found yet, or to refresh the copy this app downloaded.
+        // An ffmpeg from somewhere else is the user's own to keep up to date.
+        var ours = found && Ff.Ffmpeg.StartsWith(Paths.Ffmpeg, StringComparison.OrdinalIgnoreCase);
+        downloadLink.Visible = !found || ours;
+        downloadLink.Text = ours ? "Update" : "Download ffmpeg";
         if (found) FfmpegChanged?.Invoke();
     }
 
