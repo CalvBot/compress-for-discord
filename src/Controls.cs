@@ -146,12 +146,12 @@ sealed class DarkMenu : ContextMenuStrip
         ForeColor = Theme.Text;
         ShowImageMargin = false;
         Font = new Font("Segoe UI", 10f);
-        Padding = new Padding(4);
+        Padding = new Padding(6);
     }
 
     public ToolStripMenuItem Add(string text, string keys, Action onClick)
     {
-        var item = new ToolStripMenuItem(text) { ShortcutKeyDisplayString = keys, ForeColor = Theme.Text, Padding = new Padding(4, 6, 4, 6) };
+        var item = new ToolStripMenuItem(text) { ShortcutKeyDisplayString = keys == "" ? null : keys, ForeColor = Theme.Text, Padding = new Padding(10, 8, 10, 8) };
         item.Click += (_, _) => onClick();
         Items.Add(item);
         return item;
@@ -194,7 +194,10 @@ sealed class Bar : Control
     }
 }
 
-/// <summary>Thumbnail strip with draggable start/end handles, a draggable selection and a playhead. Keys live in MainForm.</summary>
+/// <summary>
+/// Thumbnail strip with a playhead. Dragging on the strip scrubs. The start and end are moved with the tabs
+/// above it, and the bar between the tabs moves the whole selection. Keys live in MainForm.
+/// </summary>
 sealed class Timeline : Control
 {
     const double MinClip = 0.1;
@@ -217,7 +220,10 @@ sealed class Timeline : Control
         TabStop = true;
     }
 
-    int HandleW => (int)Math.Round(12 * DeviceDpi / 96f);
+    int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
+    /// <summary>Height of the row of tabs above the thumbnails</summary>
+    int TabH => Px(14);
+    int TabW => Px(16);
     float X(double t) => (float)(t / Duration * Width);
     double T(int x) => Math.Clamp(x / (double)Math.Max(1, Width) * Duration, 0, Duration);
 
@@ -255,13 +261,16 @@ sealed class Timeline : Control
     public void SetStart(double t) => SetRange(Math.Min(Math.Clamp(t, 0, Duration), End - MinClip), End);
     public void SetEnd(double t) => SetRange(Start, Math.Max(Math.Clamp(t, 0, Duration), Start + MinClip));
 
-    DragKind HitTest(int x)
+    DragKind HitTest(Point p)
     {
-        float s = X(Start), e = X(End), hw = HandleW;
-        if (x >= s - 4 && x <= s + hw + 2) return DragKind.Start;
-        if (x >= e - hw - 2 && x <= e + 4) return DragKind.End;
-        if (x > s && x < e) return DragKind.Range;
-        return DragKind.Seek;
+        if (p.Y >= TabH + 2) return DragKind.Seek;
+        float s = X(Start), e = X(End);
+        bool onStart = p.X >= s - 4 && p.X <= s + TabW + 4, onEnd = p.X >= e - TabW - 4 && p.X <= e + 4;
+        // A very short selection puts the tabs on top of each other: take the nearer edge
+        if (onStart && onEnd) return Math.Abs(p.X - s) <= Math.Abs(p.X - e) ? DragKind.Start : DragKind.End;
+        if (onStart) return DragKind.Start;
+        if (onEnd) return DragKind.End;
+        return p.X > s && p.X < e ? DragKind.Range : DragKind.None;
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -270,7 +279,7 @@ sealed class Timeline : Control
         if (!Enabled || e.Button != MouseButtons.Left) return;
         Focus();
         var t = T(e.X);
-        drag = HitTest(e.X);
+        drag = HitTest(e.Location);
         if (drag == DragKind.Range) { grabOffset = t - Start; length = End - Start; }
         if (drag == DragKind.Seek) Seek(t);
     }
@@ -280,7 +289,7 @@ sealed class Timeline : Control
         base.OnMouseMove(e);
         if (drag == DragKind.None)
         {
-            Cursor = HitTest(e.X) switch { DragKind.Start or DragKind.End => Cursors.SizeWE, DragKind.Range => Cursors.SizeAll, _ => Cursors.Hand };
+            Cursor = HitTest(e.Location) switch { DragKind.Start or DragKind.End => Cursors.SizeWE, DragKind.Range => Cursors.SizeAll, DragKind.Seek => Cursors.Hand, _ => Cursors.Default };
             return;
         }
         var t = T(e.X);
@@ -305,13 +314,15 @@ sealed class Timeline : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.Clear(Color.Black);
+        g.Clear(Parent?.BackColor ?? Theme.Bg);
+        int top = TabH, bodyH = Height - top;
+        using (var black = new SolidBrush(Color.Black)) g.FillRectangle(black, 0, top, Width, bodyH);
 
         // Thumbnails, cropped to fill each cell
         var n = Thumbs.Length;
         for (var i = 0; i < n; i++)
         {
-            var cell = new RectangleF(i * Width / (float)n, 0, Width / (float)n + 1, Height);
+            var cell = new RectangleF(i * Width / (float)n, top, Width / (float)n + 1, bodyH);
             if (Thumbs[i] is not { } img)
             {
                 using var b = new SolidBrush(Color.FromArgb(i % 2 == 0 ? 18 : 26, Color.White));
@@ -323,30 +334,35 @@ sealed class Timeline : Control
             g.DrawImage(img, cell, new RectangleF((img.Width - sw) / 2, (img.Height - sh) / 2, sw, sh), GraphicsUnit.Pixel);
         }
 
-        float s = X(Start), en = X(End), hw = HandleW, bw = Math.Max(2, HandleW / 4f);
+        float s = X(Start), en = X(End), edge = Math.Max(2, Px(3)), tw = TabW;
         using (var dim = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
         {
-            g.FillRectangle(dim, 0, 0, s, Height);
-            g.FillRectangle(dim, en, 0, Width - en, Height);
+            g.FillRectangle(dim, 0, top, s, bodyH);
+            g.FillRectangle(dim, en, top, Width - en, bodyH);
         }
         using (var brand = new SolidBrush(Enabled ? Theme.Brand : Theme.Secondary))
         {
-            g.FillRectangle(brand, s, 0, en - s, bw);
-            g.FillRectangle(brand, s, Height - bw, en - s, bw);
-            g.FillRectangle(brand, s, 0, hw, Height);
-            g.FillRectangle(brand, en - hw, 0, hw, Height);
+            // Frame around the selection
+            g.FillRectangle(brand, s, top, en - s, edge);
+            g.FillRectangle(brand, s, Height - edge, en - s, edge);
+            g.FillRectangle(brand, s, top, edge, bodyH);
+            g.FillRectangle(brand, en - edge, top, edge, bodyH);
+            // Bar between the tabs (drag it to move the selection) and the two tabs
+            g.FillRectangle(brand, s, top - edge, en - s, edge);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            foreach (var x in new[] { s, en - tw })
+                using (var tab = Theme.Round(new RectangleF(x, 0, tw, top + edge), Px(4)))
+                    g.FillPath(brand, tab);
+            g.SmoothingMode = SmoothingMode.None;
         }
-        using (var grip = new Pen(Color.FromArgb(220, Color.White), 2))
-        {
-            float gh = Height * 0.3f, cy = Height / 2f;
-            g.DrawLine(grip, s + hw / 2, cy - gh / 2, s + hw / 2, cy + gh / 2);
-            g.DrawLine(grip, en - hw / 2, cy - gh / 2, en - hw / 2, cy + gh / 2);
-        }
+        using (var grip = new Pen(Color.FromArgb(230, Color.White), Math.Max(1, Px(2))))
+            foreach (var x in new[] { s + tw / 2f, en - tw / 2f })
+                g.DrawLine(grip, x, Px(4), x, top - Px(2));
         using (var head = new Pen(Color.White, 2))
-            g.DrawLine(head, X(Current), 0, X(Current), Height);
+            g.DrawLine(head, X(Current), top, X(Current), Height);
         if (Focused)
             using (var focus = new Pen(Color.FromArgb(120, Theme.Brand), 2))
-                g.DrawRectangle(focus, 1, 1, Width - 2, Height - 2);
+                g.DrawRectangle(focus, 1, top + 1, Width - 2, bodyH - 2);
     }
 }
 
@@ -387,5 +403,204 @@ sealed class RoundBox : Panel
         var focused = Controls.Count > 0 && Controls[0].Focused;
         using var pen = new Pen(focused ? Theme.Brand : Theme.Secondary);
         g.DrawPath(pen, path);
+    }
+}
+
+/// <summary>A chip that shows the current choice and opens a menu to change it</summary>
+sealed class Dropdown
+{
+    public readonly Pill Button = new("");
+    readonly DarkMenu menu = new();
+    readonly List<(string Label, object Value)> items = [];
+    public object? Value { get; private set; }
+    /// <summary>The user picked something from the menu</summary>
+    public event Action<object>? Picked;
+
+    public Dropdown() => Button.Click += (_, _) => { if (items.Count > 0) menu.Show(Button, new Point(0, Button.Height + 4)); };
+
+    public void SetItems(IEnumerable<(string Label, object Value)> list, object? selected)
+    {
+        items.Clear();
+        items.AddRange(list);
+        menu.Items.Clear();
+        foreach (var (label, value) in items)
+            menu.Add(label.Replace("&", "&&"), "", () => { Select(value); Picked?.Invoke(value); });
+        Select(selected);
+    }
+
+    public void Select(object? value)
+    {
+        Value = value;
+        var i = items.FindIndex(x => Equals(x.Value, value));
+        Button.Text = (i >= 0 ? items[i].Label : "") + "  ▾";
+    }
+}
+
+/// <summary>
+/// One audio track drawn as a waveform with its volume line on top. Dragging up or down changes the volume;
+/// double-clicking adds a point so the volume can change over time; right-clicking a point removes it.
+/// </summary>
+sealed class VolumeLane : Control
+{
+    static readonly Font Small = new("Segoe UI", 8f);
+
+    /// <summary>Loudest sample in each slice of the track, 0..1; null until measured</summary>
+    public float[]? Peaks;
+    public double Duration = 1, Start, End = 1, Current;
+    /// <summary>False for a track that isn't part of the mix (drawn grey)</summary>
+    public bool Active = true;
+    /// <summary>Volume while there are no points: 1 = unchanged, 0 = silent, 2 = double</summary>
+    public double Volume = 1;
+    /// <summary>Volume points in time order; empty = the same volume throughout</summary>
+    public readonly List<(double T, double V)> Keys = [];
+    /// <summary>The volume changed and the mouse was let go</summary>
+    public event Action? Committed;
+
+    int dragKey = -1;
+    bool dragFlat;
+    int grabY;
+    double grabVolume;
+    int pixelWidth = 300;
+
+    public VolumeLane()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, false);
+        Cursor = Cursors.SizeNS;
+    }
+
+    /// <summary>Width in real pixels (the form decides it from the room it has); the height follows the display scaling like Pill</summary>
+    public int PixelWidth { get => pixelWidth; set { pixelWidth = value; Fit(); } }
+
+    int Px(int v) => (int)Math.Round(v * DeviceDpi / 96f);
+    void Fit() => Size = new Size(pixelWidth, Px(34));
+    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Fit(); }
+    protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
+    protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
+    int Pad => Px(4);
+    float X(double t) => (float)(t / Duration * Width);
+    double T(int x) => Math.Clamp(x / (double)Math.Max(1, Width) * Duration, 0, Duration);
+    float Y(double v) => Pad + (float)((2 - v) / 2 * (Height - 2 * Pad));
+    // Sticks to 100% when close, so "unchanged" is easy to hit
+    static double Snap(double v) { v = Math.Clamp(v, 0, 2); return Math.Abs(v - 1) < 0.06 ? 1 : Math.Round(v, 2); }
+    double V(int y) => Snap(2 - (y - Pad) / (double)Math.Max(1, Height - 2 * Pad) * 2);
+
+    public double GainAt(double t)
+    {
+        if (Keys.Count == 0) return Volume;
+        if (t <= Keys[0].T) return Keys[0].V;
+        for (var i = 1; i < Keys.Count; i++)
+            if (t < Keys[i].T)
+            {
+                var (a, b) = (Keys[i - 1], Keys[i]);
+                return a.V + (b.V - a.V) * (t - a.T) / Math.Max(0.001, b.T - a.T);
+            }
+        return Keys[^1].V;
+    }
+
+    int HitKey(Point p)
+    {
+        for (var i = 0; i < Keys.Count; i++)
+            if (Math.Abs(p.X - X(Keys[i].T)) <= Px(7) && Math.Abs(p.Y - Y(Keys[i].V)) <= Px(9)) return i;
+        return -1;
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (!Enabled) return;
+        var k = HitKey(e.Location);
+        if (e.Button == MouseButtons.Right && k >= 0)
+        {
+            Keys.RemoveAt(k);
+            Invalidate();
+            Committed?.Invoke();
+        }
+        else if (e.Button == MouseButtons.Left)
+        {
+            dragKey = k;
+            dragFlat = k < 0 && Keys.Count == 0;
+            grabY = e.Y;
+            grabVolume = Volume;
+        }
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (dragKey >= 0)
+        {
+            // A point can't pass its neighbours
+            var lo = dragKey > 0 ? Keys[dragKey - 1].T + 0.05 : 0;
+            var hi = dragKey < Keys.Count - 1 ? Keys[dragKey + 1].T - 0.05 : Duration;
+            Keys[dragKey] = (Math.Clamp(T(e.X), lo, Math.Max(lo, hi)), V(e.Y));
+            Invalidate();
+        }
+        else if (dragFlat)
+        {
+            // Relative to where the drag began, so a plain click never jumps the volume
+            Volume = Snap(grabVolume + (grabY - e.Y) / (double)Math.Max(1, Height - 2 * Pad) * 2);
+            Invalidate();
+        }
+        else Cursor = HitKey(e.Location) >= 0 ? Cursors.SizeAll : Keys.Count == 0 ? Cursors.SizeNS : Cursors.Default;
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        var changed = dragKey >= 0 || (dragFlat && Volume != grabVolume);
+        dragKey = -1;
+        dragFlat = false;
+        if (changed) Committed?.Invoke();
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        base.OnMouseDoubleClick(e);
+        if (!Enabled || e.Button != MouseButtons.Left || HitKey(e.Location) >= 0) return;
+        var t = T(e.X);
+        var i = Keys.FindIndex(k => k.T > t);
+        Keys.Insert(i < 0 ? Keys.Count : i, (t, GainAt(t)));
+        Invalidate();
+        Committed?.Invoke();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Parent?.BackColor ?? Theme.Bg2);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var shape = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), Px(6));
+        using (var bg = new SolidBrush(Theme.Bg3)) g.FillPath(bg, shape);
+        g.SetClip(shape);
+
+        float mid = Height / 2f, half = Height / 2f - 2;
+        if (Peaks is { Length: > 0 } peaks)
+        {
+            var loudest = Math.Max(peaks.Max(), 0.02f);
+            using var inside = new Pen(Active ? Theme.Brand : Theme.Secondary);
+            using var outside = new Pen(Color.FromArgb(90, Active ? Theme.Brand : Theme.Secondary));
+            for (var x = 0; x < Width; x++)
+            {
+                var t = x / (double)Width * Duration;
+                // Half height at 100% so there's room to show a boost
+                var h = (float)Math.Min(1, peaks[Math.Min(peaks.Length - 1, x * peaks.Length / Width)] / loudest * 0.5 * GainAt(t)) * half;
+                if (h >= 0.5f) g.DrawLine(t >= Start && t <= End ? inside : outside, x + 0.5f, mid - h, x + 0.5f, mid + h);
+            }
+        }
+
+        // Volume line and its points
+        var line = Color.FromArgb(Active ? 235 : 110, Color.White);
+        var pts = new List<PointF> { new(0, Y(GainAt(0))) };
+        pts.AddRange(Keys.Select(k => new PointF(X(k.T), Y(k.V))));
+        pts.Add(new PointF(Width, Y(GainAt(Duration))));
+        using (var pen = new Pen(line, 1.5f)) g.DrawLines(pen, pts.ToArray());
+        using (var dot = new SolidBrush(line))
+            foreach (var k in Keys) g.FillEllipse(dot, X(k.T) - Px(4), Y(k.V) - Px(4), Px(8), Px(8));
+
+        using (var head = new Pen(Color.FromArgb(160, Color.White))) g.DrawLine(head, X(Current), 0, X(Current), Height);
+        g.ResetClip();
+        var label = dragKey >= 0 ? $"{Keys[dragKey].V * 100:0}%" : Keys.Count == 0 ? $"{Volume * 100:0}%" : "";
+        TextRenderer.DrawText(g, label, Small, new Rectangle(0, Px(2), Width - Px(6), Height), Theme.Muted, TextFormatFlags.Right | TextFormatFlags.Top | TextFormatFlags.NoPrefix);
     }
 }

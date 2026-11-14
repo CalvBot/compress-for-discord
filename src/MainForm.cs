@@ -15,8 +15,16 @@ sealed class MainForm : DarkForm
     string? autoEncoder;
     double targetMb;
     int? resolution, frameRate;
-    bool muted;
-    readonly List<(AudioTrack Track, CheckBox Box, TrackBar Volume)> trackUi = [];
+    /// <summary>What to do with the sound: a track number (int), "mix" or "off"</summary>
+    object audioSel = "off";
+    /// <summary>The user chose the audio themselves, so don't switch track for them</summary>
+    bool audioTouched;
+    bool[] silent = [];
+    /// <summary>mp4, or with the audio off an animated image: webp, gif, apng</summary>
+    string format = "mp4";
+    /// <summary>" · size · resolution · bitrate" shown after the file name</summary>
+    string details;
+    readonly List<(AudioTrack Track, CheckBox Box, VolumeLane Lane, Control Row)> trackUi = [];
 
     CancellationTokenSource? encodeCts, frameCts, playCts;
     readonly CancellationTokenSource lifetime = new();
@@ -24,12 +32,13 @@ sealed class MainForm : DarkForm
     double pendingFrame;
     string? outPath;
 
-    readonly Label subtitle, timeLabel, summary, status;
+    readonly Label subtitle, timeLabel, summary, status, laneHint;
     readonly PictureBox preview;
     readonly Timeline timeline;
     readonly LinkLabel resetLink;
-    readonly FlowLayoutPanel sizeChips, resChips, fpsChips, encChips, audioChips, audioPanel, buttons;
-    readonly Label audioLabel;
+    readonly FlowLayoutPanel sizeChips, resChips, fpsChips, encChips, audioPanel, buttons;
+    readonly Label audioLabel, encLabel, formatLabel;
+    readonly Dropdown audioDrop = new(), formatDrop = new();
     readonly TextBox customMb;
     readonly Bar bar;
     readonly Pill closeBtn, goBtn, moreBtn, downloadBtn, settingsBtn, playBtn;
@@ -46,24 +55,24 @@ sealed class MainForm : DarkForm
 
         var root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, Location = new Point(18, 14), Margin = Padding.Empty };
 
-        // Title row: heading on the left; update link, Settings and Help on the right
-        var titleRow = new Panel { Size = new Size(ContentWidth, 36), Margin = Padding.Empty };
-        var title = Heading("Compress video");
-        title.Dock = DockStyle.Left;
-        var links = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Dock = DockStyle.Right, Padding = new Padding(0, 9, 0, 0) };
+        // Top row: the file's details on the left; update link, Settings and Help on the right
+        var titleRow = new Panel { Size = new Size(ContentWidth, 26), Margin = new Padding(0, 0, 0, 8) };
+        details = $" · {Planner.FormatBytes(fileSize)}";
+        subtitle = new Label { Text = Path.GetFileName(file) + details, Dock = DockStyle.Fill, UseMnemonic = false, ForeColor = Theme.Header, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
+        var links = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Dock = DockStyle.Right, Padding = new Padding(8, 3, 0, 0) };
         links.Controls.Add(UpdateLink(this));
         links.Controls.Add(Link("Settings", ShowSettings));
         var help = Link("Help", ShowHelp);
         help.Margin = Padding.Empty;
         links.Controls.Add(help);
-        titleRow.Controls.Add(title);
+        titleRow.Controls.Add(subtitle);
         titleRow.Controls.Add(links);
-
-        subtitle = new Label { Text = $"{Path.GetFileName(file)} · {Planner.FormatBytes(fileSize)}", AutoSize = true, ForeColor = Theme.Muted, AutoEllipsis = true, MaximumSize = new Size(ContentWidth, 0), Margin = new Padding(0, 0, 0, 10) };
+        // Deferred: changing the text in the middle of a layout pass leaves the label at its default width
+        subtitle.SizeChanged += (_, _) => { if (IsHandleCreated) BeginInvoke(FitSubtitle); };
 
         preview = new PictureBox { Size = new Size(ContentWidth, 300), BackColor = Color.Black, SizeMode = PictureBoxSizeMode.Zoom, Margin = new Padding(0, 0, 0, 10) };
 
-        timeline = new Timeline { Size = new Size(ContentWidth, 54), Enabled = false, Margin = Padding.Empty };
+        timeline = new Timeline { Size = new Size(ContentWidth, 68), Enabled = false, Margin = Padding.Empty };
         timeline.RangeChanged += () => { UpdateTimeLabel(); UpdateSummary(); };
         timeline.Seeked += t => { StopPlayback(); RequestFrame(t); };
 
@@ -116,19 +125,24 @@ sealed class MainForm : DarkForm
 
         audioPanel = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = Padding.Empty, BackColor = Theme.Bg2 };
         audioLabel = OptLabel("Audio");
-        // Dropping the audio frees its bitrate for the video, which can be what makes a clip fit
-        audioChips = ChipRow();
-        audioChips.Controls.Add(Chip("On", false, audioChips, v => SetMuted((bool)v!)));
-        audioChips.Controls.Add(Chip("Off", true, audioChips, v => SetMuted((bool)v!)));
-        SelectChip(audioChips, false);
+        encLabel = OptLabel("Encoder");
+        formatLabel = OptLabel("Format");
+        laneHint = Muted("Drag the line for volume · double-click adds a point · right-click removes it");
+        laneHint.Font = new Font("Segoe UI", 8.5f);
+        laneHint.Margin = new Padding(0, 0, 0, 4);
+        audioDrop.Picked += v => { audioTouched = true; SetAudio(v); };
+        // With the audio off it can also be an animated image
+        formatDrop.SetItems([("MP4 video", "mp4"), ("Animated WebP", "webp"), ("GIF", "gif"), ("APNG", "apng")], "mp4");
+        formatDrop.Picked += v => SetFormat((string)v);
 
         options.Controls.Add(OptLabel("Size"), 0, 0); options.Controls.Add(sizeChips, 1, 0);
         options.Controls.Add(OptLabel("Resolution"), 0, 1); options.Controls.Add(resChips, 1, 1);
         options.Controls.Add(OptLabel("Frame rate"), 0, 2); options.Controls.Add(fpsChips, 1, 2);
-        options.Controls.Add(OptLabel("Encoder"), 0, 3); options.Controls.Add(encChips, 1, 3);
-        options.Controls.Add(audioLabel, 0, 4); options.Controls.Add(audioChips, 1, 4);
+        options.Controls.Add(encLabel, 0, 3); options.Controls.Add(encChips, 1, 3);
+        options.Controls.Add(audioLabel, 0, 4); options.Controls.Add(audioDrop.Button, 1, 4);
         options.Controls.Add(audioPanel, 1, 5);
-        audioLabel.Visible = audioChips.Visible = audioPanel.Visible = false;
+        options.Controls.Add(formatLabel, 0, 6); options.Controls.Add(formatDrop.Button, 1, 6);
+        audioLabel.Visible = audioDrop.Button.Visible = audioPanel.Visible = formatLabel.Visible = formatDrop.Button.Visible = false;
 
         summary = new Label { AutoSize = true, MaximumSize = new Size(ContentWidth, 0), ForeColor = Theme.Muted, Margin = new Padding(0, 0, 0, 8) };
         bar = new Bar { Size = new Size(ContentWidth, 8), Visible = false, Margin = new Padding(0, 0, 0, 8) };
@@ -140,13 +154,12 @@ sealed class MainForm : DarkForm
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         status = new Label { Dock = DockStyle.Fill, ForeColor = Theme.Muted, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, Margin = Padding.Empty };
         buttons = new FlowLayoutPanel { Anchor = AnchorStyles.Right, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = Padding.Empty };
-        // Split button: "Compress & copy" plus a ▾ with "Compress & save…"
+        // Split button: "Compress & copy", and a ▾ holding the one extra action, "Compress & save…"
         moreBtn = new Pill("▾", PillKind.Primary) { Enabled = false, MinWidth = 34, FlatLeft = true, Margin = Padding.Empty };
         goBtn = new Pill("Compress & copy", PillKind.Primary) { Enabled = false, FlatRight = true, Margin = new Padding(8, 0, 1, 0) };
         goMenu = new DarkMenu();
-        goMenu.Add("Compress && copy", "Enter", () => Go(save: false));
         goMenu.Add("Compress && save…", "Ctrl+S", () => Go(save: true));
-        moreBtn.Click += (_, _) => goMenu.Show(moreBtn, new Point(moreBtn.Width - goMenu.PreferredSize.Width, moreBtn.Height + 4));
+        moreBtn.Click += (_, _) => goMenu.Show(moreBtn, new Point(moreBtn.Width - goMenu.PreferredSize.Width, moreBtn.Height + 6));
         closeBtn = new Pill("Close", PillKind.Secondary) { Margin = new Padding(8, 0, 0, 0) };
         downloadBtn = new Pill("Download ffmpeg", PillKind.Primary) { Visible = false, Margin = new Padding(8, 0, 0, 0) };
         settingsBtn = new Pill("Settings…", PillKind.Secondary) { Visible = false, Margin = new Padding(8, 0, 0, 0) };
@@ -158,7 +171,7 @@ sealed class MainForm : DarkForm
         bottom.Controls.Add(status, 0, 0);
         bottom.Controls.Add(buttons, 1, 0);
 
-        root.Controls.AddRange([titleRow, subtitle, preview, timeline, timeRow, options, summary, bar, bottom]);
+        root.Controls.AddRange([titleRow, preview, timeline, timeRow, options, summary, bar, bottom]);
         Controls.Add(root);
         AcceptDrop(f => { if (encodeCts == null && outPath == null) Program.OpenVideo(f, this); });
         // Clicking anywhere else stops typing in the custom size box
@@ -201,7 +214,9 @@ sealed class MainForm : DarkForm
 
         var shortSide = Math.Min(probe.Width, probe.Height);
         var fps = (int)Math.Round(probe.Fps);
-        subtitle.Text = $"{Path.GetFileName(file)} · {Planner.FormatBytes(fileSize)} · {shortSide}p{fps} · {Planner.FormatTime(probe.Duration, false)}";
+        var srcKbps = (probe.Bitrate > 0 ? probe.Bitrate : fileSize * 8 / Math.Max(probe.Duration, 0.1)) / 1000.0;
+        details = $" · {Planner.FormatBytes(fileSize)} · {shortSide}p{fps} · {Planner.FormatRate(srcKbps)}";
+        FitSubtitle();
 
         timeline.Fps = probe.Fps;
         timeline.Reset(probe.Duration);
@@ -218,30 +233,28 @@ sealed class MainForm : DarkForm
             fpsChips.Controls.Add(Chip($"{f}", f, fpsChips, v => { frameRate = (int?)v; UpdateSummary(); }));
         SelectChip(fpsChips, null);
 
-        audioLabel.Visible = audioChips.Visible = probe.AudioTracks.Count > 0;
-        // Track pickers only when there's a choice to make; a single track is always kept
-        if (probe.AudioTracks.Count > 1)
+        // One row per audio track: a waveform with its volume line. Which rows show depends on the Audio choice.
+        silent = new bool[probe.AudioTracks.Count];
+        foreach (var t in probe.AudioTracks)
         {
-            var def = probe.AudioTracks.FirstOrDefault(t => t.IsDefault) ?? probe.AudioTracks[0];
-            foreach (var t in probe.AudioTracks)
-            {
-                var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 0, 0, 2), BackColor = Theme.Bg2 };
-                // Added after the form scaled, so convert to device pixels here
-                int D(int v) => LogicalToDeviceUnits(v);
-                var box = new CheckBox { Text = t.Label, Checked = t == def, AutoSize = false, Width = D(200), Height = D(28), ForeColor = Theme.Text, AutoEllipsis = true };
-                var vol = new TrackBar { Minimum = 0, Maximum = 200, Value = 100, TickStyle = TickStyle.None, AutoSize = false, Width = D(140), Height = D(28), BackColor = Theme.Bg2, SmallChange = 5, LargeChange = 25 };
-                var pct = new Label { Text = "100%", AutoSize = false, Width = D(48), Height = D(28), TextAlign = ContentAlignment.MiddleRight, ForeColor = Theme.Muted };
-                box.CheckedChanged += (_, _) => { vol.Enabled = box.Checked; UpdateSummary(); RestartIfPlaying(); };
-                // Hear volume changes once the slider is let go
-                vol.MouseUp += (_, _) => RestartIfPlaying();
-                vol.ValueChanged += (_, _) => pct.Text = $"{vol.Value}%";
-                vol.Enabled = box.Checked;
-                row.Controls.AddRange([box, vol, pct]);
-                audioPanel.Controls.Add(row);
-                trackUi.Add((t, box, vol));
-            }
-            audioPanel.Visible = true;
+            var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 0, 0, 4), BackColor = Theme.Bg2 };
+            // Added after the form scaled, so sizes are converted to device pixels here (D)
+            var box = new CheckBox { Text = t.Label, UseMnemonic = false, AutoSize = false, Width = LaneRoom - LaneMix - 6, Height = D(34), Margin = new Padding(0, 0, 6, 0), ForeColor = Theme.Text, AutoEllipsis = true };
+            var lane = new VolumeLane { PixelWidth = LaneRoom, Margin = Padding.Empty, Duration = probe.Duration, End = probe.Duration };
+            box.CheckedChanged += (_, _) => { lane.Active = box.Checked; lane.Invalidate(); UpdateSummary(); RestartIfPlaying(); };
+            // Hear a volume change once the mouse is let go
+            lane.Committed += RestartIfPlaying;
+            row.Controls.AddRange([box, lane]);
+            audioPanel.Controls.Add(row);
+            trackUi.Add((t, box, lane, row));
         }
+        audioPanel.Controls.Add(laneHint);
+        audioLabel.Visible = audioDrop.Button.Visible = true;
+        var def = probe.AudioTracks.FirstOrDefault(t => t.IsDefault) ?? probe.AudioTracks.FirstOrDefault();
+        audioSel = def != null ? def.Index : "off";
+        RefreshAudioItems();
+        SetAudio(audioSel);
+        _ = LoadPeaks();
 
         UpdateTimeLabel();
         UpdateSummary();
@@ -249,7 +262,44 @@ sealed class MainForm : DarkForm
         RequestFrame(0);
         _ = ResolveAutoEncoder();
         _ = LoadThumbnails();
+#if DEBUG
+        ApplyTestState();
+#endif
     }
+
+#if DEBUG
+    /// <summary>
+    /// Debug builds only: puts the window into a state for screenshots and end-to-end tests without clicking.
+    /// CFD_TEST="audio=mix;format=webp;fps=15;res=540;keys=1;menu=1;save=C:\\out.webp"
+    /// </summary>
+    void ApplyTestState()
+    {
+        foreach (var part in (Environment.GetEnvironmentVariable("CFD_TEST") ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var (key, value) = (part.Split('=')[0], part[(part.IndexOf('=') + 1)..]);
+            switch (key)
+            {
+                case "audio": SetAudio(int.TryParse(value, out var n) ? n : value); break;
+                case "format": formatDrop.Select(value); SetFormat(value); break;
+                case "fps": frameRate = int.Parse(value); SelectChip(fpsChips, frameRate); UpdateSummary(); break;
+                case "res": resolution = int.Parse(value); SelectChip(resChips, resolution); UpdateSummary(); break;
+                case "size": targetMb = double.Parse(value); UpdateSummary(); break;
+                case "trim": timeline.SetEnd(double.Parse(value)); break;
+                case "keys":
+                    foreach (var (_, box, lane, _) in trackUi.Take(3))
+                    {
+                        box.Checked = true;
+                        lane.Keys.AddRange([(probe!.Duration * 0.2, 1), (probe.Duration * 0.4, 0.3), (probe.Duration * 0.7, 1.6)]);
+                        lane.Active = true;
+                        lane.Invalidate();
+                    }
+                    break;
+                case "menu": BeginInvoke(() => moreBtn.GetType().GetMethod("OnClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(moreBtn, [EventArgs.Empty])); break;
+                case "save": BeginInvoke(() => Go(save: true, value)); break;
+            }
+        }
+    }
+#endif
 
     async Task ResolveAutoEncoder()
     {
@@ -378,19 +428,100 @@ sealed class MainForm : DarkForm
         UpdateSummary();
     }
 
-    void SetMuted(bool off)
+    // Lane widths in real pixels, from the room the chip rows have: a lane alone, or next to a track's checkbox when mixing
+    int LaneRoom => sizeChips.MaximumSize.Width - 16;
+    int LaneMix => LaneRoom * 6 / 10;
+    int D(int v) => (int)Math.Round(v * timeline.DeviceDpi / 96f);
+
+    /// <summary>File name, size, resolution and bitrate on one line; a long name is cut short, never the details</summary>
+    void FitSubtitle()
     {
-        muted = off;
-        audioPanel.Visible = !off && trackUi.Count > 0;
+        var name = Path.GetFileName(file);
+        var text = name + details;
+        while (name.Length > 8 && TextRenderer.MeasureText(text, subtitle.Font).Width > subtitle.Width - D(12))
+        {
+            name = name[..^1];
+            text = name.TrimEnd() + "…" + details;
+        }
+        if (subtitle.Text != text) subtitle.Text = text;
+    }
+
+    void RefreshAudioItems()
+    {
+        var items = probe!.AudioTracks.Select(t => (t.Label + (silent[t.Index] ? " · silent" : ""), (object)t.Index)).ToList();
+        if (items.Count > 1) items.Add(("Mix tracks", "mix"));
+        items.Add(("No audio", "off"));
+        audioDrop.SetItems(items, audioSel);
+    }
+
+    /// <param name="choice">a track number, "mix" or "off"</param>
+    void SetAudio(object choice)
+    {
+        var mix = choice is "mix";
+        // Start a mix from the track that was playing
+        if (mix && !trackUi.Any(t => t.Box.Checked)) trackUi[audioSel is int was ? was : 0].Box.Checked = true;
+        audioSel = choice;
+        audioDrop.Select(choice);
+        audioPanel.SuspendLayout();
+        foreach (var (track, box, lane, row) in trackUi)
+        {
+            row.Visible = mix || Equals(choice, track.Index);
+            box.Visible = mix;
+            lane.PixelWidth = mix ? LaneMix : LaneRoom;
+            lane.Active = !mix || box.Checked;
+            lane.Invalidate();
+        }
+        audioPanel.ResumeLayout();
+        audioPanel.Visible = choice is not "off" && trackUi.Count > 0;
+        formatLabel.Visible = formatDrop.Button.Visible = choice is "off";
+        ShowEncoderRow();
         UpdateSummary();
         RestartIfPlaying();
     }
 
+    /// <summary>Measures each track for its waveform, marks the silent ones and starts on one you can hear</summary>
+    async Task LoadPeaks()
+    {
+        foreach (var (track, _, lane, _) in trackUi)
+        {
+            float[]? peaks;
+            try { peaks = await Ff.Peaks(file, track.Index, 800, lifetime.Token); } catch { return; }
+            if (IsDisposed) return;
+            lane.Peaks = peaks;
+            lane.Invalidate();
+            silent[track.Index] = peaks != null && peaks.Max() < 0.01f;
+        }
+        RefreshAudioItems();
+        if (!audioTouched && audioSel is int i && silent[i] && Array.FindIndex(silent, s => !s) is >= 0 and var heard) SetAudio(heard);
+    }
+
+    bool Animated => audioSel is "off" && format != "mp4";
+    string FormatName => format switch { "webp" => "Animated WebP", "gif" => "GIF", "apng" => "APNG", _ => "MP4" };
+    string OutputExt => !Animated ? "mp4" : format == "apng" ? "png" : format;
+    /// <summary>Frame rate of an animated image: the chosen one, never above 30</summary>
+    int AnimFps => Math.Min(frameRate ?? (int)Math.Round(probe!.Fps), 30);
+
+    void SetFormat(string f)
+    {
+        format = f;
+        // Animated images get big fast, so start them at 15 fps unless a low rate is already chosen
+        if (Animated && (frameRate ?? probe!.Fps) > 30 && fpsChips.Controls.OfType<Pill>().Any(p => Equals(p.Tag, 15)))
+        {
+            frameRate = 15;
+            SelectChip(fpsChips, 15);
+        }
+        ShowEncoderRow();
+        UpdateSummary();
+    }
+
+    // GPU/CPU only applies to video
+    void ShowEncoderRow() => encLabel.Visible = encChips.Visible = !Animated;
+
     List<TrackMix> Mix()
     {
-        if (probe == null || probe.AudioTracks.Count == 0 || muted) return [];
-        if (trackUi.Count == 0) return [new TrackMix(probe.AudioTracks[0].Index, 1)];
-        return trackUi.Where(t => t.Box.Checked).Select(t => new TrackMix(t.Track.Index, t.Volume.Value / 100.0)).ToList();
+        if (probe == null || audioSel is "off") return [];
+        if (audioSel is int i) return [new TrackMix(i, trackUi[i].Lane.Volume, [.. trackUi[i].Lane.Keys])];
+        return trackUi.Where(t => t.Box.Checked).Select(t => new TrackMix(t.Track.Index, t.Lane.Volume, [.. t.Lane.Keys])).ToList();
     }
 
     string EffectiveEncoder => cfg.Encoder == "auto" ? autoEncoder ?? "nvenc" : cfg.Encoder;
@@ -409,21 +540,51 @@ sealed class MainForm : DarkForm
     {
         timeLabel.Text = $"{Planner.FormatTime(timeline.Current)}    {Planner.FormatTime(timeline.Start)} – {Planner.FormatTime(timeline.End)}  ({Planner.FormatTime(timeline.End - timeline.Start)})";
         resetLink.Visible = Trimmed && encodeCts == null;
+        foreach (var (_, _, lane, row) in trackUi)
+        {
+            (lane.Start, lane.End, lane.Current) = (timeline.Start, timeline.End, timeline.Current);
+            if (row.Visible) lane.Invalidate();
+        }
+    }
+
+    /// <summary>
+    /// Colour for the result line: green when the bitrate suits the resolution and frame rate, yellow when it's
+    /// on the low side, red when it will look bad. With a suggestion of what to lower.
+    /// </summary>
+    (Color Color, string Hint) Quality(Plan plan, int fps)
+    {
+        // Already as good as the source: nothing to gain
+        if (plan.CappedBySource) return (Theme.Green, "");
+        const double Good = 0.05; // bits per pixel per frame that H.264 needs to look clean
+        double shortSrc = Math.Min(probe!.Width, probe.Height), aspect = Math.Max(probe.Width, probe.Height) / shortSrc;
+        double Bits(int side, int f) => plan.VideoKbps * 1000.0 / (side * side * aspect * f);
+        var bits = Bits(plan.OutputShortSide, fps);
+        if (bits >= Good) return (Theme.Green, "");
+        var better = Planner.Resolutions.Where(r => r < plan.OutputShortSide && Bits(r, fps) >= Good).Select(r => (int?)r).FirstOrDefault();
+        var hint = better != null ? $" · try {better}p" : fps > 30 ? " · try 30 fps" : " · try a shorter clip";
+        return (bits >= Good / 2 ? Theme.Warn : Theme.Danger, hint);
     }
 
     void UpdateSummary()
     {
         if (outPath != null || probe == null) return;
+        var limit = Planner.FormatBytes(targetMb * Planner.MB);
+        if (Animated)
+        {
+            // The size is only known once it's made: it's shrunk until it fits
+            summary.Text = $"{FormatName} · up to {resolution ?? Math.Min(probe.Width, probe.Height)}p{AnimFps} · under {limit}";
+            summary.ForeColor = Theme.Text;
+            goBtn.Enabled = moreBtn.Enabled = timeline.End > timeline.Start && encodeCts == null;
+            return;
+        }
         var plan = CurrentPlan();
         if (plan == null) return;
-        var limit = Planner.FormatBytes(targetMb * Planner.MB);
-        var mix = Mix();
         if (plan.Feasible)
         {
-            var audio = mix.Count == 0 ? " · no audio" : mix.Count > 1 ? $" · {mix.Count} audio tracks mixed" : "";
-            var low = plan.VideoKbps < 500 ? " · low quality, try a shorter clip" : "";
-            summary.Text = $"→ ~{Planner.FormatBytes(plan.EstimateBytes)} of {limit} · {plan.OutputShortSide}p{plan.Fps ?? (int)Math.Round(probe.Fps)} · {(plan.VideoKbps + plan.AudioKbps) / 1000.0:0.0} Mbps{audio}{low}";
-            summary.ForeColor = plan.VideoKbps < 500 ? Theme.Warn : Theme.Text;
+            var fps = plan.Fps ?? (int)Math.Round(probe.Fps);
+            var (color, hint) = Quality(plan, fps);
+            summary.Text = $"~{Planner.FormatBytes(plan.EstimateBytes)} · {plan.OutputShortSide}p{fps} · {Planner.FormatRate(plan.VideoKbps + plan.AudioKbps)}{hint}";
+            summary.ForeColor = color;
         }
         else
         {
@@ -441,25 +602,28 @@ sealed class MainForm : DarkForm
 
     // ---------- compress ----------
 
-    string OutputName => Path.GetFileNameWithoutExtension(file) + (Trimmed ? "-trimmed" : "") + "-compressed.mp4";
+    string OutputName => Path.GetFileNameWithoutExtension(file) + (Trimmed ? "-trimmed" : "") + "-compressed." + OutputExt;
 
     /// <summary>Asks where to save; starts in the last-used folder, else next to the source video</summary>
     string? AskSavePath()
     {
         var folder = Directory.Exists(cfg.SaveFolder) ? cfg.SaveFolder : Path.GetDirectoryName(file);
-        using var dlg = new SaveFileDialog { Title = "Save compressed video", Filter = "MP4 video|*.mp4", FileName = OutputName, InitialDirectory = folder, OverwritePrompt = true };
+        using var dlg = new SaveFileDialog { Title = "Save compressed video", Filter = $"{FormatName}|*.{OutputExt}", FileName = OutputName, InitialDirectory = folder, OverwritePrompt = true };
         return dlg.ShowDialog(this) == DialogResult.OK ? dlg.FileName : null;
     }
 
-    async void Go(bool save)
+    /// <param name="saveTo">skips the save dialog (tests)</param>
+    async void Go(bool save, string? saveTo = null)
     {
         if (probe == null || encodeCts != null || !goBtn.Enabled || !goBtn.Visible) return;
-        var plan = CurrentPlan();
-        if (plan is not { Feasible: true }) return;
+        var animated = Animated;
+        var plan = animated ? null : CurrentPlan();
+        if (!animated && plan is not { Feasible: true }) return;
+        var name = OutputName;
 
         StopPlayback();
         string? savePath = null;
-        if (save && (savePath = AskSavePath()) == null) return;
+        if (save && (savePath = saveTo ?? AskSavePath()) == null) return;
         encodeCts = new CancellationTokenSource();
         SetBusy(true);
         var progress = new Progress<(string Stage, double Progress)>(p =>
@@ -469,12 +633,22 @@ sealed class MainForm : DarkForm
         });
         try
         {
-            var (temp, size) = await Ff.Encode(new EncodeRequest
+            var (temp, size) = animated ? await Ff.EncodeAnimated(new AnimRequest
+            {
+                Input = file,
+                Format = format,
+                Start = timeline.Start,
+                Duration = timeline.End - timeline.Start,
+                TargetBytes = (long)(targetMb * Planner.MB * (1 - Math.Max(0, cfg.SafetyMarginPercent) / 100)),
+                MaxShortSide = Math.Min(resolution ?? int.MaxValue, Math.Min(probe.Width, probe.Height)),
+                Fps = AnimFps,
+                Portrait = probe.Height > probe.Width,
+            }, progress, encodeCts.Token) : await Ff.Encode(new EncodeRequest
             {
                 Input = file,
                 Start = timeline.Start,
                 Duration = timeline.End - timeline.Start,
-                TargetBytes = plan.TargetBytes,
+                TargetBytes = plan!.TargetBytes,
                 VideoKbps = plan.VideoKbps,
                 AudioKbps = plan.AudioKbps,
                 Tracks = Mix(),
@@ -490,13 +664,16 @@ sealed class MainForm : DarkForm
             {
                 File.Move(temp, savePath, true);
                 outPath = savePath;
-                cfg.SaveFolder = Path.GetDirectoryName(savePath) ?? "";
-                cfg.Save();
+                if (saveTo == null)
+                {
+                    cfg.SaveFolder = Path.GetDirectoryName(savePath) ?? "";
+                    cfg.Save();
+                }
                 Done($"✓ Saved {Path.GetFileName(savePath)} ({Planner.FormatBytes(size)})");
             }
             else
             {
-                outPath = Ff.MoveToOut(temp, OutputName);
+                outPath = Ff.MoveToOut(temp, name);
                 // Same as Explorer's Copy, so Ctrl+V in Discord attaches the file
                 Clipboard.SetFileDropList(new StringCollection { outPath });
                 Done($"✓ Copied ({Planner.FormatBytes(size)}). Press Ctrl+V in Discord.");
@@ -527,8 +704,9 @@ sealed class MainForm : DarkForm
         timeline.Enabled = !busy;
         playBtn.Enabled = !busy;
         customMb.Enabled = !busy;
-        foreach (var (_, box, vol) in trackUi) { box.Enabled = !busy; vol.Enabled = !busy && box.Checked; }
-        foreach (var p in new[] { sizeChips, resChips, fpsChips, encChips, audioChips }.SelectMany(g => g.Controls.OfType<Pill>())) p.Enabled = !busy;
+        foreach (var (_, box, lane, _) in trackUi) box.Enabled = lane.Enabled = !busy;
+        audioDrop.Button.Enabled = formatDrop.Button.Enabled = !busy;
+        foreach (var p in new[] { sizeChips, resChips, fpsChips, encChips }.SelectMany(g => g.Controls.OfType<Pill>())) p.Enabled = !busy;
         goBtn.Enabled = moreBtn.Enabled = !busy;
         closeBtn.Text = busy ? "Cancel" : "Close";
         resetLink.Visible = !busy && Trimmed;

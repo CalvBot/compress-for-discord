@@ -21,7 +21,7 @@ static class Planner
     /// <summary>Discord's upload limits: free, Nitro Basic, Nitro (1 GB)</summary>
     public static readonly double[] LimitPresets = [10, 50, 1024];
     public static readonly int[] Resolutions = [2160, 1440, 1080, 900, 720, 540];
-    public static readonly int[] FrameRates = [60, 48, 30, 24];
+    public static readonly int[] FrameRates = [60, 48, 30, 24, 15];
     const int MinVideoKbps = 80;
 
     /// <param name="resolution">output short side, null = keep the source's</param>
@@ -69,6 +69,8 @@ static class Planner
         b >= 1024 * MB ? $"{Math.Round(b / 1024 / MB, 2):0.##} GB"
         : b >= MB ? $"{b / MB:0.#} MB"
         : $"{Math.Ceiling(b / 1024)} KB";
+
+    public static string FormatRate(double kbps) => kbps >= 1000 ? $"{kbps / 1000:0.0} Mbps" : $"{kbps:0} kbps";
 
     public static string FormatTime(double sec, bool precise = true)
     {

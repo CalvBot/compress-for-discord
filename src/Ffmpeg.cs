@@ -20,7 +20,21 @@ sealed record AudioTrack(int Index, string Codec, int Channels, string Layout, s
 
 sealed record ProbeResult(double Duration, int Width, int Height, double Fps, long Bitrate, long VideoBitrate, string VideoCodec, List<AudioTrack> AudioTracks);
 
-sealed record TrackMix(int Index, double Volume);
+/// <param name="Volume">1 = unchanged; used when there are no Keys</param>
+/// <param name="Keys">volume points in source time, in order; the volume moves in straight lines between them</param>
+sealed record TrackMix(int Index, double Volume, List<(double T, double V)>? Keys = null);
+
+/// <summary>An animated image (no sound): webp, gif or apng</summary>
+sealed class AnimRequest
+{
+    public required string Input, Format;
+    public double Start, Duration;
+    public long TargetBytes;
+    /// <summary>Largest short side to use; it's shrunk further until the file fits</summary>
+    public int MaxShortSide;
+    public int Fps;
+    public bool Portrait;
+}
 
 sealed class EncodeRequest
 {
@@ -119,20 +133,26 @@ static class Ff
         Directory.Move(tmp, Paths.Ffmpeg);
     }
 
-    static string? gpu;
+    static Task<string>? gpu;
     /// <summary>"auto" becomes the first GPU encoder that works here (NVIDIA "nvenc", then AMD "amf"), else "x264"</summary>
-    public static async Task<string> PickEncoder(string pref)
+    public static Task<string> PickEncoder(string pref)
     {
-        if (pref != "auto") return pref;
-        if (gpu == null)
-        {
-            gpu = "x264";
-            foreach (var name in new[] { "nvenc", "amf" })
-                // A tiny test encode is the only reliable check: ffmpeg lists both encoders whatever card is installed
+        if (pref != "auto") return Task.FromResult(pref);
+        // One shared check: a compress started while it's still running waits for the answer instead of assuming CPU
+        return gpu ??= FindGpuEncoder();
+    }
+
+    static async Task<string> FindGpuEncoder()
+    {
+        foreach (var name in new[] { "nvenc", "amf" })
+            // A tiny test encode is the only reliable check: ffmpeg lists both encoders whatever card is installed
+            try
+            {
                 if ((await Run(Ffmpeg, ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.2", "-c:v", "h264_" + name, "-f", "null", "-"], timeoutMs: 15000).ConfigureAwait(false)).Code == 0)
-                { gpu = name; break; }
-        }
-        return gpu;
+                    return name;
+            }
+            catch { }
+        return "x264";
     }
 
     // ---------- process helper ----------
@@ -239,10 +259,44 @@ static class Ff
 
     // ---------- encoding ----------
 
-    internal static string? AudioGraph(List<TrackMix> tracks)
+    /// <summary>Loudest sample (0..1) in each of `buckets` equal slices of an audio track, for drawing its waveform</summary>
+    public static async Task<float[]?> Peaks(string path, int track, int buckets, CancellationToken ct)
+    {
+        var (code, pcm, _) = await Run(Ffmpeg, ["-hide_banner", "-loglevel", "error", "-i", path, "-map", $"0:a:{track}", "-ac", "1", "-ar", "4000", "-f", "s16le", "-"], ct).ConfigureAwait(false);
+        var n = pcm.Length / 2;
+        if (code != 0 || n == 0) return null;
+        var peaks = new float[buckets];
+        for (var i = 0; i < n; i++)
+        {
+            var v = Math.Abs((float)BitConverter.ToInt16(pcm, i * 2)) / 32768f;
+            var b = (int)((long)i * buckets / n);
+            if (v > peaks[b]) peaks[b] = v;
+        }
+        return peaks;
+    }
+
+    /// <summary>ffmpeg volume filter for a track: a plain number, or a straight-line ramp between its points</summary>
+    static string VolumeFilter(TrackMix t, double offset)
+    {
+        if (t.Keys is not { Count: > 0 } k) return $"volume={F3(t.Volume)}";
+        // Seeking with -ss restarts the filter clock at 0, so add the offset back to get source time
+        var time = $"(t+{F3(offset)})";
+        var expr = F3(k[^1].V);
+        for (var i = k.Count - 1; i >= 1; i--)
+        {
+            var (a, b) = (k[i - 1], k[i]);
+            var ramp = b.T - a.T < 0.001 ? F3(b.V) : $"{F3(a.V)}+({F3(b.V - a.V)})*({time}-{F3(a.T)})/{F3(b.T - a.T)}";
+            expr = $"if(lt({time},{F3(b.T)}),{ramp},{expr})";
+        }
+        expr = $"if(lt({time},{F3(k[0].T)}),{F3(k[0].V)},{expr})";
+        return $"volume='{expr}':eval=frame";
+    }
+
+    /// <param name="offset">source time the input was seeked to</param>
+    internal static string? AudioGraph(List<TrackMix> tracks, double offset)
     {
         if (tracks.Count == 0) return null;
-        var parts = tracks.Select((t, i) => $"[0:a:{t.Index}]volume={t.Volume.ToString("0.000", Inv)},aformat=channel_layouts=stereo[a{i}]").ToList();
+        var parts = tracks.Select((t, i) => $"[0:a:{t.Index}]{VolumeFilter(t, offset)},aformat=channel_layouts=stereo[a{i}]").ToList();
         if (tracks.Count == 1) return parts[0][..^4] + "[aout]";
         return $"{string.Join(";", parts)};{string.Concat(tracks.Select((_, i) => $"[a{i}]"))}amix=inputs={tracks.Count}:normalize=0:duration=longest[aout]";
     }
@@ -285,13 +339,14 @@ static class Ff
         if (o.ScaleShortSide is { } s) vf.Add(o.Portrait ? $"scale={s}:-2" : $"scale=-2:{s}");
         if (o.Fps is { } f) vf.Add($"fps={f}");
         vf.Add("format=yuv420p");
-        var audio = o.AudioKbps > 0 ? AudioGraph(o.Tracks) : null;
+        var audio = o.AudioKbps > 0 ? AudioGraph(o.Tracks, o.Start) : null;
         var videoGraph = $"[0:v:0]{string.Join(",", vf)}[vout]";
         var graph = videoGraph + (audio != null ? $";{audio}" : "");
 
         string[] inputArgs = ["-ss", F3(o.Start), "-i", o.Input, "-t", F3(o.Duration)];
         string[] common = ["-filter_complex", graph, "-map", "[vout]", "-map_metadata", "-1"];
-        // x264 pass 1 writes no audio, and ffmpeg rejects a graph with an unconnected [aout]
+        // x264 pass 1 writes no audio, and ffmpeg rejects a graph with an unconnected [aout].
+        // The pass options are video-only (":v"): newer ffmpeg otherwise looks for a pass log for the audio too and fails.
         string[] videoOnly = ["-filter_complex", videoGraph, "-map", "[vout]", "-map_metadata", "-1"];
         string[] audioOut = audio != null ? ["-map", "[aout]", "-c:a", "aac", "-b:a", $"{o.AudioKbps}k", "-ac", "2"] : ["-an"];
 
@@ -316,9 +371,9 @@ static class Ff
                 }
                 else
                 {
-                    await RunEncode([.. inputArgs, .. videoOnly, "-c:v", "libx264", "-preset", "medium", .. rate, "-pass", "1", "-passlogfile", passlog, "-an", "-f", "mp4", "NUL"],
+                    await RunEncode([.. inputArgs, .. videoOnly, "-c:v", "libx264", "-preset", "medium", .. rate, "-pass:v", "1", "-passlogfile:v", passlog, "-an", "-f", "mp4", "NUL"],
                         o.Duration, 0, 0.5, $"Analyzing (pass 1 of 2){label}", progress, ct);
-                    await RunEncode([.. inputArgs, .. common, "-c:v", "libx264", "-preset", "medium", .. rate, "-pass", "2", "-passlogfile", passlog, .. audioOut, "-movflags", "+faststart", output],
+                    await RunEncode([.. inputArgs, .. common, "-c:v", "libx264", "-preset", "medium", .. rate, "-pass:v", "2", "-passlogfile:v", passlog, .. audioOut, "-movflags", "+faststart", output],
                         o.Duration, 0.5, 0.5, $"Compressing (pass 2 of 2){label}", progress, ct);
                 }
 
@@ -362,13 +417,71 @@ static class Ff
         }
     }
 
+    /// <summary>
+    /// Makes an animated WebP, GIF or APNG that fits the target size. These formats have no bitrate setting,
+    /// so a small test encode measures how heavy the clip is, then the picture is sized to fit and shrunk
+    /// again if it still comes out too big.
+    /// </summary>
+    public static async Task<(string Path, long Size)> EncodeAnimated(AnimRequest o, IProgress<(string Stage, double Progress)> progress, CancellationToken ct)
+    {
+        Directory.CreateDirectory(Paths.Work);
+        var output = Path.Combine(Paths.Work, $"{Guid.NewGuid():N}-out.{(o.Format == "apng" ? "png" : o.Format)}");
+        const int MinSide = 96;
+
+        async Task<long> Try(int side, int quality, string stage, double from, double span)
+        {
+            var pre = $"fps={o.Fps},scale={(o.Portrait ? $"{side}:-2" : $"-2:{side}")}:flags=lanczos";
+            List<string> args = ["-ss", F3(o.Start), "-t", F3(o.Duration), "-i", o.Input, "-an", "-map_metadata", "-1"];
+            args.AddRange(o.Format switch
+            {
+                // One palette for the whole clip, and only redraw the part of each frame that changed
+                "gif" => ["-filter_complex", $"[0:v:0]{pre},split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle", "-loop", "0"],
+                "apng" => ["-vf", pre, "-plays", "0", "-f", "apng"],
+                _ => ["-vf", pre, "-c:v", "libwebp_anim", "-quality", quality.ToString(), "-compression_level", "4", "-loop", "0"],
+            });
+            args.Add(output);
+            await RunEncode(args, o.Duration, from, span, stage, progress, ct);
+            return new FileInfo(output).Length;
+        }
+
+        try
+        {
+            // File size grows slower than the pixel count (measured: 4x the pixels is about 2.7x the bytes)
+            double Fit(long size, int side, double sizeFactor = 1) => side * Math.Pow(o.TargetBytes * 0.9 / (size * sizeFactor), 1 / 1.5);
+
+            var quality = 60;
+            var testSide = Math.Min(240, o.MaxShortSide);
+            var size = await Try(testSide, quality, "Measuring", 0, 0.15);
+            if (testSide == o.MaxShortSide && size <= o.TargetBytes) return (output, size);
+
+            var side = Fit(size, testSide);
+            // WebP can trade sharpness for size; do that before the picture gets tiny
+            if (o.Format == "webp" && side < Math.Min(o.MaxShortSide, 480)) { quality = 35; side = Fit(size, testSide, 0.7); }
+
+            for (var attempt = 0; attempt < 4; attempt++)
+            {
+                var s = Math.Clamp((int)side & ~1, MinSide, o.MaxShortSide);
+                size = await Try(s, quality, attempt > 0 ? $"Compressing (retry {attempt})" : "Compressing", 0.15, 0.85);
+                if (size <= o.TargetBytes) return (output, size);
+                if (s <= MinSide) break;
+                side = Math.Min(Fit(size, s), s * 0.9);
+            }
+            throw new Exception("Couldn't get it under the size limit. Trim it shorter or lower the frame rate.");
+        }
+        catch
+        {
+            try { File.Delete(output); } catch { }
+            throw;
+        }
+    }
+
     /// <summary>Moves a finished encode to the output folder under a readable, unique name.</summary>
     public static string MoveToOut(string temp, string name)
     {
         Directory.CreateDirectory(Paths.Out);
         var baseName = Path.GetFileNameWithoutExtension(name);
         var dest = Path.Combine(Paths.Out, name);
-        for (var n = 2; File.Exists(dest); n++) dest = Path.Combine(Paths.Out, $"{baseName} ({n}).mp4");
+        for (var n = 2; File.Exists(dest); n++) dest = Path.Combine(Paths.Out, $"{baseName} ({n}){Path.GetExtension(name)}");
         File.Move(temp, dest);
         return dest;
     }
