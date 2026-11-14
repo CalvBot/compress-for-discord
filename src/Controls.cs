@@ -276,8 +276,10 @@ sealed class Timeline : Control
     /// <summary>Height of the row of tabs above the thumbnails</summary>
     int TabH => Px(14);
     int TabW => Px(16);
-    float X(double t) => (float)(t / Duration * Width);
-    double T(int x) => Math.Clamp(x / (double)Math.Max(1, Width) * Duration, 0, Duration);
+    /// <summary>Empty strip at the left, so the timeline lines up with the tracks below and their buttons</summary>
+    int G => Px(Tracks.Gutter);
+    float X(double t) => G + (float)(t / Duration * (Width - G));
+    double T(int x) => Math.Clamp((x - G) / (double)Math.Max(1, Width - G) * Duration, 0, Duration);
 
     public void Reset(double duration)
     {
@@ -391,13 +393,14 @@ sealed class Timeline : Control
         var g = e.Graphics;
         g.Clear(Parent?.BackColor ?? Theme.Bg);
         int top = TabH, bodyH = Height - top;
-        using (var black = new SolidBrush(Color.Black)) g.FillRectangle(black, 0, top, Width, bodyH);
+        int left = G, bodyW = Width - left;
+        using (var black = new SolidBrush(Color.Black)) g.FillRectangle(black, left, top, bodyW, bodyH);
 
         // Thumbnails, cropped to fill each cell
         var n = Thumbs.Length;
         for (var i = 0; i < n; i++)
         {
-            var cell = new RectangleF(i * Width / (float)n, top, Width / (float)n + 1, bodyH);
+            var cell = new RectangleF(left + i * bodyW / (float)n, top, Math.Min(bodyW / (float)n + 1, Width - left - i * bodyW / (float)n), bodyH);
             if (Thumbs[i] is not { } img)
             {
                 using var b = new SolidBrush(Color.FromArgb(i % 2 == 0 ? 18 : 26, Color.White));
@@ -413,7 +416,7 @@ sealed class Timeline : Control
         int s = (int)Math.Round(X(Start)), en = (int)Math.Round(X(End)), edge = Math.Max(2, Px(3)), tw = TabW;
         using (var dim = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
         {
-            g.FillRectangle(dim, 0, top, s, bodyH);
+            g.FillRectangle(dim, left, top, s - left, bodyH);
             g.FillRectangle(dim, en, top, Width - en, bodyH);
         }
         using (var brand = new SolidBrush(Enabled ? Theme.Brand : Theme.Secondary))
@@ -445,7 +448,7 @@ sealed class Timeline : Control
             g.DrawLine(head, X(Current), top, X(Current), Height);
         if (Focused)
             using (var focus = new Pen(Color.FromArgb(120, Theme.Brand), 2))
-                g.DrawRectangle(focus, 1, top + 1, Width - 2, bodyH - 2);
+                g.DrawRectangle(focus, left + 1, top + 1, bodyW - 2, bodyH - 2);
     }
 }
 
@@ -501,8 +504,8 @@ sealed class RoundBox : Panel
 
 /// <summary>
 /// One audio track drawn as a waveform with its volume line on top. Dragging up or down changes the volume.
-/// Alt+click, or the button at the start of the lane, adds a point so the volume can change over time;
-/// right-clicking a point removes it.
+/// To its left are two buttons: mute, and add a point at the playhead so the volume can change over time
+/// (Alt+click adds one under the mouse). Right-clicking a point removes it.
 /// </summary>
 sealed class VolumeLane : Control
 {
@@ -513,11 +516,11 @@ sealed class VolumeLane : Control
     public double Duration = 1, Start, End = 1, Current;
     /// <summary>False for a muted track (drawn grey, left out of the mix)</summary>
     public bool Active = true;
-    /// <summary>The track's name, shown on a badge at the left that also mutes and unmutes it</summary>
+    /// <summary>The track's name, shown at the top left of the lane</summary>
     public string Label = "";
     /// <summary>Nothing audible in this track; said on the badge</summary>
     public bool Silent;
-    /// <summary>The badge was clicked: Active has flipped</summary>
+    /// <summary>The mute button was clicked: Active has flipped</summary>
     public event Action? MuteToggled;
     /// <summary>Volume while there are no points: 1 = unchanged, 0 = silent, 2 = double</summary>
     public double Volume = 1;
@@ -548,8 +551,11 @@ sealed class VolumeLane : Control
     protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
     protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
     int Pad => Px(4);
-    float X(double t) => (float)(t / Duration * Width);
-    double T(int x) => Math.Clamp(x / (double)Math.Max(1, Width) * Duration, 0, Duration);
+    /// <summary>Room at the left for the buttons; the lane itself starts after it, in line with the timeline</summary>
+    int G => Px(Tracks.Gutter);
+    int BodyW => Math.Max(1, Width - G);
+    float X(double t) => G + (float)(t / Duration * BodyW);
+    double T(int x) => Math.Clamp((x - G) / (double)BodyW * Duration, 0, Duration);
     float Y(double v) => Pad + (float)((2 - v) / 2 * (Height - 2 * Pad));
     // Sticks to 100% when close, so "unchanged" is easy to hit
     static double Snap(double v) { v = Math.Clamp(v, 0, 2); return Math.Abs(v - 1) < 0.06 ? 1 : Math.Round(v, 2); }
@@ -576,8 +582,9 @@ sealed class VolumeLane : Control
     }
 
     string BadgeText => Label + (Silent ? " · silent" : "");
-    Rectangle AddButton => new(Px(4), Px(4), Px(18), Px(18));
-    Rectangle Badge => new(Px(26), Px(4), Px(22) + TextRenderer.MeasureText(BadgeText, Small, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
+    Rectangle MuteButton => Tracks.Button(this, 0);
+    Rectangle AddButton => Tracks.Button(this, 1);
+    Rectangle Badge => new(G + Px(5), Px(4), Px(10) + TextRenderer.MeasureText(BadgeText, Small, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
 
     /// <summary>Adds a point on the line at a time (or finds the one already there); returns its index</summary>
     int AddKey(double t)
@@ -601,13 +608,14 @@ sealed class VolumeLane : Control
             Committed?.Invoke();
             return;
         }
-        if (e.Button == MouseButtons.Left && Badge.Contains(e.Location))
+        if (e.Button == MouseButtons.Left && MuteButton.Contains(e.Location))
         {
             Active = !Active;
             Invalidate();
             MuteToggled?.Invoke();
             return;
         }
+        if (e.X < G) return;
         var k = HitKey(e.Location);
         if (e.Button == MouseButtons.Right && k >= 0)
         {
@@ -643,7 +651,7 @@ sealed class VolumeLane : Control
             Volume = Snap(grabVolume + (grabY - e.Y) / (double)Math.Max(1, Height - 2 * Pad) * 2);
             Invalidate();
         }
-        else Cursor = Badge.Contains(e.Location) || AddButton.Contains(e.Location) ? Cursors.Hand : HitKey(e.Location) >= 0 ? Cursors.SizeAll : Keys.Count == 0 ? Cursors.SizeNS : Cursors.Default;
+        else Cursor = e.X < G ? MuteButton.Contains(e.Location) || AddButton.Contains(e.Location) ? Cursors.Hand : Cursors.Default : HitKey(e.Location) >= 0 ? Cursors.SizeAll : Keys.Count == 0 ? Cursors.SizeNS : Cursors.Default;
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -660,7 +668,7 @@ sealed class VolumeLane : Control
         var g = e.Graphics;
         g.Clear(Parent?.BackColor ?? Theme.Bg2);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var shape = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), Px(6));
+        using var shape = Theme.Round(new RectangleF(G, 0, BodyW - 1, Height - 1), Px(6));
         using (var bg = new SolidBrush(Theme.Bg3)) g.FillPath(bg, shape);
         g.SetClip(shape);
 
@@ -670,18 +678,18 @@ sealed class VolumeLane : Control
             var loudest = Math.Max(peaks.Max(), 0.02f);
             using var inside = new Pen(Active ? Theme.Brand : Theme.Secondary);
             using var outside = new Pen(Color.FromArgb(90, Active ? Theme.Brand : Theme.Secondary));
-            for (var x = 0; x < Width; x++)
+            for (var x = 0; x < BodyW; x++)
             {
-                var t = x / (double)Width * Duration;
+                var t = x / (double)BodyW * Duration;
                 // Half height at 100% so there's room to show a boost
-                var h = (float)Math.Min(1, peaks[Math.Min(peaks.Length - 1, x * peaks.Length / Width)] / loudest * 0.5 * GainAt(t)) * half;
-                if (h >= 0.5f) g.DrawLine(t >= Start && t <= End ? inside : outside, x + 0.5f, mid - h, x + 0.5f, mid + h);
+                var h = (float)Math.Min(1, peaks[Math.Min(peaks.Length - 1, (int)((long)x * peaks.Length / BodyW))] / loudest * 0.5 * GainAt(t)) * half;
+                if (h >= 0.5f) g.DrawLine(t >= Start && t <= End ? inside : outside, G + x + 0.5f, mid - h, G + x + 0.5f, mid + h);
             }
         }
 
         // Volume line and its points
         var line = Color.FromArgb(Active ? 235 : 110, Color.White);
-        var pts = new List<PointF> { new(0, Y(GainAt(0))) };
+        var pts = new List<PointF> { new(G, Y(GainAt(0))) };
         pts.AddRange(Keys.Select(k => new PointF(X(k.T), Y(k.V))));
         pts.Add(new PointF(Width, Y(GainAt(Duration))));
         using (var pen = new Pen(line, 1.5f)) g.DrawLines(pen, pts.ToArray());
@@ -691,18 +699,22 @@ sealed class VolumeLane : Control
         using (var head = new Pen(Color.FromArgb(160, Color.White))) g.DrawLine(head, X(Current), 0, X(Current), Height);
         g.ResetClip();
 
-        KeyButton.Draw(g, AddButton, Enabled);
-        // Badge: speaker (struck through when muted) and the track's name. Click it to mute or unmute.
-        var badge = Badge;
-        using (var back = Theme.Round(badge, Px(4)))
-        using (var fill = new SolidBrush(Color.FromArgb(215, Theme.Bg2))) g.FillPath(fill, back);
+        // Buttons in the gutter: mute (speaker, struck through when muted) and add a point
+        var mute = MuteButton;
+        Tracks.DrawButton(g, mute);
         var ink = Active ? Theme.Text : Theme.Muted;
-        float s = Px(10), ix = badge.X + Px(5), iy = badge.Y + (badge.Height - s) / 2f;
+        float s = Px(11), ix = mute.X + (mute.Width - s * 0.8f) / 2f, iy = mute.Y + (mute.Height - s) / 2f;
         using (var speaker = new SolidBrush(ink))
             g.FillPolygon(speaker, [new PointF(ix, iy + s * 0.3f), new PointF(ix + s * 0.35f, iy + s * 0.3f), new PointF(ix + s * 0.8f, iy), new PointF(ix + s * 0.8f, iy + s), new PointF(ix + s * 0.35f, iy + s * 0.7f), new PointF(ix, iy + s * 0.7f)]);
         if (!Active)
-            using (var strike = new Pen(Theme.Danger, Math.Max(1.5f, Px(2)))) g.DrawLine(strike, ix - 1, iy + s, ix + s, iy);
-        TextRenderer.DrawText(g, BadgeText, Small, new Rectangle(badge.X + Px(18), badge.Y, badge.Width, badge.Height), ink, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            using (var strike = new Pen(Theme.Danger, Math.Max(1.5f, Px(2)))) g.DrawLine(strike, ix - 2, iy + s, ix + s, iy);
+        KeyButton.Draw(g, AddButton, Enabled);
+
+        // The track's name on the lane
+        var badge = Badge;
+        using (var back = Theme.Round(badge, Px(4)))
+        using (var fill = new SolidBrush(Color.FromArgb(215, Theme.Bg2))) g.FillPath(fill, back);
+        TextRenderer.DrawText(g, BadgeText, Small, new Rectangle(badge.X + Px(5), badge.Y, badge.Width, badge.Height), ink, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
         var label = dragKey >= 0 ? $"{Keys[dragKey].V * 100:0}%" : Keys.Count == 0 ? $"{Volume * 100:0}%" : "";
         TextRenderer.DrawText(g, label, Small, new Rectangle(0, Px(2), Width - Px(6), Height), Theme.Muted, TextFormatFlags.Right | TextFormatFlags.Top | TextFormatFlags.NoPrefix);
@@ -861,14 +873,35 @@ sealed class CropView : Control
     }
 }
 
-/// <summary>The small "add a key point here" button at the start of each track</summary>
+/// <summary>The strip at the left of the timeline and every track, holding each track's buttons</summary>
+static class Tracks
+{
+    /// <summary>Width of the strip, in 96-dpi pixels: two buttons and a gap before the track</summary>
+    public const int Gutter = 58;
+
+    /// <summary>Where a track's first (0) or second (1) button goes: side by side, centred on the track's height</summary>
+    public static Rectangle Button(Control track, int slot)
+    {
+        int Px(int v) => (int)Math.Round(v * track.DeviceDpi / 96f);
+        var size = Px(24);
+        return new Rectangle(slot * (size + Px(4)), (track.Height - size) / 2, size, size);
+    }
+
+    public static void DrawButton(Graphics g, Rectangle r)
+    {
+        using var back = Theme.Round(r, r.Height / 4f);
+        using var fill = new SolidBrush(Theme.Bg3);
+        g.FillPath(fill, back);
+    }
+}
+
+/// <summary>The "add a key point at the playhead" button each track has</summary>
 static class KeyButton
 {
     public static void Draw(Graphics g, Rectangle r, bool enabled)
     {
-        using (var back = Theme.Round(r, r.Height / 4f))
-        using (var fill = new SolidBrush(Color.FromArgb(215, Theme.Bg2))) g.FillPath(fill, back);
-        float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f, d = r.Height * 0.28f;
+        Tracks.DrawButton(g, r);
+        float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f, d = r.Height * 0.25f;
         using var ink = new SolidBrush(enabled ? Theme.Text : Theme.Muted);
         g.FillPolygon(ink, [new PointF(cx, cy - d), new PointF(cx + d, cy), new PointF(cx, cy + d), new PointF(cx - d, cy)]);
     }
@@ -908,9 +941,12 @@ sealed class KeyLane : Control
     protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Fit(); }
     protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); Fit(); }
 
-    Rectangle AddButton => new(Px(4), Px(4), Px(18), Px(18));
-    float X(double t) => (float)(t / Duration * Width);
-    double T(int x) => Math.Clamp(x / (double)Math.Max(1, Width) * Duration, 0, Duration);
+    // Same column as the audio tracks' add-a-point buttons
+    Rectangle AddButton => Tracks.Button(this, 1);
+    int G => Px(Tracks.Gutter);
+    int BodyW => Math.Max(1, Width - G);
+    float X(double t) => G + (float)(t / Duration * BodyW);
+    double T(int x) => Math.Clamp((x - G) / (double)BodyW * Duration, 0, Duration);
     float Y(double level) => Height - Px(9) - (float)(Math.Clamp(level, 0, 1) * (Height - Px(18)));
     double Level(int i) => i < Levels.Count ? Levels[i] : 0;
 
@@ -925,6 +961,7 @@ sealed class KeyLane : Control
         base.OnMouseDown(e);
         if (!Enabled) return;
         if (e.Button == MouseButtons.Left && AddButton.Contains(e.Location)) { AddRequested?.Invoke(Current); return; }
+        if (e.X < G) return;
         var k = HitKey(e.X);
         if (e.Button == MouseButtons.Right && k >= 0) RemoveRequested?.Invoke(k);
         else if (e.Button == MouseButtons.Left && k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt)) AddRequested?.Invoke(T(e.X));
@@ -951,14 +988,14 @@ sealed class KeyLane : Control
         var g = e.Graphics;
         g.Clear(Parent?.BackColor ?? Theme.Bg);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var track = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), Px(6));
+        using var track = Theme.Round(new RectangleF(G, 0, BodyW - 1, Height - 1), Px(6));
         using (var bg = new SolidBrush(Theme.Bg3)) g.FillPath(bg, track);
         g.SetClip(track);
 
         // The zoom over time: flat before the first point and after the last
         if (Keys.Count > 0)
         {
-            var pts = new List<PointF> { new(0, Y(Level(0))) };
+            var pts = new List<PointF> { new(G, Y(Level(0))) };
             for (var i = 0; i < Keys.Count; i++) pts.Add(new PointF(X(Keys[i]), Y(Level(i))));
             pts.Add(new PointF(Width, Y(Level(Keys.Count - 1))));
             using var line = new Pen(Color.FromArgb(200, Theme.Brand), Math.Max(1.5f, Px(2)));
@@ -977,7 +1014,7 @@ sealed class KeyLane : Control
 
         KeyButton.Draw(g, AddButton, Enabled);
         const string name = "Position & scale";
-        var badge = new Rectangle(Px(26), Px(4), Px(10) + TextRenderer.MeasureText(name, SmallFont, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
+        var badge = new Rectangle(G + Px(5), Px(4), Px(10) + TextRenderer.MeasureText(name, SmallFont, Size.Empty, TextFormatFlags.NoPrefix).Width, Px(18));
         using (var back = Theme.Round(badge, Px(4)))
         using (var fill = new SolidBrush(Color.FromArgb(215, Theme.Bg2))) g.FillPath(fill, back);
         TextRenderer.DrawText(g, name, SmallFont, new Rectangle(badge.X + Px(5), badge.Y, badge.Width, badge.Height), Theme.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);

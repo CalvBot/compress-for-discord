@@ -28,6 +28,8 @@ sealed class EncodeRequest
     public int? ScaleShortSide, Fps;
     public bool Portrait;
     public string Encoder = "auto";
+    /// <summary>Volume of the finished mix (the master lane); null = unchanged</summary>
+    public TrackMix? Master;
     public bool CappedBySource;
     public double Calibration;
     /// <summary>Crop box in source pixels (left, top, width) at each key time; null = whole frame. Every box has the shape CropW:CropH.</summary>
@@ -309,12 +311,14 @@ static class Ff
     }
 
     /// <param name="offset">source time the input was seeked to</param>
-    internal static string? AudioGraph(List<TrackMix> tracks, double offset)
+    /// <param name="master">volume applied to the finished mix; null = leave it</param>
+    internal static string? AudioGraph(List<TrackMix> tracks, double offset, TrackMix? master = null)
     {
         if (tracks.Count == 0) return null;
+        var after = master != null && (master.Keys is { Count: > 0 } || Math.Abs(master.Volume - 1) > 0.001) ? "," + VolumeFilter(master, offset) : "";
         var parts = tracks.Select((t, i) => $"[0:a:{t.Index}]{VolumeFilter(t, offset)},aformat=channel_layouts=stereo[a{i}]").ToList();
-        if (tracks.Count == 1) return parts[0][..^4] + "[aout]";
-        return $"{string.Join(";", parts)};{string.Concat(tracks.Select((_, i) => $"[a{i}]"))}amix=inputs={tracks.Count}:normalize=0:duration=longest[aout]";
+        if (tracks.Count == 1) return parts[0][..^4] + after + "[aout]";
+        return $"{string.Join(";", parts)};{string.Concat(tracks.Select((_, i) => $"[a{i}]"))}amix=inputs={tracks.Count}:normalize=0:duration=longest{after}[aout]";
     }
 
     static async Task RunEncode(List<string> args, double duration, double from, double span, string stage, IProgress<(string Stage, double Progress)> progress, CancellationToken ct)
@@ -356,7 +360,7 @@ static class Ff
         else if (o.ScaleShortSide is { } s) vf.Add(o.Portrait ? $"scale={s}:-2" : $"scale=-2:{s}");
         if (o.Fps is { } f) vf.Add($"fps={f}");
         vf.Add("format=yuv420p");
-        var audio = o.AudioKbps > 0 ? AudioGraph(o.Tracks, o.Start) : null;
+        var audio = o.AudioKbps > 0 ? AudioGraph(o.Tracks, o.Start, o.Master) : null;
         var videoGraph = $"[0:v:0]{string.Join(",", vf)}[vout]";
         var graph = videoGraph + (audio != null ? $";{audio}" : "");
 

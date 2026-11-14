@@ -28,8 +28,8 @@ sealed class MainForm : DarkForm
     double cropAspect;
     /// <summary>One point = a fixed crop. More = the box moves and zooms between them.</summary>
     readonly List<CropKey> cropKeys = [];
-    /// <summary>Keep the sound (the ticked tracks, mixed) or drop it</summary>
-    bool audioOn;
+    /// <summary>There is sound and the master lane isn't muted</summary>
+    bool AudioOn => trackUi.Count > 0 && masterLane.Active;
     /// <summary>The section under the timeline (crop key points, audio tracks) is open</summary>
     bool tracksOpen;
     /// <summary>" · size · resolution · bitrate" shown after the file name</summary>
@@ -48,8 +48,8 @@ sealed class MainForm : DarkForm
     readonly CropView preview;
     readonly KeyLane keyLane;
     readonly Timeline timeline;
-    readonly FlowLayoutPanel sizeChips, resChips, cropChips, fpsChips, encChips, audioChips, tracksPanel, buttons;
-    readonly Label audioLabel;
+    readonly FlowLayoutPanel sizeChips, resChips, cropChips, fpsChips, encChips, tracksPanel, buttons;
+    readonly VolumeLane masterLane;
     readonly TextBox customMb, fpsBox, timeBox;
     readonly RoundBox fpsField;
     readonly Pill previewBtn, advBtn;
@@ -129,7 +129,7 @@ sealed class MainForm : DarkForm
         timeBox.LostFocus += (_, _) => { timeField.Invalidate(); timeBox.Text = Planner.FormatTime(timeline.Current); };
         timeLabel = new Label { Dock = DockStyle.Fill, Padding = new Padding(8, 0, 0, 0), ForeColor = Theme.Muted, Font = new Font("Consolas", 9f), TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
         // Advanced: the tracks under the timeline (position and scale, audio)
-        advBtn = new Pill("Advanced") { Dock = DockStyle.Right };
+        advBtn = new Pill("Advanced ▾") { Dock = DockStyle.Right };
         advBtn.Click += (_, _) => { tracksOpen = !tracksOpen; ShowTracks(); };
         Panel Gap() => new() { Dock = DockStyle.Left, Width = 6 };
         // Docked from the last one added inwards: Play ends up leftmost
@@ -198,19 +198,17 @@ sealed class MainForm : DarkForm
         // as the timeline so every time lines up with the video above
         tracksPanel = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = Padding.Empty, Visible = false };
         tracksPanel.Controls.Add(keyLane);
-        audioLabel = OptLabel("Audio");
-        // Dropping the audio frees its bitrate for the video, which can be what makes a clip fit
-        audioChips = ChipRow();
-        audioChips.Controls.Add(Chip("On", true, audioChips, v => SetAudio((bool)v!)));
-        audioChips.Controls.Add(Chip("Off", false, audioChips, v => SetAudio((bool)v!)));
+        // The finished sound, always in view under the timeline: its mute button turns the audio off, and its
+        // line is the overall volume. The individual tracks are under Advanced.
+        masterLane = new VolumeLane { Label = "Audio", Margin = new Padding(0, 4, 0, 0), PixelWidth = ContentWidth, Visible = false };
+        masterLane.MuteToggled += () => { UpdateSummary(); RestartIfPlaying(); };
+        masterLane.Committed += RestartIfPlaying;
 
         options.Controls.Add(OptLabel("Size"), 0, 0); options.Controls.Add(sizeChips, 1, 0);
         options.Controls.Add(OptLabel("Scale"), 0, 1); options.Controls.Add(resChips, 1, 1);
         options.Controls.Add(OptLabel("Crop"), 0, 2); options.Controls.Add(cropChips, 1, 2);
         options.Controls.Add(OptLabel("Frame rate"), 0, 3); options.Controls.Add(fpsChips, 1, 3);
         options.Controls.Add(OptLabel("Encoder"), 0, 4); options.Controls.Add(encChips, 1, 4);
-        options.Controls.Add(audioLabel, 0, 5); options.Controls.Add(audioChips, 1, 5);
-        audioLabel.Visible = audioChips.Visible = false;
 
         bar = new Bar { Size = new Size(ContentWidth, 8), Visible = false, Margin = new Padding(0, 0, 0, 8) };
 
@@ -242,7 +240,7 @@ sealed class MainForm : DarkForm
         bottom.Controls.Add(info, 0, 0);
         bottom.Controls.Add(buttons, 1, 0);
 
-        root.Controls.AddRange([titleRow, preview, timeline, tracksPanel, timeRow, options, bar, bottom]);
+        root.Controls.AddRange([titleRow, preview, timeline, masterLane, tracksPanel, timeRow, options, bar, bottom]);
         Controls.Add(root);
         AcceptDrop(f => { if (encodeCts == null && outPath == null) Program.OpenVideo(f, this); });
         // Clicking anywhere else stops typing in the custom size box
@@ -314,15 +312,16 @@ sealed class MainForm : DarkForm
         foreach (var t in probe.AudioTracks)
         {
             var lane = new VolumeLane { Label = t.Label, Margin = new Padding(0, 4, 0, 0), Duration = probe.Duration, End = probe.Duration, Active = t.Index == 0 };
-            lane.MuteToggled += () => { UpdateSummary(); RestartIfPlaying(); };
+            lane.MuteToggled += () => { UpdateMasterPeaks(); UpdateSummary(); RestartIfPlaying(); };
+            lane.Committed += UpdateMasterPeaks;
             // Hear a volume change once the mouse is let go
             lane.Committed += RestartIfPlaying;
             tracksPanel.Controls.Add(lane);
             trackUi.Add((t, lane));
         }
+        (masterLane.Duration, masterLane.End, masterLane.Visible) = (probe.Duration, probe.Duration, trackUi.Count > 0);
         LayoutLanes();
-        audioLabel.Visible = audioChips.Visible = true;
-        SetAudio(trackUi.Count > 0);
+        ShowTracks();
         _ = LoadPeaks();
 
         UpdateTimeLabel();
@@ -348,7 +347,7 @@ sealed class MainForm : DarkForm
             var (key, value) = (part.Split('=')[0], part[(part.IndexOf('=') + 1)..]);
             switch (key)
             {
-                case "audio": SetAudio(value != "off"); break;
+                case "audio": masterLane.Active = value != "off"; masterLane.Invalidate(); UpdateSummary(); break;
                 case "adv": tracksOpen = true; ShowTracks(); break;
                 case "grow":
                     // Same path as dragging the window edge
@@ -475,7 +474,7 @@ sealed class MainForm : DarkForm
         playBtn.Text = "❚❚  Pause";
         try
         {
-            await Player.Play(file, from, to ?? timeline.End, Mix(), DecodeSize(), probe!.Width, probe.Height, probe.Fps, (bmp, t) =>
+            await Player.Play(file, from, to ?? timeline.End, Mix(), Master, DecodeSize(), probe!.Width, probe.Height, probe.Fps, (bmp, t) =>
             {
                 if (cts.IsCancellationRequested || IsDisposed) { bmp.Dispose(); return; }
                 var old = preview.Image;
@@ -536,24 +535,34 @@ sealed class MainForm : DarkForm
 
     void LayoutLanes()
     {
+        masterLane.PixelWidth = timeline.Width;
         foreach (var (_, lane) in trackUi) lane.PixelWidth = timeline.Width;
     }
 
-    void SetAudio(bool on)
+    /// <summary>The master lane's waveform: the loudest unmuted track at each moment, at its volume</summary>
+    void UpdateMasterPeaks()
     {
-        audioOn = on && trackUi.Count > 0;
-        SelectChip(audioChips, audioOn);
-        ShowTracks();
-        UpdateSummary();
-        RestartIfPlaying();
+        var live = trackUi.Where(t => t.Lane.Active && t.Lane.Peaks != null).Select(t => t.Lane).ToList();
+        if (live.Count == 0) masterLane.Peaks = null;
+        else
+        {
+            var mix = new float[live[0].Peaks!.Length];
+            for (var i = 0; i < mix.Length; i++)
+            {
+                var t = (i + 0.5) / mix.Length * timeline.Duration;
+                mix[i] = live.Max(l => i < l.Peaks!.Length ? (float)(l.Peaks[i] * l.GainAt(t)) : 0);
+            }
+            masterLane.Peaks = mix;
+        }
+        masterLane.Invalidate();
     }
 
     /// <summary>The Advanced section under the timeline: the position and scale track, then the audio tracks</summary>
     void ShowTracks()
     {
         advBtn.On = tracksOpen;
+        advBtn.Text = tracksOpen ? "Advanced ▴" : "Advanced ▾";
         tracksPanel.Visible = tracksOpen && probe != null;
-        foreach (var (_, lane) in trackUi) lane.Visible = audioOn;
         ShowCrop();
     }
 
@@ -603,10 +612,14 @@ sealed class MainForm : DarkForm
             lane.Peaks = peaks;
             lane.Silent = peaks != null && peaks.Max() < 0.01f;
             lane.Invalidate();
+            UpdateMasterPeaks();
         }
     }
 
-    List<TrackMix> Mix() => probe == null || !audioOn ? []
+    /// <summary>Overall volume from the master lane, applied after the tracks are mixed</summary>
+    TrackMix? Master => AudioOn ? new TrackMix(-1, masterLane.Volume, [.. masterLane.Keys]) : null;
+
+    List<TrackMix> Mix() => probe == null || !AudioOn ? []
         : trackUi.Where(t => t.Lane.Active).Select(t => new TrackMix(t.Track.Index, t.Lane.Volume, [.. t.Lane.Keys])).ToList();
 
     // ---------- crop and zoom ----------
@@ -810,7 +823,7 @@ sealed class MainForm : DarkForm
         if (!timeBox.Focused) timeBox.Text = Planner.FormatTime(timeline.Current);
         timeLabel.Text = $"{Planner.FormatTime(timeline.Start)} – {Planner.FormatTime(timeline.End)} ({Planner.FormatTime(timeline.End - timeline.Start, false)})";
         ShowCrop();
-        foreach (var (_, lane) in trackUi)
+        foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane))
         {
             (lane.Start, lane.End, lane.Current) = (timeline.Start, timeline.End, timeline.Current);
             if (lane.Visible) lane.Invalidate();
@@ -917,6 +930,7 @@ sealed class MainForm : DarkForm
                 VideoKbps = plan.VideoKbps,
                 AudioKbps = plan.AudioKbps,
                 Tracks = Mix(),
+                Master = Master,
                 ScaleShortSide = plan.ScaleShortSide,
                 Fps = plan.Fps,
                 Portrait = probe.Height > probe.Width,
@@ -972,8 +986,8 @@ sealed class MainForm : DarkForm
         timeline.Enabled = !busy;
         playBtn.Enabled = !busy;
         customMb.Enabled = fpsBox.Enabled = timeBox.Enabled = !busy;
-        foreach (var (_, lane) in trackUi) lane.Enabled = !busy;
-        foreach (var p in new[] { sizeChips, resChips, cropChips, fpsChips, encChips, audioChips }.SelectMany(g => g.Controls.OfType<Pill>())) p.Enabled = !busy;
+        foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane)) lane.Enabled = !busy;
+        foreach (var p in new[] { sizeChips, resChips, cropChips, fpsChips, encChips }.SelectMany(g => g.Controls.OfType<Pill>())) p.Enabled = !busy;
         preview.Enabled = keyLane.Enabled = !busy;
         // The button keeps its size and says what's happening; hovering turns it into Cancel
         goBtn.AltText = busy ? "Compressing…" : null;

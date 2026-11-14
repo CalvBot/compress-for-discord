@@ -18,7 +18,7 @@ static class Player
     static string S(double d) => d.ToString("0.000", CultureInfo.InvariantCulture);
 
     /// <summary>Plays [from, to). onFrame gets each frame and its time; returns when done or cancelled.</summary>
-    public static async Task Play(string path, double from, double to, List<TrackMix> tracks, Size box, double srcW, double srcH, double srcFps,
+    public static async Task Play(string path, double from, double to, List<TrackMix> tracks, TrackMix? master, Size box, double srcW, double srcH, double srcFps,
         Action<Bitmap, double> onFrame, CancellationToken ct)
     {
         to = Math.Min(to, from + MaxSpan);
@@ -32,7 +32,7 @@ static class Player
 
         // Audio first: mixed exactly like the encode will mix it
         MemoryStream? wav = null;
-        if (Ff.AudioGraph(tracks, from) is { } graph)
+        if (Ff.AudioGraph(tracks, from, master) is { } graph)
         {
             var (code, bytes, _) = await Ff.Run(Ff.Ffmpeg, ["-hide_banner", "-loglevel", "error", "-ss", S(from), "-t", S(span), "-i", path,
                 "-filter_complex", graph, "-map", "[aout]", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-f", "wav", "-"], ct);
