@@ -774,6 +774,15 @@ sealed class VolumeLane : Control
         Committed?.Invoke();
     }
 
+    /// <summary>Back to 100% throughout: no points, and the level line where it started</summary>
+    public void ResetLevel()
+    {
+        Keys.Clear();
+        Volume = 1;
+        Invalidate();
+        Committed?.Invoke();
+    }
+
     protected override void OnMouseWheel(MouseEventArgs e)
     {
         if (ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift)) HeightRequested?.Invoke(Math.Sign(e.Delta));

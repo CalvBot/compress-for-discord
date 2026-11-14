@@ -870,6 +870,7 @@ sealed class MainForm : DarkForm
         if (probe == null || encodeCts != null) return;
         trackMenu.Items.Clear();
         trackMenu.Add("Clear keyframes", "", () => ClearKeys(track));
+        if (track is VolumeLane audio) trackMenu.Add("Reset audio level", "", () => { audio.ResetLevel(); if (audio != masterLane) UpdateMasterPeaks(); });
         if (track is KeyLane) trackMenu.Add(separate ? "Combine position and scale" : "Separate position and scale", "", () => SetSeparate(!separate));
         trackMenu.Show(track, at);
     }
