@@ -748,10 +748,33 @@ sealed class MainForm : DarkForm
                         // As if the window was made bigger before Advanced was opened
                         if (int.TryParse(value, out var pre)) { extraH = pre; ApplyStretch(); FitToContent(); Application.DoEvents(); }
                         var start = Size;
+                        if (value == "wide")
+                        {
+                            // Sideways only: wider then narrower, logging each step
+                            OnResizeBegin(EventArgs.Empty);
+                            foreach (var dx in new[] { 30, 30, 30, -20, -20, -20, -20, -20, -20 })
+                            {
+                                var asked = Width + dx;
+                                Size = new Size(asked, Height);
+                                Application.DoEvents();
+                                AppLog.Info($"Size: wide step asked {asked} got {Width}x{Height}, extraW {extraW}, min {MinimumSize.Width}");
+                            }
+                            OnResizeEnd(EventArgs.Empty);
+                            return;
+                        }
                         Drag(0, -40, 40);
                         var small = Size;
                         Drag(0, 40, 60);
                         var tall = Size;
+                        // Widen then narrow, counting what repaints
+                        Drag(40, 0, 10);
+                        var spies = new List<MessageSpy>();
+                        void Spy(Control c) { spies.Add(new MessageSpy(c)); foreach (Control child in c.Controls) Spy(child); }
+                        Spy(this);
+                        Drag(-20, 0, 10);
+                        foreach (var s in spies) s.ReleaseHandle();
+                        foreach (var (what, (count, ms)) in MessageSpy.Totals.Where(kv => kv.Key.EndsWith(" 0xf") || kv.Key.EndsWith(" 0x14") || kv.Key.EndsWith(" 0x85")).OrderByDescending(kv => kv.Value.Count).Take(30))
+                            AppLog.Info($"Size:   10 steps: {what} x{count}, {ms:0.0} ms");
                         Drag(-40, 0, 40);
                         AppLog.Info($"Size: start {start.Width}x{start.Height}, shrunk {small.Width}x{small.Height} (min {MinimumSize.Height}), grown {tall.Width}x{tall.Height}, narrowed {Width}x{Height} (min {MinimumSize.Width}), {log.Count} wrong-way steps");
                         foreach (var l in log.Take(6)) AppLog.Info("Size:   " + l);
@@ -1818,6 +1841,11 @@ sealed class MainForm : DarkForm
                 int dw = ClientSize.Width - (c.Right + c.Left), dh = ClientSize.Height - (c.Bottom + c.Top);
                 if (dw != 0 || dh != 0)
                 {
+                    // Nothing inside is drawn until it's all resized, then it's drawn once. Otherwise each panel
+                    // that changes size has Windows redraw everything in it (every chip, frame and all) on its own,
+                    // as it goes, and the options flash as you drag the window wider or narrower.
+                    SendMessage(c.Handle, 0x000B, 0, 0); // WM_SETREDRAW off
+                    redrawHeld = c;
                     extraW = Math.Max(0, extraW + dw);
                     // Height goes to the track box while it's open, so closing Advanced leaves the window as it was.
                     // What the box can't take (it's at its smallest, or already shows every track) goes to the
@@ -1842,8 +1870,20 @@ sealed class MainForm : DarkForm
             var slack = tracksOpen ? Math.Max(0, scroller.Height - TrackBoxRange().Min) : 0;
             if (baseW > 0) MinimumSize = new Size(Width - extraW, Height - extraH - slack);
         }
-        finally { fitting = false; }
+        finally
+        {
+            fitting = false;
+            if (redrawHeld is { } held)
+            {
+                redrawHeld = null;
+                SendMessage(held.Handle, 0x000B, 1, 0);
+                // Everything in it, at once
+                held.Refresh();
+            }
+        }
     }
+
+    Control? redrawHeld;
 
     // Moving to a screen with other scaling: go back to the smallest size and measure again
     protected override void OnDpiChanged(DpiChangedEventArgs e)
