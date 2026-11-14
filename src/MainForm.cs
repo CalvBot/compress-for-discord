@@ -80,8 +80,8 @@ sealed class MainForm : DarkForm
     readonly Timeline timeline;
     readonly FlowLayoutPanel sizeChips, resChips, fpsChips, buttons;
     readonly VolumeLane masterLane;
-    readonly TextBox customMb, fpsBox, timeBox;
-    readonly RoundBox fpsField;
+    readonly TextBox customMb, fpsBox, resBox, timeBox;
+    readonly RoundBox fpsField, resField;
     readonly Pill previewBtn, advBtn;
     readonly Bar bar;
     readonly Pill goBtn, moreBtn, downloadBtn, settingsBtn, playBtn;
@@ -268,6 +268,24 @@ sealed class MainForm : DarkForm
             UpdateSummary();
         };
 
+        // Scale: 100, 75 and 50% as chips, any other percentage typed in
+        resBox = new TextBox { BackColor = Theme.Bg2, ForeColor = Theme.Text, BorderStyle = BorderStyle.None, PlaceholderText = "Custom", TextAlign = HorizontalAlignment.Center };
+        resField = new RoundBox { Margin = new Padding(0, 0, 6, 6), Cursor = Cursors.IBeam };
+        resBox.GotFocus += (_, _) => resField.Invalidate();
+        resBox.LostFocus += (_, _) => resField.Invalidate();
+        resField.Controls.Add(resBox);
+        resField.Click += (_, _) => resBox.Focus();
+        resBox.TextChanged += (_, _) =>
+        {
+            if (probe == null || !int.TryParse(resBox.Text.Trim().TrimEnd('%'), out var n) || n < 1) return;
+            // Never above the source, and never below a watchable size
+            n = Math.Min(n, 100);
+            while (n < 100 && ScaledSide(n) < 144) n++;
+            scalePct = n < 100 ? n : null;
+            SelectChip(resChips!, scalePct);
+            UpdateSummary();
+        };
+
         resChips = ChipRow();
         fpsChips = ChipRow();
         // Under the timeline: position and scale, the result audio, then every audio track, all as wide as the
@@ -328,7 +346,7 @@ sealed class MainForm : DarkForm
         // Clicking anywhere else stops typing in the custom size box
         void HookClicks(Control c)
         {
-            if (c == customMb || c == timeBox || c == fpsBox) return;
+            if (c == customMb || c == timeBox || c == fpsBox || c == resBox) return;
             c.MouseDown += (_, _) => { if (Typing) LeaveCustomBox(); };
             foreach (Control child in c.Controls) HookClicks(child);
         }
@@ -381,8 +399,9 @@ sealed class MainForm : DarkForm
         ActiveControl = timeline;
 
         // Scale: a percentage of the source, or of the crop when there is one
-        foreach (var pct in Planner.Scales.Where(pct => ScaledSide(pct) >= 144))
-            resChips.Controls.Add(Chip($"{pct}%", pct == 100 ? null : pct, resChips, v => { scalePct = (int?)v; UpdateSummary(); }));
+        foreach (var pct in Planner.ScaleChips.Where(pct => ScaledSide(pct) >= 144))
+            resChips.Controls.Add(Chip($"{pct}%", pct == 100 ? null : pct, resChips, v => { resBox.Text = ""; scalePct = (int?)v; UpdateSummary(); }));
+        resChips.Controls.Add(resField);
         SelectChip(resChips, null);
         fpsChips.Controls.Add(Chip($"{fps}", null, fpsChips, v => { fpsBox.Text = ""; frameRate = (int?)v; UpdateSummary(); }));
         foreach (var f in Planner.FrameRates.Where(f => f < probe.Fps - 0.5))
@@ -483,6 +502,7 @@ sealed class MainForm : DarkForm
             }
             scalePct = p.ScalePct;
             SelectChip(resChips, scalePct);
+            if (scalePct is { } pctNow && !resChips.Controls.OfType<Pill>().Any(c => c.On)) resBox.Text = pctNow.ToString();
             frameRate = p.FrameRate;
             SelectChip(fpsChips, frameRate);
             if (frameRate is { } rate && !fpsChips.Controls.OfType<Pill>().Any(c => c.On)) fpsBox.Text = rate.ToString();
@@ -545,7 +565,7 @@ sealed class MainForm : DarkForm
                 case "step": for (var i = 0; i < int.Parse(value); i++) HandleEditKey(Keys.Right); break;
                 case "busy": SetBusy(true); ShowStatus("Compressing on GPU · 42%", Theme.Text); bar.Value = 0.42; break;
                 case "fps": frameRate = int.Parse(value); SelectChip(fpsChips, frameRate); UpdateSummary(); break;
-                case "res": scalePct = int.Parse(value); SelectChip(resChips, scalePct); UpdateSummary(); break;
+                case "res": resBox.Text = value; break;
                 case "crop": SetCrop(value); break;
                 case "rate": fpsBox.Text = value; break;
                 case "separate": SetSeparate(true); break;
@@ -1666,7 +1686,7 @@ sealed class MainForm : DarkForm
         bar.Value = 0;
         timeline.Enabled = !busy;
         playBtn.Enabled = !busy;
-        customMb.Enabled = fpsBox.Enabled = timeBox.Enabled = !busy;
+        customMb.Enabled = fpsBox.Enabled = resBox.Enabled = timeBox.Enabled = !busy;
         foreach (var lane in trackUi.Select(t => t.Lane).Append(masterLane)) lane.Enabled = !busy;
         foreach (var p in new[] { sizeChips, resChips, fpsChips }.SelectMany(g => g.Controls.OfType<Pill>())) p.Enabled = !busy;
         preview.Enabled = keyLane.Enabled = posLane.Enabled = scaleLane.Enabled = !busy;
@@ -1749,7 +1769,7 @@ sealed class MainForm : DarkForm
     void LeaveCustomBox() => ActiveControl = timeline;
 
     /// <summary>The keyboard is being used to type into one of the boxes, so it isn't for shortcuts</summary>
-    bool Typing => customMb.Focused || fpsBox.Focused || timeBox.Focused;
+    bool Typing => customMb.Focused || fpsBox.Focused || resBox.Focused || timeBox.Focused;
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
