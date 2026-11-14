@@ -1593,21 +1593,18 @@ sealed class MainForm : DarkForm
 
     /// <summary>
     /// Colour for the result line: green when the bitrate suits the resolution and frame rate, yellow when it's
-    /// on the low side, red when it will look bad. With a suggestion of what to lower.
+    /// on the low side, red when it will look bad.
     /// </summary>
-    (Color Color, string Hint) Quality(Plan plan, int fps)
+    Color Quality(Plan plan, int fps)
     {
         // Already as good as the source: nothing to gain
-        if (plan.CappedBySource) return (Theme.Green, "");
+        if (plan.CappedBySource) return Theme.Green;
         const double Good = 0.05; // bits per pixel per frame that H.264 needs to look clean
         var src = PlanSource;
         double shortSrc = Math.Min(src.Width, src.Height), aspect = Math.Max(src.Width, src.Height) / shortSrc;
-        double Bits(int side, int f) => plan.VideoKbps * 1000.0 / (side * side * aspect * f);
-        var bits = Bits(plan.OutputShortSide, fps);
-        if (bits >= Good) return (Theme.Green, "");
-        var better = Planner.Scales.Where(pct => ScaledSide(pct) < plan.OutputShortSide && Bits(ScaledSide(pct), fps) >= Good).Select(pct => (int?)pct).FirstOrDefault();
-        var hint = better != null ? $" · try {better}%" : fps > 30 ? " · try 30 fps" : " · try a shorter clip";
-        return (bits >= Good / 2 ? Theme.Warn : Theme.Danger, hint);
+        var side = plan.OutputShortSide;
+        var bits = plan.VideoKbps * 1000.0 / (side * side * aspect * fps);
+        return bits >= Good ? Theme.Green : bits >= Good / 2 ? Theme.Warn : Theme.Danger;
     }
 
     /// <summary>One frame at the chosen frame rate, in seconds: what's marked on the timeline and what moved key points land on</summary>
@@ -1639,10 +1636,10 @@ sealed class MainForm : DarkForm
         if (plan.Feasible)
         {
             var fps = plan.Fps ?? (int)Math.Round(probe.Fps);
-            var (color, hint) = Quality(plan, fps);
-            // Just the basics on the line; hovering it shows the whole breakdown
-            // The size is the limit picked above, so the line leads with what that buys: the video's bitrate
-            summary.Text = $"{Planner.FormatRate(plan.VideoKbps)} · {plan.OutputShortSide}p{fps}{hint}";
+            var color = Quality(plan, fps);
+            // Just the basics on the line; hovering it shows the whole breakdown. The size is the limit picked
+            // above, so the line leads with what that buys: the video's bitrate (its colour says how it'll look)
+            summary.Text = $"{Planner.FormatRate(plan.VideoKbps)} · {plan.OutputShortSide}p{fps}";
             summary.ForeColor = color;
             var quality = plan.CappedBySource ? "Same as the source"
                 : color == Theme.Green ? "Good"
@@ -1655,7 +1652,7 @@ sealed class MainForm : DarkForm
                 // The video's own rate, so turning the audio off shows the room it hands to the picture
                 $"Video:  {Planner.FormatRate(plan.VideoKbps)}",
                 $"Audio:  {(plan.AudioKbps > 0 ? Planner.FormatRate(plan.AudioKbps) : "off")}",
-                $"Quality:  {quality}{(hint != "" ? $" ({hint.TrimStart(' ', '·').Trim()})" : "")}",
+                $"Quality:  {quality}",
                 $"Encoder:  {encoder}"));
         }
         else
