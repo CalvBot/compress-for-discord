@@ -386,9 +386,16 @@ sealed class MainForm : DarkForm
 
     // ---------- startup ----------
 
+    // Appears once the video's been read and its first frame is in, rather than empty and then filling in.
+    // A second at most, so a slow read still shows the window (saying it's reading).
+    protected override bool RevealWhenShown => false;
+
     protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
+        var cap = new System.Windows.Forms.Timer { Interval = 1000 };
+        cap.Tick += (_, _) => { cap.Dispose(); Reveal(); };
+        cap.Start();
         CaptureBase();
         _ = Task.Run(Paths.CleanupStale);
         _ = Task.Run(Log.Calibration).ContinueWith(t =>
@@ -429,10 +436,10 @@ sealed class MainForm : DarkForm
         var missing = err != null;
         settingsBtn.Visible = downloadBtn.Visible = missing;
         goBtn.Visible = moreBtn.Visible = !missing;
-        if (err != null) { ShowStatus(err, Theme.Danger); return; }
+        if (err != null) { ShowStatus(err, Theme.Danger); Reveal(); return; }
         ShowStatus("Reading video…", Theme.Muted);
         try { probe = await Ff.Probe(file); }
-        catch (Exception ex) { AppLog.Error($"Couldn't read {file}", ex); ShowStatus(ex.Message, Theme.Danger); goBtn.Enabled = false; return; }
+        catch (Exception ex) { AppLog.Error($"Couldn't read {file}", ex); ShowStatus(ex.Message, Theme.Danger); goBtn.Enabled = false; Reveal(); return; }
         if (IsDisposed) return;
         AppLog.Info($"Loaded {file}: {probe.Width}x{probe.Height} {probe.Fps:0.##} fps, {probe.Duration:0.00} s, {probe.AudioTracks.Count} audio track(s)");
         // Ready in the background for scrubbing; until it is (or if Windows can't read it), frames come from ffmpeg
@@ -864,7 +871,11 @@ sealed class MainForm : DarkForm
                     }
                     break;
                 }
-                case "play": TogglePlay(); break;
+                // play, or play=ms to wait that long first (once opening's work has settled)
+                case "play":
+                    if (int.TryParse(value, out var playIn)) _ = Task.Delay(playIn).ContinueWith(_ => BeginInvoke(TogglePlay));
+                    else TogglePlay();
+                    break;
                 case "goto": timeBox.Text = value; if (ParseTime(value) is { } go) timeline.Seek(go); break;
                 case "cropkeys":
                     // A zoom: the full box at 20% of the way in, half the width and off-centre by 60%
@@ -1167,6 +1178,7 @@ sealed class MainForm : DarkForm
         var old = preview.Image;
         preview.Image = img;
         old?.Dispose();
+        Reveal();
     }
 
     /// <summary>Windows' decoder with the video kept open (opened in the background once the video is read); null until then or if it can't</summary>

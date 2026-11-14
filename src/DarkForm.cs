@@ -63,6 +63,10 @@ class DarkForm : Form
 
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+    [DllImport("user32.dll")]
+    static extern bool RedrawWindow(IntPtr hwnd, IntPtr rect, IntPtr region, int flags);
+    const int DWMWA_CLOAK = 13, RDW_ALLCHILDREN = 0x80, RDW_UPDATENOW = 0x100;
+
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
@@ -70,6 +74,31 @@ class DarkForm : Form
         DwmSetWindowAttribute(Handle, 20, ref dark, 4); // immersive dark mode
         var caption = Theme.Bg3.R | Theme.Bg3.G << 8 | Theme.Bg3.B << 16;
         DwmSetWindowAttribute(Handle, 35, ref caption, 4); // caption color
+        // Kept out of sight until it's drawn, so it never shows up as blank boxes for a moment.
+        // Not again if the handle is remade later.
+        if (!revealed) { var on = 1; cloaked = DwmSetWindowAttribute(Handle, DWMWA_CLOAK, ref on, 4) == 0; }
+    }
+
+    bool cloaked, revealed;
+
+    /// <summary>Whether the window appears as soon as it's shown and drawn; if not, it calls Reveal once it's ready</summary>
+    protected virtual bool RevealWhenShown => true;
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        if (RevealWhenShown) BeginInvoke(Reveal);
+    }
+
+    /// <summary>Draws everything that's waiting to be drawn, then lets the window be seen. Only the first call does anything.</summary>
+    protected void Reveal()
+    {
+        if (revealed || IsDisposed) return;
+        revealed = true;
+        if (!cloaked || !IsHandleCreated) return;
+        RedrawWindow(Handle, IntPtr.Zero, IntPtr.Zero, RDW_UPDATENOW | RDW_ALLCHILDREN);
+        var off = 0;
+        DwmSetWindowAttribute(Handle, DWMWA_CLOAK, ref off, 4);
     }
 
     // ---------- small builders shared by the windows ----------
