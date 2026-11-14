@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 
 namespace CompressForDiscord;
 
@@ -47,6 +48,11 @@ sealed class Pill : Control
     /// <summary>Rounds only the left or right corners, for split buttons</summary>
     public bool FlatLeft { get; init; }
     public bool FlatRight { get; init; }
+    string? alt;
+    /// <summary>Drawn in place of Text without resizing the button, e.g. "Compressing…"</summary>
+    public string? AltText { get => alt; set { alt = value; Invalidate(); } }
+    /// <summary>Drawn on a red fill while the mouse is over the button, e.g. "✕  Cancel"</summary>
+    public string? HoverText { get; set; }
 
     public Pill(string text, PillKind kind = PillKind.Chip)
     {
@@ -94,7 +100,7 @@ sealed class Pill : Control
                 text = on ? Color.White : Theme.Text;
                 break;
             case PillKind.Primary:
-                fill = hover && Enabled ? Theme.BrandHover : Theme.Brand;
+                fill = hover && Enabled ? HoverText != null ? Theme.Danger : Theme.BrandHover : Theme.Brand;
                 break;
             default:
                 fill = hover && Enabled ? Theme.SecondaryHover : Theme.Secondary;
@@ -108,7 +114,8 @@ sealed class Pill : Control
         using var path = Shape(r, kind == PillKind.Chip ? Height / 2f : Px(8));
         using (var b = new SolidBrush(fill)) g.FillPath(b, path);
         if (border is { } bc) using (var pen = new Pen(Enabled ? bc : Color.FromArgb(110, bc))) g.DrawPath(pen, path);
-        TextRenderer.DrawText(g, Text, Font, ClientRectangle, text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+        var label = hover && Enabled && HoverText != null ? HoverText : alt ?? Text;
+        TextRenderer.DrawText(g, label, Font, ClientRectangle, text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
     }
 
     /// <summary>Rounded rectangle; a split-button half keeps its joined side square, out to the edge</summary>
@@ -141,20 +148,63 @@ sealed class DarkMenu : ContextMenuStrip
 {
     public DarkMenu()
     {
-        Renderer = new ToolStripProfessionalRenderer(new Colors()) { RoundedEdges = false };
+        Renderer = new Painter();
         BackColor = Theme.Bg3;
         ForeColor = Theme.Text;
         ShowImageMargin = false;
         Font = new Font("Segoe UI", 10f);
-        Padding = new Padding(6);
+        Padding = new Padding(4);
+    }
+
+    [DllImport("dwmapi.dll")]
+    static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        var round = 2; // DWMWCP_ROUND: Windows 11 rounds the popup's corners (ignored on Windows 10)
+        DwmSetWindowAttribute(Handle, 33, ref round, 4);
+    }
+
+    /// <summary>Opens just below a control, at least `width` wide, with its left edge (or right edge) lined up with it</summary>
+    public void ShowUnder(Control anchor, int width, bool alignRight = false)
+    {
+        MinimumSize = new Size(width, 0);
+        var x = alignRight ? width - Math.Max(width, GetPreferredSize(Size.Empty).Width) : 0;
+        Show(anchor, new Point(x, anchor.Height + 4));
     }
 
     public ToolStripMenuItem Add(string text, string keys, Action onClick)
     {
-        var item = new ToolStripMenuItem(text) { ShortcutKeyDisplayString = keys == "" ? null : keys, ForeColor = Theme.Text, Padding = new Padding(10, 8, 10, 8) };
+        var item = new ToolStripMenuItem(text) { ShortcutKeyDisplayString = keys == "" ? null : keys, ForeColor = Theme.Text, Padding = new Padding(6, 7, 6, 7) };
         item.Click += (_, _) => onClick();
         Items.Add(item);
         return item;
+    }
+
+    sealed class Painter : ToolStripProfessionalRenderer
+    {
+        public Painter() : base(new Colors()) => RoundedEdges = false;
+
+        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) { }
+
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+        {
+            if (!e.Item.Selected || !e.Item.Enabled) return;
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using var shape = Theme.Round(new RectangleF(0.5f, 0.5f, e.Item.Width - 1.5f, e.Item.Height - 1.5f), 5 * e.Item.Owner!.DeviceDpi / 96f);
+            using var fill = new SolidBrush(Theme.Brand);
+            e.Graphics.FillPath(fill, shape);
+        }
+
+        // The stock renderer sits the text low; centre it in the full height of the item
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            var shortcut = e.Text != e.Item.Text;
+            var r = new Rectangle(e.TextRectangle.X, 0, e.TextRectangle.Width, e.Item.Height);
+            TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, r, e.Item.Selected ? Color.White : shortcut ? Theme.Muted : Theme.Text,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | (shortcut ? TextFormatFlags.Right : TextFormatFlags.Left));
+        }
     }
 
     sealed class Colors : ProfessionalColorTable
@@ -295,6 +345,10 @@ sealed class Timeline : Control
         var t = T(e.X);
         switch (drag)
         {
+            // Normally the playhead follows the edge so you see the frame you're cutting on. With Shift it stays
+            // where it is, and the edge snaps to it when close.
+            case DragKind.Start when ModifierKeys.HasFlag(Keys.Shift): SetStart(SnapToPlayhead(t, e.X)); break;
+            case DragKind.End when ModifierKeys.HasFlag(Keys.Shift): SetEnd(SnapToPlayhead(t, e.X)); break;
             case DragKind.Start: SetStart(t); Seek(Start); break;
             case DragKind.End: SetEnd(t); Seek(End); break;
             case DragKind.Range:
@@ -306,10 +360,23 @@ sealed class Timeline : Control
         }
     }
 
+    double SnapToPlayhead(double t, int x) => Math.Abs(x - X(Current)) <= Px(7) ? Current : t;
+
     protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); drag = DragKind.None; }
 
     protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
     protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+
+    /// <summary>A tab: rounded on top, square where it joins the frame</summary>
+    static GraphicsPath TabShape(int x, int w, int h, int r)
+    {
+        var p = new GraphicsPath();
+        p.AddArc(x, 0, r * 2, r * 2, 180, 90);
+        p.AddArc(x + w - r * 2, 0, r * 2, r * 2, 270, 90);
+        p.AddLine(x + w, h, x, h);
+        p.CloseFigure();
+        return p;
+    }
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -334,7 +401,8 @@ sealed class Timeline : Control
             g.DrawImage(img, cell, new RectangleF((img.Width - sw) / 2, (img.Height - sh) / 2, sw, sh), GraphicsUnit.Pixel);
         }
 
-        float s = X(Start), en = X(End), edge = Math.Max(2, Px(3)), tw = TabW;
+        // Whole pixels throughout, so the tabs and the frame meet without soft or missing pixels
+        int s = (int)Math.Round(X(Start)), en = (int)Math.Round(X(End)), edge = Math.Max(2, Px(3)), tw = TabW;
         using (var dim = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
         {
             g.FillRectangle(dim, 0, top, s, bodyH);
@@ -350,14 +418,21 @@ sealed class Timeline : Control
             // Bar between the tabs (drag it to move the selection) and the two tabs
             g.FillRectangle(brand, s, top - edge, en - s, edge);
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
             foreach (var x in new[] { s, en - tw })
-                using (var tab = Theme.Round(new RectangleF(x, 0, tw, top + edge), Px(4)))
+                using (var tab = TabShape(x, tw, top, Px(4)))
                     g.FillPath(brand, tab);
             g.SmoothingMode = SmoothingMode.None;
+            g.PixelOffsetMode = PixelOffsetMode.Default;
         }
-        using (var grip = new Pen(Color.FromArgb(230, Color.White), Math.Max(1, Px(2))))
-            foreach (var x in new[] { s + tw / 2f, en - tw / 2f })
-                g.DrawLine(grip, x, Px(4), x, top - Px(2));
+        // Grip: a 3x3 grid of dots on each tab
+        using (var dots = new SolidBrush(Color.FromArgb(235, Color.White)))
+        {
+            int dot = Px(2), gap = Px(2), grid = dot * 3 + gap * 2;
+            foreach (var x in new[] { s, en - tw })
+                for (var i = 0; i < 9; i++)
+                    g.FillRectangle(dots, x + (tw - grid) / 2 + i % 3 * (dot + gap), (top - grid) / 2 + i / 3 * (dot + gap), dot, dot);
+        }
         using (var head = new Pen(Color.White, 2))
             g.DrawLine(head, X(Current), top, X(Current), Height);
         if (Focused)
@@ -416,7 +491,7 @@ sealed class Dropdown
     /// <summary>The user picked something from the menu</summary>
     public event Action<object>? Picked;
 
-    public Dropdown() => Button.Click += (_, _) => { if (items.Count > 0) menu.Show(Button, new Point(0, Button.Height + 4)); };
+    public Dropdown() => Button.Click += (_, _) => { if (items.Count > 0) menu.ShowUnder(Button, Button.Width); };
 
     public void SetItems(IEnumerable<(string Label, object Value)> list, object? selected)
     {

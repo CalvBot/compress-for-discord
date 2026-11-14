@@ -77,7 +77,8 @@ static class Planner
         if (!double.IsFinite(sec) || sec < 0) sec = 0;
         var h = (int)(sec / 3600);
         var m = (int)(sec % 3600 / 60);
-        var s = precise ? (sec % 60).ToString("00.0") : ((int)(sec % 60)).ToString("00");
+        // Hundredths, so a one-frame step shows up
+        var s = precise ? (Math.Floor(sec % 60 * 100) / 100).ToString("00.00") : ((int)(sec % 60)).ToString("00");
         return h > 0 ? $"{h}:{m:00}:{s}" : $"{m}:{s}";
     }
 }

@@ -53,7 +53,7 @@ class DarkForm : Form
         FitToContent();
     }
 
-    void FitToContent()
+    protected virtual void FitToContent()
     {
         if (Controls.Count == 0 || WindowState == FormWindowState.Minimized) return;
         var c = Controls[0];
