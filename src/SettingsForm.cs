@@ -21,7 +21,7 @@ sealed class SettingsForm : DarkForm
     public Project? OpenProject { get; private set; }
     readonly RecentList recentList;
     readonly DarkMenu recentMenu = new();
-    readonly Label recentNote;
+    readonly LinkLabel clearLink;
 
     public SettingsForm()
     {
@@ -38,8 +38,6 @@ sealed class SettingsForm : DarkForm
         recentList.RowClicked += OpenRecent;
         recentList.RowMenu += ShowRecentMenu;
         root.Controls.Add(recentList);
-        recentNote = Muted("");
-        recentNote.Margin = new Padding(0, 4, 10, 0);
         var keepLabel = Muted("Keep the last");
         keepLabel.Margin = new Padding(0, 5, 8, 0);
         var keep = new List<Pill>();
@@ -56,10 +54,9 @@ sealed class SettingsForm : DarkForm
             };
             keep.Add(chip);
         }
-        var clear = Link("Clear", () => { Projects.Clear(); FillRecent(); });
-        clear.Margin = new Padding(8, 5, 0, 0);
-        root.Controls.Add(Row([keepLabel, .. keep, clear]));
-        root.Controls.Add(recentNote);
+        clearLink = Link("Clear", () => { Projects.Clear(); FillRecent(); });
+        clearLink.Margin = new Padding(8, 5, 0, 0);
+        root.Controls.Add(Row([keepLabel, .. keep, clearLink]));
         FillRecent();
 
         // ffmpeg: a folder you can type or paste, Browse, and Open folder. Empty = found automatically.
@@ -101,9 +98,7 @@ sealed class SettingsForm : DarkForm
         // Encoder
         root.Controls.Add(Section("Encoder"));
         var gpu = new Pill("GPU") { Margin = new Padding(0, 0, 6, 0) };
-        var cpu = new Pill("CPU") { Margin = new Padding(0, 0, 12, 0) };
-        var encoderNote = Muted("GPU is much faster. CPU looks slightly better at the same size.");
-        encoderNote.Margin = new Padding(0, 5, 0, 0);
+        var cpu = new Pill("CPU") { Margin = Padding.Empty };
         void PickEncoder(string value)
         {
             cfg.Encoder = value;
@@ -113,7 +108,7 @@ sealed class SettingsForm : DarkForm
         gpu.Click += (_, _) => PickEncoder("auto");
         cpu.Click += (_, _) => PickEncoder("x264");
         (gpu.On, cpu.On) = (cfg.Encoder != "x264", cfg.Encoder == "x264");
-        root.Controls.Add(Row(gpu, cpu, encoderNote));
+        root.Controls.Add(Row(gpu, cpu));
         // "GPU" means NVIDIA or AMD hardware encoding; say so when this PC has neither
         Shown += async (_, _) =>
         {
@@ -123,7 +118,6 @@ sealed class SettingsForm : DarkForm
             if (IsDisposed || found != "x264") return;
             gpu.Enabled = false;
             (gpu.On, cpu.On) = (false, true);
-            encoderNote.Text = "No supported graphics card found, so the CPU is used.";
         };
 
         // General
@@ -178,9 +172,7 @@ sealed class SettingsForm : DarkForm
     {
         var recent = Projects.Recent();
         recentList.SetItems([.. recent.Select(r => new RecentList.Item(r.Path, r.Project, !File.Exists(r.Project.File)))]);
-        recentList.Visible = recent.Count > 0;
-        recentNote.Text = cfg.RecentProjects == 0 ? "Projects aren't saved." : recent.Count == 0 ? "Nothing yet. Each video you compress shows up here." : "";
-        recentNote.Visible = recentNote.Text != "";
+        recentList.Visible = clearLink.Visible = recent.Count > 0;
     }
 
     /// <summary>Opens a recent project; one whose video has gone asks where it is first</summary>
@@ -240,16 +232,14 @@ sealed class SettingsForm : DarkForm
         pathBox.PlaceholderText = found && !custom ? Path.GetDirectoryName(Ff.Ffmpeg) ?? "" : "Folder with ffmpeg.exe";
         // A folder that doesn't have it still falls back to an automatic find, so check it's really the typed one
         var usingTyped = found && custom && Ff.Ffmpeg.StartsWith(cfg.FfmpegPath.TrimEnd('\\', '/').Replace('/', '\\'), StringComparison.OrdinalIgnoreCase);
-        (ffmpegStatus.Text, ffmpegStatus.ForeColor) =
-            custom && !usingTyped ? ("ffmpeg.exe isn't in that folder.", Theme.Danger)
-            : found ? (custom ? "Using this folder." : "Found automatically.", Theme.Muted)
-            : ("Not found. Download it, or paste its folder above.", Theme.Danger);
+        // Only problems get a line; a working ffmpeg needs nothing said
+        ffmpegStatus.Text = custom && !usingTyped ? "ffmpeg.exe isn't in that folder." : found ? "" : "Not found. Download it, or paste its folder above.";
+        ffmpegStatus.ForeColor = Theme.Danger;
+        ffmpegStatus.Parent!.Visible = ffmpegStatus.Text != "";
         openBtn.Enabled = found;
-        // Offer the download only when it's wanted: nothing found yet, or to refresh the copy this app downloaded.
-        // An ffmpeg from somewhere else is the user's own to keep up to date.
-        var ours = found && Ff.Ffmpeg.StartsWith(Paths.Ffmpeg, StringComparison.OrdinalIgnoreCase);
-        downloadLink.Visible = !found || ours;
-        downloadLink.Text = ours ? "Update" : "Download ffmpeg";
+        // The download is only offered when there's no ffmpeg to use. (It isn't checked for updates: the
+        // builds it comes from are remade daily, so there would always be a "newer" one.)
+        downloadLink.Visible = !found;
         if (found) FfmpegChanged?.Invoke();
     }
 
@@ -276,6 +266,7 @@ sealed class SettingsForm : DarkForm
         pathBox.Enabled = browseBtn.Enabled = downloadLink.Enabled = false;
         bar.Value = 0;
         bar.Visible = true;
+        ffmpegStatus.Parent!.Visible = true;
         var progress = new Progress<double>(p => { ffmpegStatus.Text = $"Downloading ffmpeg · {p * 100:0}%"; ffmpegStatus.ForeColor = Theme.Text; bar.Value = p; });
         try
         {
