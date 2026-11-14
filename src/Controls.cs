@@ -821,8 +821,13 @@ abstract class KeyTrackLane : Control
     public event Action<int>? HeightRequested;
     /// <summary>Alt + wheel: zoom the timeline by this factor around this time</summary>
     public event Action<double, double>? ZoomRequested;
-    /// <summary>A key point on this track was selected (so any selected on another track can be let go)</summary>
-    public event Action? KeySelected;
+    /// <summary>
+    /// A key point on this track was selected. Added = true when it joined the selection (Shift+click, Shift+A),
+    /// so other tracks' selected points stay; otherwise they're let go.
+    /// </summary>
+    public event Action<bool>? KeySelected;
+    /// <summary>The tracks whose selected points move along when this one's are dragged (the window says which)</summary>
+    public Func<IEnumerable<KeyTrackLane>>? Partners;
 
     /// <summary>How many key points there are, and when each one is</summary>
     protected abstract int KeyCount { get; }
@@ -853,7 +858,7 @@ abstract class KeyTrackLane : Control
     {
         if (!Selection.Only(index)) return;
         Invalidate();
-        if (index >= 0) KeySelected?.Invoke();
+        if (index >= 0) KeySelected?.Invoke(false);
     }
 
     /// <summary>Selects the points at these times (the ones just pasted)</summary>
@@ -862,7 +867,71 @@ abstract class KeyTrackLane : Control
         var ts = times.ToList();
         Selection.SetMany(Enumerable.Range(0, KeyCount).Where(i => ts.Any(t => Math.Abs(KeyTime(i) - t) < Interp.Same)));
         Invalidate();
-        if (Selection.Count > 0) KeySelected?.Invoke();
+        if (Selection.Count > 0) KeySelected?.Invoke(false);
+    }
+
+    /// <summary>A: every point on this track (others let go). Shift+A, adding: alongside the other tracks'. False if it has none.</summary>
+    public bool SelectAll(bool adding)
+    {
+        if (KeyCount == 0) return false;
+        Selection.SetMany(Enumerable.Range(0, KeyCount));
+        Invalidate();
+        KeySelected?.Invoke(adding);
+        return true;
+    }
+
+    // ---------- moving the selected points, here and on the partner tracks ----------
+
+    /// <summary>How far of dt this track's selected points can move, short of an unselected neighbour and the ends</summary>
+    public abstract double LimitShift(double dt);
+    /// <summary>Moves this track's selected points by dt (already limited)</summary>
+    public abstract void ShiftSelected(double dt);
+    /// <summary>A drag that moved this track's selected points along with another's has ended</summary>
+    public virtual void ShiftDone() { }
+    IEnumerable<double> SelectedTimes => Selection.Set.Where(i => i < KeyCount).Select(KeyTime);
+    /// <summary>The partner tracks moved by the drag going on (told when it ends)</summary>
+    protected readonly List<KeyTrackLane> draggedWith = [];
+
+    /// <summary>
+    /// A drag of the held point (now at held) towards the time under the mouse (want): every selected point here and
+    /// on the partner tracks moves by the same amount, as far as all of them can. The held point lands on a frame;
+    /// with Shift, any selected point that comes near the playhead lands on it; with Alt+Shift nothing snaps.
+    /// Exact = want is where it must go (back where it was), with no snapping.
+    /// </summary>
+    protected void DragShift(double held, double want, bool exact)
+    {
+        var shift = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift);
+        var free = exact || shift && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt);
+        var dt = (free ? Math.Clamp(want, 0, Duration) : OnFrame(want)) - held;
+        var others = Partners?.Invoke().Where(p => p != this && p.Selection.Count > 0).ToList() ?? [];
+        if (shift && !free)
+        {
+            // Within a few pixels of the playhead: the nearest point onto it
+            var reach = Px(8) * Span / BodyW;
+            double? pull = null;
+            foreach (var k in SelectedTimes.Concat(others.SelectMany(o => o.SelectedTimes)))
+            {
+                var gap = Current - (k + dt);
+                if (Math.Abs(gap) <= reach && (pull == null || Math.Abs(gap) < Math.Abs(pull.Value))) pull = gap;
+            }
+            dt += pull ?? 0;
+        }
+        dt = LimitShift(dt);
+        foreach (var o in others) dt = o.LimitShift(dt);
+        if (dt == 0) return;
+        ShiftSelected(dt);
+        foreach (var o in others)
+        {
+            o.ShiftSelected(dt);
+            if (!draggedWith.Contains(o)) draggedWith.Add(o);
+        }
+    }
+
+    /// <summary>The drag is over: the partner tracks it moved commit</summary>
+    protected void EndPartnerDrag()
+    {
+        foreach (var o in draggedWith) o.ShiftDone();
+        draggedWith.Clear();
     }
 
     /// <summary>
@@ -876,7 +945,7 @@ abstract class KeyTrackLane : Control
         if (k >= 0 && shift)
         {
             if (Selection.Contains(k)) toggleOff = k;
-            else { Selection.Add(k); Invalidate(); KeySelected?.Invoke(); }
+            else { Selection.Add(k); Invalidate(); KeySelected?.Invoke(true); }
         }
         else if (k < 0) { if (!shift) Select(-1); }
         else if (!Selection.Contains(k)) Select(k);
@@ -1187,7 +1256,20 @@ sealed class VolumeLane : KeyTrackLane
         dragKey = dragStretch = -1;
         dragFlat = added = false;
         if (busy && changed) Committed?.Invoke();
+        EndPartnerDrag();
     }
+
+    public override double LimitShift(double dt) =>
+        Selection.Count == 0 ? dt : Interp.ClampShift(Keys.Select(p => p.T).ToList(), Selection.Set, dt, Duration);
+
+    public override void ShiftSelected(double dt)
+    {
+        foreach (var i in Selection.Set)
+            if (i < Keys.Count) Keys[i] = (Keys[i].T + dt, Keys[i].V, Keys[i].E);
+        Invalidate();
+    }
+
+    public override void ShiftDone() => Committed?.Invoke();
 
     protected override void OnMouseCaptureChanged(EventArgs e)
     {
@@ -1202,19 +1284,18 @@ sealed class VolumeLane : KeyTrackLane
         {
             if (Math.Abs(e.X - grabX) > Px(3) || Math.Abs(e.Y - grabY) > Px(3)) moved = true;
             if (!moved) return;
-            // The point held and every other selected one move together; none can pass an unselected neighbour.
-            // Shift: in time only. Ctrl: the level only, staying where it is in time.
-            // A point can sit between frames (after the frame rate was lowered, say) and stays there while only its
-            // value is dragged. Once it's moved sideways it lands on a frame.
-            var group = Selection.Contains(dragKey) ? Selection.Set : new HashSet<int> { dragKey };
-            var t = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control) || Math.Abs(e.X - grabX) <= Px(3) ? grabT : OnFrame(T(e.X));
-            var dt = Interp.ClampShift(Keys.Select(p => p.T).ToList(), group, t - Keys[dragKey].T, Duration);
+            // The point held and every other selected one (on other tracks too) move together; none can pass an
+            // unselected neighbour. Shift: in time only (snapping to the playhead). Ctrl: the level only, staying
+            // where it is in time. A point can sit between frames (after the frame rate was lowered, say) and stays
+            // there while only its value is dragged. Once it's moved sideways it lands on a frame.
+            if (!Selection.Contains(dragKey)) Selection.Add(dragKey);
+            var stay = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control) || Math.Abs(e.X - grabX) <= Px(3);
+            DragShift(Keys[dragKey].T, stay ? grabT : T(e.X), stay);
             var dv = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift) ? 0 : V(e.Y) - Keys[dragKey].V;
             // The whole group stays within 0..200%
-            var vs = group.Where(i => i < Keys.Count).Select(i => Keys[i].V).ToList();
-            dv = Math.Clamp(dv, -vs.Min(), 2 - vs.Max());
-            foreach (var i in group)
-                if (i < Keys.Count) Keys[i] = (Keys[i].T + dt, Math.Round(Keys[i].V + dv, 3), Keys[i].E);
+            var group = Selection.Set.Where(i => i < Keys.Count).ToList();
+            dv = Math.Clamp(dv, -group.Min(i => Keys[i].V), 2 - group.Max(i => Keys[i].V));
+            foreach (var i in group) Keys[i] = (Keys[i].T, Math.Round(Keys[i].V + dv, 3), Keys[i].E);
             Invalidate();
         }
         else if (dragStretch >= 0)
@@ -1752,8 +1833,12 @@ sealed class KeyLane : KeyTrackLane
     public event Action<double>? AddRequested;
     public event Action<int[]>? RemoveRequested;
     public event Action<int>? Picked;
-    /// <summary>These points want to move together by this much (in seconds; not yet limited by their neighbours)</summary>
-    public event Action<IReadOnlySet<int>, double>? ShiftRequested;
+    /// <summary>How far the selected points can move of this much, and moving them (the window does both, on the values behind)</summary>
+    public Func<double, double>? Limit;
+    public Action<double>? Shift;
+
+    public override double LimitShift(double dt) => Selection.Count == 0 ? dt : Limit?.Invoke(dt) ?? 0;
+    public override void ShiftSelected(double dt) { if (Selection.Count > 0) Shift?.Invoke(dt); }
 
     int dragKey = -1;
 
@@ -1797,10 +1882,11 @@ sealed class KeyLane : KeyTrackLane
         if (dragKey < 0) { Cursor = AddButton.Contains(e.Location) ? Cursors.Hand : HitKey(e.X) >= 0 ? Cursors.SizeWE : Cursors.Default; return; }
         if (!moved && Math.Abs(e.X - grabX) <= Px(3)) return;
         moved = true;
-        // The held point lands on a frame of the chosen frame rate; the rest of the selection keeps its spacing
+        // The held point lands on a frame of the chosen frame rate; the rest of the selection (on other tracks too)
+        // keeps its spacing
         if (dragKey >= Keys.Count) return;
-        var delta = OnFrame(T(e.X)) - Keys[dragKey];
-        if (delta != 0) ShiftRequested?.Invoke(Selection.Contains(dragKey) ? Selection.Set : new HashSet<int> { dragKey }, delta);
+        if (!Selection.Contains(dragKey)) Selection.Add(dragKey);
+        DragShift(Keys[dragKey], T(e.X), false);
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -1813,12 +1899,13 @@ sealed class KeyLane : KeyTrackLane
         }
         toggleOff = -1;
         dragKey = -1;
+        EndPartnerDrag();
     }
 
     protected override void OnMouseCaptureChanged(EventArgs e)
     {
         base.OnMouseCaptureChanged(e);
-        if (!Capture) { toggleOff = -1; dragKey = -1; }
+        if (!Capture) { toggleOff = -1; dragKey = -1; EndPartnerDrag(); }
     }
 
     // Everything but the playhead is kept as a picture and redrawn only when it changes (as VolumeLane does):

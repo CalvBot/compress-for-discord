@@ -152,6 +152,24 @@ sealed class SettingsForm : DarkForm
         sound.CheckedChanged += (_, _) => { cfg.PlaySound = sound.Checked; cfg.Save(); };
         root.Controls.Add(sound);
         root.Controls.Add(wavesRow);
+        // How far Ctrl+Z goes back
+        var undoLabel = Muted("Undo steps");
+        undoLabel.Margin = new Padding(0, 5, 8, 0);
+        var undo = new List<Pill>();
+        foreach (var n in new[] { 10, 25, 50, 100 })
+        {
+            var chip = new Pill($"{n}") { Margin = new Padding(0, 0, 6, 0), On = cfg.UndoSteps == n };
+            chip.Click += (_, _) =>
+            {
+                cfg.UndoSteps = n;
+                cfg.Save();
+                foreach (var c in undo) c.On = c == chip;
+            };
+            undo.Add(chip);
+        }
+        var undoRow = Row([undoLabel, .. undo]);
+        undoRow.Margin = new Padding(0, 6, 0, 0);
+        root.Controls.Add(undoRow);
 
         // Updates
         root.Controls.Add(Section("Updates"));

@@ -11,6 +11,8 @@ namespace CompressForDiscord;
 /// then halfway between those, and so on, so the shape sharpens as you watch. Zoom in and it starts again, coarse to
 /// fine, over the new view, so a long recording can be explored before it's measured. Files Windows can't read just
 /// don't get a sketch.
+/// A spot stands for the whole stretch around it, so a few milliseconds from its middle would miss a short bang
+/// elsewhere in it: in an MP4 the frames' gains (AacGains) say where each stretch is loud, and the spot is read there.
 /// </summary>
 static class AudioSketch
 {
@@ -20,6 +22,8 @@ static class AudioSketch
     const int SpotsPerView = 512;
     /// <summary>ffmpeg waits until this many spots are across the view (~0.7 s): a whole shape first, then detail</summary>
     const int LeadSpots = 64;
+    /// <summary>Most places read for one spot: where the loudest-looking tracks' loud parts are</summary>
+    const int GuidedReads = 3;
 
     /// <param name="view">The part of the recording on screen</param>
     /// <param name="leading">
@@ -40,6 +44,8 @@ static class AudioSketch
         var spots = 0;
         var leadingNow = true;
         long firstLook = -1;
+        // Stops the gains being read when the sketch stops
+        using var stopScan = CancellationTokenSource.CreateLinkedTokenSource(ct);
         try
         {
             Check(MFCreateSourceReaderFromURL(path, null!, out reader));
@@ -100,10 +106,24 @@ static class AudioSketch
             var waves = tracks.Select(t => t.Wave).ToArray();
             var n = waves[0].SketchPoints;
             var per = n / waves[0].Duration;
+            // Read where its stretch looks loudest (or nothing more to be gained there)
             var visited = new bool[n];
+            // Read at its middle, for want of the gains there yet: read again once they're in
+            var centred = new bool[n];
             var got = new int[tracks.Count];
             var peak = new int[tracks.Count];
+            var best = new int[tracks.Count];
             var samples = new short[4096];
+            var spotsAt = new List<double>();
+            var loud = new List<(double At, int Gain)>();
+
+            // The gains are read alongside, start to end; spots read before they're in are read again after
+            var gains = AacGains.Open(path, tracks.Select(t => t.Track).ToList());
+#if DEBUG
+            // To compare with the sketch read at fixed spots
+            if (Environment.GetEnvironmentVariable("CFD_TEST")?.Contains("noguide") == true) gains = null;
+#endif
+            if (gains != null) _ = Task.Run(() => gains.Scan(paused, stopScan.Token), CancellationToken.None);
             // ffmpeg has measured all of it: the sketch wouldn't show anywhere
             while (!waves.All(w => w.Complete))
             {
@@ -120,7 +140,7 @@ static class AudioSketch
                 // The finest spacing worth reading here: about two pixels apart on screen
                 var finest = 1;
                 while (finest * SpotsPerView < b - a + 1) finest *= 2;
-                var pass = NextPass(visited, a, b, finest, out var stride);
+                var pass = NextPass(n, a, b, finest, Todo, out var stride);
                 if (pass.Count == 0)
                 {
                     // All of what's on screen is sketched: wait for a zoom or scroll somewhere new
@@ -129,25 +149,67 @@ static class AudioSketch
                     continue;
                 }
                 // The first few passes over what's on screen go before ffmpeg's exact measuring, so the whole view has
-                // a shape within a fraction of a second
-                Lead((b - a + 1) / stride <= LeadSpots);
+                // a shape within a fraction of a second (not going over spots again once the gains are in)
+                Lead((b - a + 1) / stride <= LeadSpots && pass.Any(i => !centred[i]));
                 foreach (var i in pass)
                 {
                     // Moved: start again from coarse over the new view
                     if (view() != seen || paused() || ct.IsCancellationRequested) break;
-                    visited[i] = true;
-                    var at = waves[0].SketchTime(i);
                     // Measured there already: the sketch wouldn't show
-                    if (waveOf.Values.All(w => waves[w].Measured(at))) continue;
-                    if (ReadSpot(at)) spots++;
+                    if (waveOf.Values.All(w => waves[w].Measured(waves[0].SketchTime(i))))
+                    {
+                        visited[i] = true;
+                        continue;
+                    }
+                    if (ReadSpot(i, stride)) spots++;
                 }
             }
             AppLog.Info($"Waveform sketch: {spots} spots in {clock.ElapsedMilliseconds} ms");
 
-            bool ReadSpot(double at)
+            // A spot's stretch: stride spots wide around it
+            (double, double) Stretch(int i, int stride) => (waves[0].SketchTime(i) - stride / 2.0 / per, waves[0].SketchTime(i) + stride / 2.0 / per);
+
+            bool Todo(int i, int stride) => !visited[i] && (!centred[i] || gains!.ReadTo(Stretch(i, stride).Item2));
+
+            // Reads the sound for spot i, which stands for the stretch stride spots wide around it: where each track's
+            // gains say that stretch is loudest (a few places at most), or its middle if they can't say (yet)
+            bool ReadSpot(int i, int stride)
+            {
+                var (t0, t1) = Stretch(i, stride);
+                spotsAt.Clear();
+                if (gains != null)
+                {
+                    loud.Clear();
+                    foreach (var w in waveOf.Values) if (gains.Loudest(w, t0, t1) is { } l) loud.Add(l);
+                    foreach (var l in loud.OrderByDescending(l => l.Gain))
+                        if (spotsAt.Count < GuidedReads && spotsAt.All(at => Math.Abs(at - l.At) > 0.1)) spotsAt.Add(l.At);
+                }
+                var guided = spotsAt.Count > 0;
+                if (guided || gains == null || gains.ReadTo(t1)) visited[i] = true;
+                else centred[i] = true;
+                if (!guided) spotsAt.Add(waves[0].SketchTime(i));
+                Array.Clear(best);
+                var any = false;
+                foreach (var at in spotsAt)
+                {
+                    // From a frame early: the first piece after a jump can be quiet while the decoder warms up
+                    if (!ReadAt(guided ? at - 0.025 : at)) continue;
+                    any = true;
+                    foreach (var w in waveOf.Values)
+                    {
+                        best[w] = Math.Max(best[w], peak[w]);
+                        // Also where it was heard, for when that's zoomed in on
+                        if (guided) waves[w].Sketch(Math.Clamp((int)(at * per), 0, n - 1), peak[w], 1);
+                    }
+                }
+                if (any) foreach (var w in waveOf.Values) waves[w].Sketch(i, best[w], stride);
+                return any;
+            }
+
+            bool ReadAt(double at)
             {
                 var format = Guid.Empty;
-                var pos = new PropVariant { vt = 20, hVal = (long)(at * 1e7) };
+                var pos = new PropVariant { vt = 20, hVal = (long)(Math.Max(0, at) * 1e7) };
                 if (reader.SetCurrentPosition(ref format, ref pos) < 0) return false;
                 Array.Clear(got);
                 Array.Clear(peak);
@@ -170,8 +232,6 @@ static class AudioSketch
                     }
                     finally { Marshal.ReleaseComObject(sample); }
                 }
-                var i = Math.Clamp((int)(at * per), 0, n - 1);
-                foreach (var w in waveOf.Values) waves[w].Sketch(i, peak[w]);
                 return true;
             }
         }
@@ -179,6 +239,7 @@ static class AudioSketch
         catch (Exception ex) { AppLog.Info($"No quick waveform sketch after {spots} spots ({ex.Message})"); }
         finally
         {
+            stopScan.Cancel();
             Lead(false);
             if (reader != null) Marshal.ReleaseComObject(reader);
         }
@@ -200,12 +261,12 @@ static class AudioSketch
     /// The coarsest pass over spots a to b with any left to read: every stride-th spot, the stride halving each pass
     /// (so each pass lands halfway between the last one's), down to every finest-th
     /// </summary>
-    static List<int> NextPass(bool[] visited, int a, int b, int finest, out int stride)
+    static List<int> NextPass(int n, int a, int b, int finest, Func<int, int, bool> todo, out int stride)
     {
         var list = new List<int>();
-        for (stride = 1 << (int)Math.Log2(visited.Length); stride >= finest; stride /= 2)
+        for (stride = 1 << (int)Math.Log2(n); stride >= finest; stride /= 2)
         {
-            for (var i = (a + stride - 1) / stride * stride; i <= b; i += stride) if (!visited[i]) list.Add(i);
+            for (var i = (a + stride - 1) / stride * stride; i <= b; i += stride) if (todo(i, stride)) list.Add(i);
             if (list.Count > 0) return list;
         }
         return list;

@@ -46,6 +46,8 @@ sealed class Waveform
     // the measuring hasn't got to yet. Spot i is the sound around SketchTime(i).
     readonly byte[] sketch;
     readonly bool[] sketched;
+    /// <summary>Log2 of how many spots wide the stretch was that each sketched spot's reading stands for</summary>
+    readonly byte[] sketchSpan;
     int sketchedCount;
 
     /// <summary>How many spots the sketch has room for (a power of two)</summary>
@@ -55,12 +57,23 @@ sealed class Waveform
     /// <summary>The time t is measured properly already</summary>
     public bool Measured(double t) => known[Math.Clamp((int)(t / ChunkSeconds), 0, known.Length - 1)];
 
-    /// <summary>The loudest sample (0..32768) read around SketchTime(i)</summary>
-    public void Sketch(int i, int sample)
+    /// <summary>
+    /// The loudest sample (0..32768) heard for spot i, which stands for the stretch span spots wide around it (1: just
+    /// itself). A reading for a narrower stretch replaces one for a wider (that one's peak may be some way off); one
+    /// for as wide keeps the louder.
+    /// </summary>
+    public void Sketch(int i, int sample, int span)
     {
-        sketch[i] = Encode(sample);
-        Volatile.Write(ref sketched[i], true);
-        Interlocked.Increment(ref sketchedCount);
+        var value = Encode(sample);
+        var level = (byte)System.Numerics.BitOperations.Log2((uint)Math.Max(1, span));
+        if (sketched[i] && (level > sketchSpan[i] || level == sketchSpan[i] && value <= sketch[i])) return;
+        sketch[i] = value;
+        sketchSpan[i] = level;
+        if (!sketched[i])
+        {
+            Volatile.Write(ref sketched[i], true);
+            Interlocked.Increment(ref sketchedCount);
+        }
         Interlocked.Increment(ref version);
     }
 
@@ -73,6 +86,7 @@ sealed class Waveform
         while (points < 1 << 15 && points < duration * 8) points *= 2;
         sketch = new byte[points];
         sketched = new bool[points];
+        sketchSpan = new byte[points];
         slices = Math.Max(1, (int)Math.Ceiling(duration * Rate));
         known = new bool[(slices + ChunkSlices - 1) / ChunkSlices];
         claimed = new bool[known.Length];

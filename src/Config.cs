@@ -74,6 +74,8 @@ sealed class AppConfig
     public bool MirroredWaves { get; set; }
     /// <summary>How many recent projects are kept to open again; 0 = none are saved</summary>
     public int RecentProjects { get; set; } = 10;
+    /// <summary>How many changes Ctrl+Z can take back</summary>
+    public int UndoSteps { get; set; } = 100;
     public DateTime LastUpdateCheck { get; set; }
     /// <summary>Folder last saved to with "Compress & save"</summary>
     public string SaveFolder { get; set; } = "";

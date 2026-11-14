@@ -25,8 +25,11 @@ sealed class HelpForm : DarkForm
         ("Tracks", [
             ("Shift + wheel", "Taller / shorter tracks"),
             ("Ctrl + click", "Add a key point"),
-            ("Shift + click", "Select several; drag to move them all"),
-            ("Ctrl / Shift + drag", "Volume: level only / time only"),
+            ("Shift + click", "Select several, on any tracks; drag to move them all"),
+            ("A / Shift + A", "Select every point on this track / all tracks"),
+            ("Shift + drag a point", "Time only, snapping to the playhead"),
+            ("Alt + Shift + drag", "Time only, no snapping at all"),
+            ("Ctrl + drag", "Volume: level only"),
             ("← / → over a track", "Previous / next key point"),
             ("Ctrl+C / Ctrl+V", "Copy / paste at the playhead"),
             ("Del", "Delete selected key points"),
@@ -38,6 +41,7 @@ sealed class HelpForm : DarkForm
             ("Ctrl / Shift / Alt + corner", "Snap / from centre / reshape"),
         ]),
         ("App", [
+            ("Ctrl+Z / Ctrl+Shift+Z", "Undo / redo (steps: Settings)"),
             ("Enter / Ctrl+S", "Compress & copy / save…"),
             ("Ctrl+O", "Open another video"),
             ("Esc", "Cancel / close"),

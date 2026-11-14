@@ -479,6 +479,7 @@ sealed class MainForm : DarkForm
         // Chips, tracks and the saved project all go in, then the window is laid out and drawn once
         Batch(() => SetUp(probe, fps));
         baseline = StateKey();
+        StartUndo();
         RequestFrame(timeline.Current);
         // Laid out in full now: show it, with the picture to follow
         Reveal();
@@ -574,6 +575,62 @@ sealed class MainForm : DarkForm
         return System.Text.Json.JsonSerializer.Serialize(p);
     }
 
+    // ---------- undo ----------
+
+    // Past and taken-back states (StateKey), newest last, and the state they lead up to. A change counts once it's
+    // finished: checked a few times a second while no mouse button is down and no box is being typed in, so a drag
+    // or a typed number is one step.
+    readonly List<string> undoStack = [], redoStack = [];
+    string? undoState;
+    readonly System.Windows.Forms.Timer undoTimer = new() { Interval = 250 };
+
+    /// <summary>A new video: nothing to undo, and this is where it starts</summary>
+    void StartUndo()
+    {
+        undoStack.Clear();
+        redoStack.Clear();
+        undoState = StateKey();
+        if (!undoTimer.Enabled)
+        {
+            undoTimer.Tick += (_, _) => RecordUndo();
+            undoTimer.Start();
+        }
+    }
+
+    void RecordUndo()
+    {
+        if (probe == null || undoState == null || encodeCts != null || MouseButtons != MouseButtons.None || Typing) return;
+        var now = StateKey();
+        if (now == undoState) return;
+        undoStack.Add(undoState);
+        if (undoStack.Count > Math.Max(1, AppConfig.Current.UndoSteps)) undoStack.RemoveRange(0, undoStack.Count - Math.Max(1, AppConfig.Current.UndoSteps));
+        redoStack.Clear();
+        undoState = now;
+    }
+
+    /// <summary>Ctrl+Z: back a step (redo: Ctrl+Shift+Z, forward again). The playhead and the open tracks stay as they are.</summary>
+    bool Undo(bool redo)
+    {
+        // A change just made counts before stepping back from it
+        RecordUndo();
+        var (from, to) = redo ? (redoStack, undoStack) : (undoStack, redoStack);
+        if (from.Count == 0 || undoState == null) return true;
+        to.Add(undoState);
+        var state = from[^1];
+        from.RemoveAt(from.Count - 1);
+        try
+        {
+            var p = System.Text.Json.JsonSerializer.Deserialize<Project>(state)!;
+            (p.Current, p.TracksOpen) = (timeline.Current, tracksOpen);
+            foreach (var t in AllTracks) t.Select(-1);
+            RestoreNow(p, exact: true);
+        }
+        catch (Exception ex) { AppLog.Error(redo ? "Redo" : "Undo", ex); }
+        // As it came out (so the next check doesn't see a change that wasn't made)
+        undoState = StateKey();
+        return true;
+    }
+
     void SaveProject()
     {
         if (probe == null || projectSaved) return;
@@ -589,7 +646,10 @@ sealed class MainForm : DarkForm
         catch (Exception ex) { AppLog.Error("Couldn't restore the project; opening with defaults", ex); }
     }
 
-    void RestoreNow(Project p)
+    /// <param name="exact">
+    /// Undo: back to exactly this, even no position and scale points, and a trim that isn't nudged onto frames
+    /// </param>
+    void RestoreNow(Project p, bool exact = false)
     {
         // Missing lists come back as null from a hand-edited or older file; points are expected in time order
         static List<T> Sorted<T>(List<T>? keys, Func<T, double> time) => keys?.OrderBy(time).ToList() ?? [];
@@ -598,8 +658,12 @@ sealed class MainForm : DarkForm
         // Opening a project uses its size without changing the size remembered for new videos (remember: false)
         Batch(() =>
         {
-            timeline.SetEnd(p.End);
-            timeline.SetStart(p.Start);
+            if (exact) timeline.SetRange(p.Start, p.End);
+            else
+            {
+                timeline.SetEnd(p.End);
+                timeline.SetStart(p.Start);
+            }
             if (p.TargetMb > 0)
             {
                 if (Planner.LimitPresets.Contains(p.TargetMb))
@@ -618,7 +682,7 @@ sealed class MainForm : DarkForm
             if (frameRate is { } rate && !AnyChipOn(fpsChips)) fpsBox.Text = rate.ToString();
 
             // The picture: its shape, then the position and scale key points
-            if (posKeys.Count > 0 && scaleKeys.Count > 0)
+            if (exact || posKeys.Count > 0 && scaleKeys.Count > 0)
             {
                 cropAspect = p.CropAspect;
                 pos.Keys.Clear();
@@ -943,6 +1007,96 @@ sealed class MainForm : DarkForm
                         lane.Active = true;
                         lane.Invalidate();
                     }
+                    break;
+                // dumpwaves=S: S seconds on, each track's waveform as drawn over the whole video in 600 columns
+                // (sketch or measured, 0..1), written to waves.csv beside CFD_PROJECTS
+                case "dumpwaves":
+                    _ = Task.Delay(TimeSpan.FromSeconds(double.Parse(value))).ContinueWith(task =>
+                    {
+                        var rows = trackUi.Select(u => u.Lane.Sources[0].Wave).Select(w => string.Join(",", Enumerable.Range(0, 600).Select(c =>
+                        {
+                            var v = w.Max(w.Duration * c / 600, w.Duration * (c + 1) / 600, out var measured, out _);
+                            return measured ? v.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture) : "";
+                        })));
+                        File.WriteAllLines(Path.Combine(Environment.GetEnvironmentVariable("CFD_PROJECTS")!, "..", "waves.csv"), rows);
+                        AppLog.Info("Dumped waveforms");
+                    });
+                    break;
+                // keysim: A / Shift+A, dragging points on two tracks at once (plain, Shift to the playhead, Alt+Shift
+                // free), Del on both, and undo / redo, with posted mouse messages and this thread's key state (not the
+                // real keyboard). Wants masterkeys and cropkeys first.
+                case "keysim":
+                    _ = Task.Delay(1500).ContinueWith(_ => BeginInvoke(new Action(async () =>
+                    {
+                        static nint L(PointF p) => ((int)Math.Round(p.Y) << 16) | ((int)Math.Round(p.X) & 0xFFFF);
+                        void Check(string what, bool ok, string detail) => AppLog.Info($"Keysim: {(ok ? "ok  " : "FAIL")} {what}: {detail}");
+                        var state = new byte[256];
+                        // The left button too, as the undo check reads it
+                        void Hold(bool shift, bool alt, bool button = false)
+                        {
+                            GetKeyboardState(state);
+                            state[0x10] = (byte)(shift ? 0x80 : 0);
+                            state[0x12] = (byte)(alt ? 0x80 : 0);
+                            state[0x01] = (byte)(button ? 0x80 : 0);
+                            SetKeyboardState(state);
+                        }
+                        async Task Drag(Control c, PointF from, float dx, bool shift = false, bool alt = false)
+                        {
+                            Hold(shift, alt);
+                            PostMessage(c.Handle, 0x200, 0, L(from)); await Task.Delay(40);
+                            Hold(shift, alt, true);
+                            PostMessage(c.Handle, 0x201, 1, L(from)); await Task.Delay(40);
+                            for (var i = 1; i <= 6; i++) { PostMessage(c.Handle, 0x200, 1, L(new PointF(from.X + dx * i / 6, from.Y))); await Task.Delay(40); }
+                            Hold(shift, alt);
+                            PostMessage(c.Handle, 0x202, 0, L(new PointF(from.X + dx, from.Y))); await Task.Delay(100);
+                            Hold(false, false);
+                            await Task.Delay(400); // the undo check sees it
+                        }
+                        string M() => string.Join(",", masterLane.Keys.Select(k => k.T.ToString("0.000")));
+                        string P() => string.Join(",", pos.Keys.Select(k => k.T.ToString("0.000")));
+                        try
+                        {
+                            Check("lanes shown", masterLane.Visible && keyLane.Visible, $"master {masterLane.Visible}, key {keyLane.Visible}");
+                            hoverTrack = masterLane;
+                            HandleEditKey(Keys.A);
+                            Check("A", masterLane.Selection.Count == 3 && keyLane.Selection.Count == 0, $"master {masterLane.Selection.Count}, key {keyLane.Selection.Count}");
+                            HandleEditKey(Keys.Shift | Keys.A);
+                            Check("Shift+A", masterLane.Selection.Count == 3 && keyLane.Selection.Count == 2, $"master {masterLane.Selection.Count}, key {keyLane.Selection.Count}");
+                            var (m0, p0) = (masterLane.Keys.Select(k => k.T).ToList(), pos.Keys.Select(k => k.T).ToList());
+                            await Drag(masterLane, masterLane.DebugKey(0), 40, shift: true, alt: true);
+                            var dm = masterLane.Keys[0].T - m0[0];
+                            var dp = pos.Keys[0].T - p0[0];
+                            Check("drag moves both tracks", dm > 0 && Math.Abs(dm - dp) < 1e-9 && Math.Abs(masterLane.Keys[2].T - m0[2] - dm) < 1e-9, $"master {dm:0.0000}, pos {dp:0.0000}");
+                            Check("Alt+Shift: off the frame grid", Math.Abs(masterLane.Keys[0].T / FrameLength - Math.Round(masterLane.Keys[0].T / FrameLength)) > 1e-6, $"{masterLane.Keys[0].T:0.00000} s, frame {FrameLength:0.00000}");
+                            // Shift: the playhead a little way right of the second pos point; a drag ending near it snaps
+                            var target = pos.Keys[1].T + 0.5;
+                            timeline.Seek(target);
+                            await Task.Delay(100);
+                            var key0 = masterLane.DebugKey(0);
+                            var lane0 = masterLane.Keys[0].T;
+                            // Pixels per second on the lane, from two points
+                            var pps = (masterLane.DebugKey(2).X - key0.X) / (masterLane.Keys[2].T - lane0);
+                            await Drag(masterLane, key0, (float)(0.5 * pps) + 3, shift: true);
+                            var onIt = pos.Keys.Any(k => Math.Abs(k.T - timeline.Current) < 1e-9) || masterLane.Keys.Any(k => Math.Abs(k.T - timeline.Current) < 1e-9);
+                            Check("Shift snaps a selected point to the playhead", onIt, $"playhead {timeline.Current:0.000}; master {M()}; pos {P()}");
+                            var snapped = (M(), P());
+                            HandleEditKey(Keys.Delete);
+                            // The crop keeps its last point, as its fixed value
+                            Check("Del on both tracks", masterLane.Keys.Count == 0 && keyLane.Keys.Count == 1, $"master {masterLane.Keys.Count}, key lane {keyLane.Keys.Count}");
+                            await Task.Delay(400);
+                            HandleEditKey(Keys.Control | Keys.Z);
+                            Check("undo the delete", (M(), P()) == snapped, $"master {M()}; pos {P()}");
+                            HandleEditKey(Keys.Control | Keys.Z);
+                            Check("undo the snap drag", M() != snapped.Item1, $"master {M()}");
+                            HandleEditKey(Keys.Control | Keys.Shift | Keys.Z);
+                            Check("redo", (M(), P()) == snapped, $"master {M()}; pos {P()}");
+                            // Back past the snap drag and the first drag
+                            for (var i = 0; i < 2; i++) HandleEditKey(Keys.Control | Keys.Z);
+                            Check("undo both drags", M() == string.Join(",", m0.Select(t => t.ToString("0.000"))) && P() == string.Join(",", p0.Select(t => t.ToString("0.000"))), $"master {M()}; pos {P()}; {undoStack.Count} left, {redoStack.Count} to redo");
+                        }
+                        catch (Exception ex) { AppLog.Error("Keysim", ex); }
+                        finally { Hold(false, false); }
+                    })));
                     break;
                 // The same three on the main audio lane (the only one a single-track video shows)
                 case "masterkeys":
@@ -1390,6 +1544,10 @@ sealed class MainForm : DarkForm
 
     [DllImport("user32.dll")]
     static extern bool PostMessage(IntPtr hwnd, int msg, nint wparam, nint lparam);
+#if DEBUG
+    [DllImport("user32.dll")] static extern bool GetKeyboardState(byte[] state);
+    [DllImport("user32.dll")] static extern bool SetKeyboardState(byte[] state);
+#endif
 #endif
 
     [DllImport("user32.dll")]
@@ -1530,14 +1688,15 @@ sealed class MainForm : DarkForm
             ShowCrop();
             UpdateSummary();
         };
-        // The held point and the rest of the selection move together, short of any point not selected
-        lane.ShiftRequested += (group, delta) =>
+        // The selection moves together, short of any point not selected
+        lane.Limit = delta =>
         {
-            var all = tracks();
-            var times = Enumerable.Range(0, all[0].Count).Select(all[0].TimeAt).ToList();
-            delta = Interp.ClampShift(times, group, delta, timeline.Duration);
-            if (delta == 0) return;
-            foreach (var k in all) k.Shift(group, delta);
+            var first = tracks()[0];
+            return Interp.ClampShift(Enumerable.Range(0, first.Count).Select(first.TimeAt).ToList(), lane.Selection.Set, delta, timeline.Duration);
+        };
+        lane.Shift = delta =>
+        {
+            foreach (var k in tracks()) k.Shift(lane.Selection.Set, delta);
             ShowCrop();
         };
         lane.Picked += i => { if (i < tracks()[0].Count) timeline.Seek(tracks()[0].TimeAt(i)); };
@@ -1549,8 +1708,10 @@ sealed class MainForm : DarkForm
     {
         track.MouseEnter += (_, _) => hoverTrack = track;
         track.MouseLeave += (_, _) => { if (hoverTrack == track) hoverTrack = null; };
-        // One track's selected key points at a time
-        track.KeySelected += () => { foreach (var other in AllTracks.Where(t => t != track)) other.Select(-1); };
+        // A plain click lets go of the other tracks' selected points; Shift+click and Shift+A add to them
+        track.KeySelected += added => { if (!added) foreach (var other in AllTracks.Where(t => t != track)) other.Select(-1); };
+        // Dragging selected points moves the other tracks' selected points too
+        track.Partners = () => ShownTracks;
         track.HeightRequested += by => SetTrackHeight(trackH + by * 14);
         track.ZoomRequested += ZoomBy;
         track.MenuRequested += at => ShowTrackMenu(track, at);
@@ -1580,17 +1741,23 @@ sealed class MainForm : DarkForm
         trackMenu.Show(track, at);
     }
 
-    /// <summary>Sets how the value moves next to a point; when it's one of several selected, next to all of them</summary>
+    /// <summary>
+    /// Sets how the value moves next to a point; when it's one of several selected, next to all of them, on every
+    /// track with points selected
+    /// </summary>
     void SetEase(KeyTrackLane track, int index, Ease ease)
     {
-        if (track is VolumeLane v)
-        {
-            // Committed (wired to UpdateMasterPeaks and the playback restart) fires once for the lot
-            v.SetEase(v.Selection.Contains(index) ? v.Selection.Sorted : [index], ease);
-        }
+        if (!track.Selection.Contains(index)) SetEase(track, [index], ease);
+        else foreach (var t in ShownTracks.Where(t => t.Selection.Count > 0).ToList()) SetEase(t, t.Selection.Sorted, ease);
+    }
+
+    void SetEase(KeyTrackLane track, int[] ids, Ease ease)
+    {
+        // Committed (wired to UpdateMasterPeaks and the playback restart) fires once for the lot
+        if (track is VolumeLane v) v.SetEase(ids, ease);
         else if (track is KeyLane k && keyTracks.TryGetValue(k, out var tracks))
         {
-            foreach (var i in k.Selection.Contains(index) ? k.Selection.Sorted : [index])
+            foreach (var i in ids)
                 foreach (var t in tracks()) if (i < t.Count) t.SetEase(i, ease);
             ShowCrop();
         }
@@ -1688,12 +1855,12 @@ sealed class MainForm : DarkForm
     /// <summary>The tracks on screen: Del and Ctrl+C never act on a hidden one's leftover selection</summary>
     IEnumerable<KeyTrackLane> ShownTracks => AllTracks.Where(t => t.Visible);
 
-    /// <summary>Del: removes the selected key point, whichever track it's on. False if none is selected.</summary>
+    /// <summary>Del: removes the selected key points, on every track that has some. False if none are selected.</summary>
     bool DeleteSelectedKey()
     {
-        if (ShownTracks.FirstOrDefault(t => t.SelectedKey >= 0) is not { } track) return false;
-        track.DeleteSelected();
-        return true;
+        var keyed = ShownTracks.Where(t => t.Selection.Count > 0).ToList();
+        foreach (var track in keyed) track.DeleteSelected();
+        return keyed.Count > 0;
     }
 
     void SetTrackHeight(int height)
@@ -1824,6 +1991,10 @@ sealed class MainForm : DarkForm
             catch (OperationCanceledException) { }
             catch (Exception ex) { AppLog.Error("Waveform sketch", ex); }
         });
+#if DEBUG
+        // To see the sketch on its own
+        if (Environment.GetEnvironmentVariable("CFD_TEST")?.Contains("sketchonly") == true) return;
+#endif
         _ = Task.Run(async () =>
         {
             try { await Waveform.LoadAll(path, tracks, () => (viewStart, viewEnd), () => sketchLeading || Paused(), lifetime.Token); }
@@ -2446,7 +2617,9 @@ sealed class MainForm : DarkForm
         var mods = keyData & Keys.Modifiers;
         if (keyData == (Keys.Control | Keys.C)) return CopyKeys();
         if (keyData == (Keys.Control | Keys.V)) return PasteKeys();
-        if (mods != Keys.None && !(mods == Keys.Shift && key is Keys.Left or Keys.Right or Keys.Space)) return false;
+        if (keyData == (Keys.Control | Keys.Z)) return Undo(redo: false);
+        if (keyData == (Keys.Control | Keys.Shift | Keys.Z)) return Undo(redo: true);
+        if (mods != Keys.None && !(mods == Keys.Shift && key is Keys.Left or Keys.Right or Keys.Space or Keys.A)) return false;
         var step = mods == Keys.Shift ? 5 : StepLength;
         // Close enough to count as being on a key point (with frame lock, the playhead can only get within half a frame)
         var near = Math.Max(0.01, timeline.FrameLock ? FrameLength / 2 : 0);
@@ -2472,6 +2645,15 @@ sealed class MainForm : DarkForm
                 var n = key >= Keys.NumPad1 ? key - Keys.NumPad1 : key - Keys.D1;
                 SetEase(keyed, keyed.SelectedKey, Interp.Kinds[n].Ease);
                 break;
+            // A: every key point on the track under the mouse; Shift+A: on every track
+            case Keys.A when mods == Keys.None:
+                if (hoverTrack is not { Visible: true } over || !over.SelectAll(false)) return false;
+                break;
+            case Keys.A:
+                var any = false;
+                foreach (var t in ShownTracks.ToList()) any |= t.SelectAll(true);
+                if (!any) return false;
+                break;
             case Keys.Home: timeline.Seek(timeline.Start); break;
             case Keys.End: timeline.Seek(timeline.End); break;
             default: return false;
@@ -2493,6 +2675,7 @@ sealed class MainForm : DarkForm
     {
         base.OnFormClosed(e);
         thumbTimer.Dispose();
+        undoTimer.Dispose();
         tips.Dispose();
         thumbCts?.Dispose();
         timeline.Thumbs = [];
