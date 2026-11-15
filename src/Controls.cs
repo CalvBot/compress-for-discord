@@ -1425,7 +1425,7 @@ sealed class VolumeLane : KeyTrackLane
         var mute = MuteButton;
         Tracks.DrawButton(g, mute);
         var ink = Active ? Theme.Text : Theme.Muted;
-        float s = Px(11), ix = mute.X + (mute.Width - s * 0.8f) / 2f, iy = mute.Y + (mute.Height - s) / 2f;
+        float s = mute.Height * 11 / 24f, ix = mute.X + (mute.Width - s * 0.8f) / 2f, iy = mute.Y + (mute.Height - s) / 2f;
         using (var speaker = new SolidBrush(ink))
             g.FillPolygon(speaker, [new PointF(ix, iy + s * 0.3f), new PointF(ix + s * 0.35f, iy + s * 0.3f), new PointF(ix + s * 0.8f, iy), new PointF(ix + s * 0.8f, iy + s), new PointF(ix + s * 0.35f, iy + s * 0.7f), new PointF(ix, iy + s * 0.7f)]);
         if (!Active)
@@ -1707,12 +1707,18 @@ static class Tracks
     /// <summary>Width of the strip, in 96-dpi pixels: one button and a gap before the track</summary>
     public const int Gutter = 30;
 
-    /// <summary>Where button number `slot` of a track's `count` goes: stacked one above the other, centred on the track's height</summary>
+    /// <summary>
+    /// Where button number `slot` of a track's `count` goes: stacked one above the other, centred on the track's
+    /// height. On a track too short for them at full size they shrink to fit (their icons are drawn to their size).
+    /// </summary>
     public static Rectangle Button(Control track, int slot, int count)
     {
         int Px(int v) => (int)Math.Round(v * track.DeviceDpi / 96f);
-        int size = Px(24), gap = Px(4), top = (track.Height - (count * size + (count - 1) * gap)) / 2;
-        return new Rectangle(0, top + slot * (size + gap), size, size);
+        int full = Px(24), gap = Px(4);
+        if (count * full + (count - 1) * gap > track.Height - Px(2)) gap = Px(2);
+        var size = Math.Clamp((track.Height - Px(2) - (count - 1) * gap) / count, Px(8), full);
+        var top = (track.Height - (count * size + (count - 1) * gap)) / 2;
+        return new Rectangle((full - size) / 2, top + slot * (size + gap), size, size);
     }
 
     /// <summary>A faint line at the start of every frame, once they're far enough apart to tell from one another</summary>
