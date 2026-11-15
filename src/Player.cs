@@ -91,7 +91,8 @@ static class Player
             if (pump != null) try { await pump; } catch { }
             output?.Dispose();
             sound?.Dispose();
-            p?.Dispose();        }
+            p?.Dispose();
+        }
     }
 
     static async Task<bool> ReadFull(Stream s, byte[] buf, CancellationToken ct)

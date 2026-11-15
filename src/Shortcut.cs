@@ -1,6 +1,6 @@
 namespace CompressForDiscord;
 
-/// <summary>The optional desktop shortcut (the installer adds the Start menu one and removes this on uninstall)</summary>
+/// <summary>The optional desktop shortcut (the installer adds the Start menu one; this one goes when the app is uninstalled)</summary>
 static class Shortcut
 {
     static string DesktopLink => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Compress for Discord.lnk");

@@ -80,7 +80,7 @@ sealed class Waveform
     public Waveform(double duration)
     {
         Duration = duration;
-        // Room for a spot every ~1/8 s (up to 32768, a spot every ~8 s for a 72-hour recording): how fine it gets
+        // Room for a spot every ~1/8 s (up to 32768, a spot every ~1 s for a 10-hour recording): how fine it gets
         // depends on how far in you zoom, since the sketch stops at about two pixels between spots
         var points = 16;
         while (points < 1 << 15 && points < duration * 8) points *= 2;
@@ -186,7 +186,7 @@ sealed class Waveform
         var clock = Stopwatch.StartNew();
         var runs = 0;
         var names = string.Join(", ", tracks.Select(t => t.Track + 1));
-        // Each track to mono (first, so there's half as much to resample) at 4 kHz; several are padded (so one
+        // Each track to mono (first, so there's half as much to resample) at a low sample rate; several are padded (so one
         // ending early doesn't end the others) and merged, one track per channel
         var graph = string.Join(";", tracks.Select((t, i) =>
             $"[0:a:{t.Track}]aformat=channel_layouts=mono,aresample={SampleRate},aformat=sample_fmts=s16:channel_layouts=mono:sample_rates={SampleRate}{(count > 1 ? ",apad" : "")}[w{i}]"));
@@ -248,6 +248,8 @@ sealed class Waveform
                     int inSlice = 0, leftover = 0;
                     Array.Clear(peak);
                     var moved = false;
+                    // The sound ran out and ffmpeg is ending by itself (its exit code then says whether it worked)
+                    var ended = false;
                     void Store()
                     {
                         for (var c = 0; c < count; c++)
@@ -262,7 +264,7 @@ sealed class Waveform
                             int n;
                             try { n = await stdout.ReadAsync(buf.AsMemory(leftover), ct).ConfigureAwait(false); }
                             catch (Exception) when (!ct.IsCancellationRequested) { break; }
-                            if (n == 0) break;
+                            if (n == 0) { ended = true; break; }
                             got += n;
                             n += leftover;
                             var i = 0;
@@ -295,7 +297,9 @@ sealed class Waveform
                             Array.Copy(buf, i, buf, 0, leftover);
                         }
                     }
-                    finally { try { if (!p.HasExited) p.Kill(true); } catch { } }
+                    // Not when it's ending by itself: a killed ffmpeg reports failure, and a stretch past the end of
+                    // the sound (nothing read) would then be taken for a track that can't be read
+                    finally { try { if (!ended && !p.HasExited) p.Kill(true); } catch { } }
                     ct.ThrowIfCancellationRequested();
                     if (moved) continue;
                     await p.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);

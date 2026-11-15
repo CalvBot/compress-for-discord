@@ -121,9 +121,12 @@ class DarkForm : Form
     {
         Release? release = null;
         LinkLabel link = null!;
+        var busy = false;
         link = Link("", async () =>
         {
-            if (release == null) return;
+            // One download at a time: a second click would write the same file
+            if (release == null || busy) return;
+            busy = true;
             link.Text = "Downloading update…";
             try
             {
@@ -131,6 +134,7 @@ class DarkForm : Form
                 else link.Text = $"Update to {release.Version}";
             }
             catch { link.Text = "Update failed, try Settings"; }
+            busy = false;
         });
         link.Visible = false;
         link.LinkColor = link.VisitedLinkColor = Theme.Green;

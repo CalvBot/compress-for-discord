@@ -29,6 +29,12 @@ static class Theme
     {
         var d = Math.Min(radius * 2, Math.Min(r.Width, r.Height));
         var p = new GraphicsPath();
+        // Too small for corners (an arc of no size throws): a plain box, or nothing
+        if (d <= 0)
+        {
+            if (r.Width > 0 && r.Height > 0) p.AddRectangle(r);
+            return p;
+        }
         p.AddArc(r.X, r.Y, d, d, 180, 90);
         p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
         p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
@@ -487,8 +493,13 @@ sealed class Timeline : Control
         Seeked?.Invoke(Current);
     }
 
-    public void SetStart(double t) => SetRange(Math.Min(Math.Clamp(Snap(t), 0, Duration), End - MinClip), End);
-    public void SetEnd(double t) => SetRange(Start, Math.Max(Math.Clamp(Snap(t), 0, Duration), Start + MinClip));
+    public void SetStart(double t) => SetStartExact(Snap(t));
+    public void SetEnd(double t) => SetEndExact(Snap(t));
+    /// <summary>The shortest selection: a tenth of a second, or all of a video shorter than that</summary>
+    double Shortest => Math.Min(MinClip, Duration);
+    /// <summary>Without landing on a frame (onto the playhead, which can sit between frames on a key point)</summary>
+    void SetStartExact(double t) => SetRange(Math.Max(0, Math.Min(Math.Clamp(t, 0, Duration), End - Shortest)), End);
+    void SetEndExact(double t) => SetRange(Start, Math.Min(Duration, Math.Max(Math.Clamp(t, 0, Duration), Start + Shortest)));
 
     DragKind HitTest(Point p)
     {
@@ -517,7 +528,10 @@ sealed class Timeline : Control
         Focus();
         var t = T(e.X);
         drag = HitTest(e.Location);
+        // Held where it was taken hold of: a tab is wider than the edge it moves, and mustn't jump to the mouse
         if (drag == DragKind.Range) { grabOffset = t - Start; length = End - Start; }
+        if (drag == DragKind.Start) grabOffset = t - Start;
+        if (drag == DragKind.End) grabOffset = t - End;
         if (drag == DragKind.Seek) ScrubTo(t, e.X);
     }
 
@@ -595,20 +609,24 @@ sealed class Timeline : Control
         {
             // Normally the playhead follows the edge so you see the frame you're cutting on. With Shift it stays
             // where it is, and the edge snaps to it when close.
-            case DragKind.Start when ModifierKeys.HasFlag(Keys.Shift): SetStart(SnapToPlayhead(t, x)); break;
-            case DragKind.End when ModifierKeys.HasFlag(Keys.Shift): SetEnd(SnapToPlayhead(t, x)); break;
-            case DragKind.Start: SetStart(t); Seek(Start); break;
-            case DragKind.End: SetEnd(t); Seek(End); break;
+            case DragKind.Start when ModifierKeys.HasFlag(Keys.Shift):
+                if (NearPlayhead(t - grabOffset)) SetStartExact(Current); else SetStart(t - grabOffset);
+                break;
+            case DragKind.End when ModifierKeys.HasFlag(Keys.Shift):
+                if (NearPlayhead(t - grabOffset)) SetEndExact(Current); else SetEnd(t - grabOffset);
+                break;
+            case DragKind.Start: SetStart(t - grabOffset); Seek(Start); break;
+            case DragKind.End: SetEnd(t - grabOffset); Seek(End); break;
             case DragKind.Range when ModifierKeys.HasFlag(Keys.Shift):
                 // The playhead stays, and whichever end comes close to it lands on it
                 var to = Snap(t - grabOffset);
-                if (Math.Abs(X(to) - X(Current)) <= Px(7)) to = Current;
-                else if (Math.Abs(X(to + length) - X(Current)) <= Px(7)) to = Current - length;
-                to = Math.Clamp(to, 0, Duration - length);
+                if (NearPlayhead(to)) to = Current;
+                else if (NearPlayhead(to + length)) to = Current - length;
+                to = Math.Clamp(to, 0, Math.Max(0, Duration - length));
                 SetRange(to, to + length);
                 break;
             case DragKind.Range:
-                var s = Math.Clamp(Snap(t - grabOffset), 0, Duration - length);
+                var s = Math.Clamp(Snap(t - grabOffset), 0, Math.Max(0, Duration - length));
                 SetRange(s, s + length);
                 Seek(s);
                 break;
@@ -619,7 +637,8 @@ sealed class Timeline : Control
         Update();
     }
 
-    double SnapToPlayhead(double t, int x) => Math.Abs(x - X(Current)) <= Px(7) ? Current : t;
+    /// <summary>Close enough to the playhead on screen to land on it</summary>
+    bool NearPlayhead(double t) => Math.Abs(X(t) - X(Current)) <= Px(7);
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
@@ -630,7 +649,7 @@ sealed class Timeline : Control
         pendingDrag = null;
     }
     // The mouse was taken away mid-drag (Alt+Tab, a popup): no MouseUp will come, so let go here
-    protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) drag = DragKind.None; }
+    protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) { drag = DragKind.None; pendingDrag = null; } }
 
     protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
     protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
@@ -1228,6 +1247,8 @@ sealed class VolumeLane : KeyTrackLane
                 Invalidate();
             }
             else AddKey(Current);
+            // Committed here, not again when the button is let go
+            added = false;
             Committed?.Invoke();
             return;
         }
@@ -1246,19 +1267,22 @@ sealed class VolumeLane : KeyTrackLane
             // Ctrl+click puts a new point under the mouse, already held so it can be dragged into place
             added = false;
             if (k < 0 && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control)) k = AddKey(OnFrame(T(e.X)));
-            PressSelect(k, ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift));
+            // Shift as it was when pressed: letting it go before the mouse button mustn't change what the click does
+            shiftPress = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift);
+            PressSelect(k, shiftPress);
             dragKey = k;
             grabX = e.X;
             grabT = k >= 0 ? Keys[k].T : 0;
             dragStretch = k < 0 ? HitStretch(e.Location) : -1;
             dragFlat = k < 0 && Keys.Count == 0;
             grabY = e.Y;
-            grabVolume = dragStretch >= 0 ? Keys[dragStretch].V : Volume;
+            grabVolume = k >= 0 ? Keys[k].V : dragStretch >= 0 ? Keys[dragStretch].V : Volume;
         }
     }
 
     /// <summary>A Ctrl+click put a new point in during this press</summary>
     bool added;
+    bool shiftPress;
 
     /// <summary>
     /// Ends a drag: on mouse up, when the mouse is taken away (Alt+Tab, a menu), or before the points change under
@@ -1308,8 +1332,11 @@ sealed class VolumeLane : KeyTrackLane
             // there while only its value is dragged. Once it's moved sideways it lands on a frame.
             if (!Selection.Contains(dragKey)) Selection.Add(dragKey);
             var stay = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control) || Math.Abs(e.X - grabX) <= Px(3);
-            DragShift(Keys[dragKey].T, stay ? grabT : T(e.X), stay);
-            var dv = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift) ? 0 : V(e.Y) - Keys[dragKey].V;
+            // By how far the mouse has moved since the press, in time and in level: a point taken hold of a little
+            // off its centre mustn't jump to the mouse (a sideways drag would change its level)
+            DragShift(Keys[dragKey].T, stay ? grabT : grabT + T(e.X) - T(grabX), stay);
+            var dv = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift) ? 0
+                : Snap(grabVolume + (grabY - e.Y) / (double)Math.Max(1, Height - 2 * Pad) * 2) - Keys[dragKey].V;
             // The whole group stays within 0..200%
             var group = Selection.Set.Where(i => i < Keys.Count).ToList();
             dv = Math.Clamp(dv, -group.Min(i => Keys[i].V), 2 - group.Max(i => Keys[i].V));
@@ -1339,7 +1366,7 @@ sealed class VolumeLane : KeyTrackLane
         {
             // A click without a drag: Shift+click on a selected point lets it go; a plain click selects just that one
             if (toggleOff >= 0) { Selection.Remove(toggleOff); Invalidate(); }
-            else if (!ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift)) Select(dragKey);
+            else if (!shiftPress) Select(dragKey);
         }
         EndDrag();
     }
@@ -1841,6 +1868,8 @@ sealed class KeyLane : KeyTrackLane
     public IReadOnlyList<Ease> Eases = [];
     Ease EaseOf(int i) => i < Eases.Count ? Eases[i] : Ease.Linear;
     bool shiftClick;
+    /// <summary>When the held point was when the drag began</summary>
+    double grabT;
 
     public KeyLane() => Label = "Position & scale";
 
@@ -1897,20 +1926,22 @@ sealed class KeyLane : KeyTrackLane
             PressSelect(k, shiftClick);
             dragKey = k;
             grabX = e.X;
+            grabT = k >= 0 && k < Keys.Count ? Keys[k] : 0;
         }
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        if (dragKey < 0) { Cursor = AddButton.Contains(e.Location) ? Cursors.Hand : HitKey(e.X) >= 0 ? Cursors.SizeWE : Cursors.Default; return; }
+        if (dragKey < 0) { Cursor = AddButton.Contains(e.Location) ? Cursors.Hand : e.X >= G && HitKey(e.X) >= 0 ? Cursors.SizeWE : Cursors.Default; return; }
         if (!moved && Math.Abs(e.X - grabX) <= Px(3)) return;
         moved = true;
         // The held point lands on a frame of the chosen frame rate; the rest of the selection (on other tracks too)
         // keeps its spacing
         if (dragKey >= Keys.Count) return;
         if (!Selection.Contains(dragKey)) Selection.Add(dragKey);
-        DragShift(Keys[dragKey], T(e.X), false);
+        // By how far the mouse has moved, so a point taken hold of off its centre doesn't jump
+        DragShift(Keys[dragKey], grabT + T(e.X) - T(grabX), false);
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -2049,9 +2080,22 @@ sealed class ZoomBar : Control
     /// <summary>The closest it zooms: the shortest stretch of video that can fill the timeline</summary>
     public double MinSpan = 1;
 
+    /// <summary>
+    /// The window's left and right on screen: never narrower than its two grips, and all on the bar (zoomed right
+    /// in at the end of a long video it would otherwise start past the bar's end)
+    /// </summary>
+    (float A, float B) Window
+    {
+        get
+        {
+            var a = Math.Max(G, Math.Min(X(ViewStart), Width - 1 - Px(12)));
+            return (a, Math.Min(Math.Max(X(ViewEnd), a + Px(12)), Math.Max(a, Width - 1)));
+        }
+    }
+
     Grab HitTest(int x)
     {
-        float a = X(ViewStart), b = X(ViewEnd);
+        var (a, b) = Window;
         var reach = Px(7);
         if (Math.Abs(x - a) <= reach && x < (a + b) / 2) return Grab.Left;
         if (Math.Abs(x - b) <= reach) return Grab.Right;
@@ -2114,8 +2158,8 @@ sealed class ZoomBar : Control
         g.ResetClip();
 
         // The window: what the timeline is showing
-        float a = X(ViewStart), b = Math.Max(X(ViewEnd), a + Px(12));
-        using (var window = Theme.Round(new RectangleF(a, 0, Math.Min(b, Width - 1) - a, h), h / 2))
+        var (a, b) = Window;
+        using (var window = Theme.Round(new RectangleF(a, 0, b - a, h), h / 2))
         {
             using var fill = new SolidBrush(Color.FromArgb(Enabled ? 150 : 80, Theme.Secondary));
             using var edge = new Pen(Enabled ? Theme.SecondaryHover : Theme.Secondary);
@@ -2123,7 +2167,7 @@ sealed class ZoomBar : Control
             g.DrawPath(edge, window);
         }
         using (var grip = new Pen(Color.FromArgb(200, Color.White), Math.Max(1, Px(2))))
-            foreach (var x in new[] { a + Px(5), Math.Min(b, Width - 1) - Px(5) })
+            foreach (var x in new[] { a + Px(5), b - Px(5) })
                 g.DrawLine(grip, x, Px(4), x, Height - Px(5));
         using (var head = new Pen(Color.White, Math.Max(1, Px(2)))) g.DrawLine(head, X(Current), 0, X(Current), Height);
     }

@@ -195,7 +195,8 @@ sealed class MainForm : DarkForm
         zoomBar.ViewChanged += (a, b) => SetView(a, b);
         timeline.ZoomRequested += ZoomBy;
         timeline.PanRequested += by => { var shift = (viewEnd - viewStart) * by; SetView(viewStart + shift, viewEnd + shift, keepSpan: true); };
-        thumbTimer.Tick += (_, _) => { thumbTimer.Stop(); _ = LoadThumbnails(); };
+        // Not while compressing (the encode has the processor to itself): the timer keeps going until it's done
+        thumbTimer.Tick += (_, _) => { if (encodeCts != null) return; thumbTimer.Stop(); _ = LoadThumbnails(); };
         playBtn = new Pill("Play") { Icon = PillIcon.Play, Dock = DockStyle.Left, Enabled = false };
         tips.SetToolTip(playBtn, "Play / pause (Space)");
         playBtn.Click += (_, _) => TogglePlay();
@@ -213,7 +214,20 @@ sealed class MainForm : DarkForm
         // Advanced: the tracks under the timeline (position and scale, audio)
         advBtn = new Pill("Advanced") { Icon = PillIcon.Sliders, Dock = DockStyle.Right };
         tips.SetToolTip(advBtn, "Tracks: position, scale and audio");
-        advBtn.Click += (_, _) => { tracksOpen = !tracksOpen; ShowTracks(); };
+        advBtn.Click += (_, _) =>
+        {
+            tracksOpen = !tracksOpen;
+            Batch(() =>
+            {
+                // Back to the simple view is always back to the default window size
+                if (!tracksOpen && baseW > 0 && (extraW | extraH) != 0)
+                {
+                    (extraW, extraH) = (0, 0);
+                    ApplyStretch();
+                }
+                ShowTracksNow();
+            });
+        };
         Panel Gap() => new() { Dock = DockStyle.Left, Width = 6 };
         // Docked from the last one added inwards: Play ends up leftmost
         timeRow.Controls.AddRange([timeLabel, advBtn, timeField, Gap(), previewBtn, Gap(), playBtn]);
@@ -683,10 +697,14 @@ sealed class MainForm : DarkForm
             }
             scalePct = p.ScalePct;
             SelectChip(resChips, scalePct);
-            if (scalePct is { } pctNow && !AnyChipOn(resChips)) resBox.Text = pctNow.ToString();
-            frameRate = p.FrameRate;
+            // The typed box shows the number only when no chip does (and is emptied when one takes over, on undo)
+            var typedPct = scalePct is { } pctNow && !AnyChipOn(resChips) ? pctNow.ToString() : "";
+            if (resBox.Text != typedPct) resBox.Text = typedPct;
+            // A rate from a file edited by hand must be one the video can be lowered to
+            frameRate = p.FrameRate is > 0 and var fr && probe != null && fr < probe.Fps - 0.5 ? fr : null;
             SelectChip(fpsChips, frameRate);
-            if (frameRate is { } rate && !AnyChipOn(fpsChips)) fpsBox.Text = rate.ToString();
+            var typedRate = frameRate is { } rate && !AnyChipOn(fpsChips) ? rate.ToString() : "";
+            if (fpsBox.Text != typedRate) fpsBox.Text = typedRate;
 
             // The picture: its shape, then the position and scale key points
             if (exact || posKeys.Count > 0 && scaleKeys.Count > 0)
@@ -718,7 +736,8 @@ sealed class MainForm : DarkForm
 
             tracksOpen = p.TracksOpen;
             ShowTracksNow();
-            timeline.Seek(Math.Clamp(p.Current, timeline.Start, timeline.End));
+            // Undo leaves the playhead where it is (and playback going: Seek would stop it)
+            if (!exact) timeline.Seek(Math.Clamp(p.Current, timeline.Start, timeline.End));
             ShowCrop();
             UpdateSummary();
         });
@@ -1121,7 +1140,7 @@ sealed class MainForm : DarkForm
                             var dm = masterLane.Keys[0].T - m0[0];
                             var dp = pos.Keys[0].T - p0[0];
                             Check("drag moves both tracks", dm > 0 && Math.Abs(dm - dp) < 1e-9 && Math.Abs(masterLane.Keys[2].T - m0[2] - dm) < 1e-9, $"master {dm:0.0000}, pos {dp:0.0000}");
-                            Check("Alt+Shift still lands on a frame", Math.Abs(masterLane.Keys[0].T / FrameLength - Math.Round(masterLane.Keys[0].T / FrameLength)) < 1e-6, $"{masterLane.Keys[0].T:0.00000} s, frame {FrameLength:0.00000}");
+                            Check("the held point lands on a frame", Math.Abs(masterLane.Keys[0].T / FrameLength - Math.Round(masterLane.Keys[0].T / FrameLength)) < 1e-6, $"{masterLane.Keys[0].T:0.00000} s, frame {FrameLength:0.00000}");
                             // Shift: the playhead a little way right of the second pos point; a drag ending near it snaps
                             var target = pos.Keys[1].T + 0.5;
                             timeline.Seek(target);
@@ -1292,7 +1311,9 @@ sealed class MainForm : DarkForm
     async Task LoadThumbnails()
     {
         thumbCts?.Cancel();
+        thumbCts?.Dispose();
         var cts = thumbCts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        var token = cts.Token;
         // The pictures sit on a fixed grid, not wherever the view happens to start: each stands for a stretch that is
         // a power of two seconds long (8 to 16 of them on screen) and shows the frame at its start. So scrolling
         // and zooming ask for the same moments again and find them in the cache: zooming out a level needs
@@ -1327,8 +1348,10 @@ sealed class MainForm : DarkForm
         if (missing.Count == 0) return;
 
         var times = missing.Select(Time).ToArray();
+        // The last frame's middle can be past the end of the video: ask for a moment that's in it
+        var ask = times.Select(t => Math.Min(t, Math.Max(0, timeline.Duration - 0.02))).ToArray();
         // While playing they're made two at a time: a full set at once made the playback stutter
-        await Ff.Thumbnails(file, times, timeline.Height, keyOnly: rough, playCts != null ? 2 : 0, (j, img) =>
+        await Ff.Thumbnails(file, ask, timeline.Height, keyOnly: rough, playCts != null ? 2 : 0, (j, img) =>
         {
             void Keep()
             {
@@ -1337,7 +1360,13 @@ sealed class MainForm : DarkForm
                 var t = times[j];
                 if (thumbCache.TryGetValue(t, out var had))
                 {
-                    if (rough || !roughThumbs.Contains(t)) { img.Dispose(); return; }
+                    if (rough || !roughThumbs.Contains(t))
+                    {
+                        // Already made by an earlier look at this spot that finished since: show that one
+                        img.Dispose();
+                        if (timeline.Thumbs == strip && strip[missing[j]] != had) { strip[missing[j]] = had; timeline.StripChanged(); }
+                        return;
+                    }
                     // The exact picture for a time that only had its keyframe's: it takes over, wherever that shows
                     var shown = timeline.Thumbs;
                     for (var i = 0; i < shown.Length; i++) if (shown[i] == had) shown[i] = img;
@@ -1354,7 +1383,7 @@ sealed class MainForm : DarkForm
                 TrimThumbCache();
             }
             try { BeginInvoke(Keep); } catch { img.Dispose(); }
-        }, cts.Token);
+        }, token);
     }
 
     /// <summary>Drops the thumbnails furthest from what's on screen once there are too many (never one on screen)</summary>
@@ -1522,7 +1551,8 @@ sealed class MainForm : DarkForm
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { AppLog.Error("Playback failed", ex); if (!IsDisposed) ShowStatus(ex.Message, Theme.Danger); }
-        playStarting = false;
+        // Not when another playback has started since (a restart): it's waiting for its own first frame
+        if (playCts == cts || playCts == null) playStarting = false;
         if (playCts == cts) StopPlayback();
         cts.Dispose();
     }
@@ -1659,12 +1689,6 @@ sealed class MainForm : DarkForm
     void ShowTracksNow()
     {
         advBtn.On = tracksOpen;
-        // Back to the simple view is always back to the default window size
-        if (!tracksOpen && baseW > 0 && (extraW | extraH) != 0)
-        {
-            (extraW, extraH) = (0, 0);
-            ApplyStretch();
-        }
         var open = tracksOpen && probe != null;
         // Hidden tracks let go of their picked points, so Del or Ctrl+C later can't act on something out of sight
         if (!open)

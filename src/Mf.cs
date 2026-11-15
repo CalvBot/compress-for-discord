@@ -16,7 +16,6 @@ static class Mf
     internal static readonly Guid MFMediaType_Audio = new("73647561-0000-0010-8000-00aa00389b71");
     internal static readonly Guid MFAudioFormat_PCM = new("00000001-0000-0010-8000-00aa00389b71");
     internal static readonly Guid MF_MT_AUDIO_BITS_PER_SAMPLE = new("f2deb57f-40fa-4764-aa33-ed4f2d1ff669");
-    internal static readonly Guid MF_MT_AUDIO_NUM_CHANNELS = new("37e48bf5-645e-4c5b-89de-ada9e29b696a");
     internal static readonly Guid MF_PD_DURATION = new("6c990d33-bb8e-477a-8598-0d5d96fcd88a");
     internal const uint MediaSource = 0xFFFFFFFF;
     internal static readonly Guid MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING = new("0f81da2c-b537-4672-a8b2-a681b17307a3");

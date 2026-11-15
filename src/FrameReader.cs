@@ -9,12 +9,13 @@ namespace CompressForDiscord;
 /// for every frame means reading the file's index each time, which for a long recording is most of the wait;
 /// this reads it once. Moving forward a little decodes on from where it is instead of seeking again, and while
 /// dragging, the nearest keyframe is enough. Files Windows can't read (or that are rotated) use ffmpeg instead.
-/// Calls must not overlap; the window makes them one at a time, off the UI thread.
+/// Calls are made off the UI thread and take turns (one frame is read at a time).
 /// </summary>
 sealed class FrameReader : IDisposable
 {
     IMFSourceReader? reader;
-    Size size;
+    /// <summary>The frame size last asked for, and the one the reader said it gives (they can differ)</summary>
+    Size asked, size;
     int stride;
     /// <summary>Where the decoder is: the end of the last frame it gave, in seconds; NaN = needs a seek</summary>
     double readPos = double.NaN;
@@ -41,6 +42,8 @@ sealed class FrameReader : IDisposable
     /// <summary>The video opened for reading frames, or null if Windows can't (the caller uses ffmpeg then)</summary>
     public static FrameReader? Open(string path, double fps, bool gpu = true)
     {
+        // Let go of if it can't be used after all: it holds the file open
+        IMFSourceReader? opened = null;
         try
         {
             if (!Started.Value) return null;
@@ -52,6 +55,7 @@ sealed class FrameReader : IDisposable
             Check(attrs.SetUINT32(ref lowLatency, 1));
             var onGpu = gpu && UseGpu(attrs);
             Check(MFCreateSourceReaderFromURL(path, attrs, out var r));
+            opened = r;
             Marshal.ReleaseComObject(attrs);
             Check(r.SetStreamSelection(AllStreams, false));
             Check(r.SetStreamSelection(FirstVideo, true));
@@ -66,10 +70,13 @@ sealed class FrameReader : IDisposable
                 Marshal.ReleaseComObject(r);
                 return null;
             }
-            return new FrameReader(r, fps) { Gpu = onGpu, Native = nativeSize };
+            var made = new FrameReader(r, fps) { Gpu = onGpu, Native = nativeSize };
+            opened = null;
+            return made;
         }
         catch (Exception ex)
         {
+            if (opened != null) try { Marshal.ReleaseComObject(opened); } catch { }
             AppLog.Info($"Windows can't read this video's frames ({ex.Message}); using ffmpeg for the preview");
             return null;
         }
@@ -89,7 +96,7 @@ sealed class FrameReader : IDisposable
     Bitmap? GetLocked(double t, Size want, bool exact, CancellationToken ct)
     {
         if (reader == null) return null;
-        if (want != size) SetSize(want);
+        if (want != asked) SetSize(want);
         // At or past the end: the last frame
         t = Math.Max(0, Math.Min(t, duration - frameLength));
         if (last != null && t >= lastFrom - 1e-6 && t < lastTo - 1e-6) return new Bitmap(last);
@@ -183,7 +190,7 @@ sealed class FrameReader : IDisposable
             Check(reader!.SetCurrentMediaType(FirstVideo, IntPtr.Zero, type));
         }
         finally { Marshal.ReleaseComObject(type); }
-        size = want;
+        asked = size = want;
         ReadStride();
         last?.Dispose();
         last = null;

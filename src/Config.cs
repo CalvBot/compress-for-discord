@@ -34,9 +34,10 @@ static class Paths
         catch { }
     }
 
-    /// <summary>Run by the uninstaller: removes the downloaded ffmpeg and temp files (settings are kept)</summary>
+    /// <summary>Run by the uninstaller: removes the downloaded ffmpeg, temp files and the desktop shortcut (settings are kept)</summary>
     public static void RemoveDownloads()
     {
+        try { Shortcut.SetOnDesktop(false); } catch { }
         try { Directory.Delete(LocalData, true); } catch { }
         try { Directory.Delete(Work, true); } catch { }
     }
@@ -56,6 +57,9 @@ static class Paths
 sealed class AppConfig
 {
     public static AppConfig Current { get; } = Load();
+
+    /// <summary>Which one-time changes to older settings have been made (see Load)</summary>
+    public int Version { get; set; }
 
     /// <summary>Last chosen size limit, remembered between runs</summary>
     public double TargetMb { get; set; } = 20;
@@ -85,12 +89,29 @@ sealed class AppConfig
         try
         {
             var cfg = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(Paths.Config)) ?? new();
-            // 10 was the free-account chip before Discord raised that limit to 20
-            if (cfg.TargetMb == 10) cfg.TargetMb = 20;
+            // 10 was the free-account chip before Discord raised that limit to 20. Moved up once only: a 10 typed
+            // in since then is what was asked for.
+            if (cfg.Version < 1 && cfg.TargetMb == 10) cfg.TargetMb = 20;
+            cfg.Version = 1;
+            // A file edited by hand can hold anything
             if (!(cfg.TargetMb > 0) || !double.IsFinite(cfg.TargetMb)) cfg.TargetMb = 20;
+            if (!(cfg.SafetyMarginPercent >= 0 && cfg.SafetyMarginPercent < 90)) cfg.SafetyMarginPercent = 3;
+            cfg.Encoder ??= "auto";
+            cfg.FfmpegPath ??= "";
+            cfg.SaveFolder ??= "";
+            cfg.UndoSteps = Math.Clamp(cfg.UndoSteps, 1, 100);
+            cfg.RecentProjects = Math.Max(0, cfg.RecentProjects);
             return cfg;
         }
-        catch { return new(); }
+        catch (FileNotFoundException) { return new() { Version = 1 }; }
+        catch (DirectoryNotFoundException) { return new() { Version = 1 }; }
+        catch (Exception ex)
+        {
+            // Unreadable (a typo from editing it by hand): start from the defaults, but keep the file to look at
+            AppLog.Warn($"Couldn't read the settings, using the defaults: {ex.Message}");
+            try { File.Copy(Paths.Config, Paths.Config + ".bad", true); } catch { }
+            return new() { Version = 1 };
+        }
     }
 
     public void Save()
@@ -98,7 +119,10 @@ sealed class AppConfig
         try
         {
             Directory.CreateDirectory(Paths.Data);
-            File.WriteAllText(Paths.Config, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            // Written beside it and swapped in, so another window opening just now never reads half a file
+            var tmp = $"{Paths.Config}.{Environment.ProcessId}.tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(tmp, Paths.Config, true);
         }
         catch { }
     }

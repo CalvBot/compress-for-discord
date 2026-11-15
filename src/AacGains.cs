@@ -252,6 +252,8 @@ sealed class AacGains
             if (fixedSize == 0 && !Fits(stsz, 12, count, 4) || !Fits(stsc, 8, U32(m, stsc.From + 4), 12)) return true;
             var sizes = new int[count];
             for (var i = 0; i < count; i++) sizes[i] = (int)(fixedSize != 0 ? fixedSize : U32(m, stsz.From + 12 + 4 * i));
+            // A size too big to be a frame (it reads as negative) would stop the scan for every track
+            if (Array.Exists(sizes, size => size < 0)) return true;
             var offsets = new List<long>();
             if (Child(m, stbl, "stco") is { } stco)
             {

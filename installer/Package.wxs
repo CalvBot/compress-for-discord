@@ -35,11 +35,11 @@
         <RemoveFolder Id="RemoveProgramsDir" Directory="ProgramsDir" On="uninstall" />
       </Component>
 
-      <!-- Start menu, plus clean-up of the optional desktop shortcut the app's Settings can create -->
+      <!-- Start menu. The optional desktop shortcut (made from Settings) is removed by the app on uninstall,
+           not here: an update uninstalls the old version first, and would take the shortcut with it. -->
       <Component Directory="ProgramMenuFolder">
         <Shortcut Id="StartMenuShortcut" Name="Compress for Discord" Description="Shrink videos to fit Discord's upload limit"
                   Target="[INSTALLFOLDER]CompressForDiscord.exe" WorkingDirectory="INSTALLFOLDER" />
-        <RemoveFile Id="RemoveDesktopShortcut" Directory="DesktopFolder" Name="Compress for Discord.lnk" On="uninstall" />
         <RegistryValue Root="HKCU" Key="Software\CompressForDiscord" Name="StartMenuShortcut" Value="1" Type="integer" KeyPath="yes" />
       </Component>
 
@@ -57,7 +57,8 @@
       <?endforeach?>
     </Feature>
 
-    <!-- Uninstall: delete the downloaded ffmpeg and temp files (settings in %APPDATA% are kept) -->
+    <!-- Uninstall (not an update): delete the downloaded ffmpeg, temp files and the desktop shortcut.
+         Settings, recent projects and logs in %APPDATA% are kept. -->
     <CustomAction Id="RemoveDownloads" FileRef="AppExe" ExeCommand="--remove-downloads"
                   Execute="deferred" Impersonate="yes" Return="ignore" />
     <!-- Open the app once installed (also after an in-app update), unless installed silently -->

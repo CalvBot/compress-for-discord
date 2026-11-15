@@ -33,8 +33,12 @@ sealed record TrackState(int Index, bool Active, double Volume, List<ValueKey> K
 /// </summary>
 static class Projects
 {
+#if DEBUG
     /// <summary>Test runs point this somewhere else so they never touch the real list</summary>
     static readonly string Folder = Environment.GetEnvironmentVariable("CFD_PROJECTS") is { Length: > 0 } dir ? dir : Path.Combine(Paths.Data, "projects");
+#else
+    static readonly string Folder = Path.Combine(Paths.Data, "projects");
+#endif
 
     static bool Enabled
     {

@@ -100,6 +100,13 @@ static class Ff
         Directory.CreateDirectory(Paths.Work);
         // Own name per download, so two windows downloading at once don't write the same file
         var zip = Path.Combine(Paths.Work, $"ffmpeg-{Guid.NewGuid():N}.zip");
+        try { await DownloadFfmpeg(zip, progress, ct); }
+        // Cancelled or failed part-way: don't leave up to 90 MB behind
+        finally { try { File.Delete(zip); } catch { } }
+    }
+
+    static async Task DownloadFfmpeg(string zip, IProgress<double> progress, CancellationToken ct)
+    {
         using (var http = new HttpClient())
         {
             http.DefaultRequestHeaders.UserAgent.ParseAdd("CompressForDiscord");
@@ -212,7 +219,8 @@ static class Ff
 
     public static async Task<ProbeResult> Probe(string path)
     {
-        var (code, stdout, _) = await Run(Ffprobe, ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", path]);
+        // A minute at most: a file on a share that has gone away would otherwise leave the window reading forever
+        var (code, stdout, _) = await Run(Ffprobe, ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", path], default, 60000);
         if (code != 0) throw new Exception("ffprobe could not read this file. Is it a video?");
         var root = JsonNode.Parse(stdout)!;
         var streams = root["streams"]?.AsArray().Where(s => s != null).Select(s => s!).ToList() ?? [];
@@ -222,6 +230,8 @@ static class Ff
         var fps = Rate(Str(v["avg_frame_rate"]));
         if (fps <= 0) fps = Rate(Str(v["r_frame_rate"]));
         if (fps <= 0) fps = 30;
+        // A variable-rate file can report its time base here (1000 or 90000 "frames" a second)
+        if (fps > 240) fps = 60;
 
         // Phone videos store rotation as metadata; swap so width/height match what you see
         var rotNode = v["tags"]?["rotate"] ?? v["side_data_list"]?.AsArray().FirstOrDefault(s => s?["rotation"] != null)?["rotation"];
@@ -456,6 +466,8 @@ static class Ff
                 var vf = new List<string>();
                 if (o.Crop != null) vf.AddRange(CropFilters(o));
                 else if (o.ScaleShortSide is { } s) vf.Add(o.Portrait ? $"scale={s}:-2" : $"scale=-2:{s}");
+                // As it is: H.264 needs even sides, so a source with an odd one loses its last row or column
+                else vf.Add("crop=trunc(iw/2)*2:trunc(ih/2)*2");
                 if (o.Fps is { } f) vf.Add($"fps={f}");
                 vf.Add("format=yuv420p");
                 var videoGraph = $"[0:v:0]{string.Join(",", vf)}[vout]";

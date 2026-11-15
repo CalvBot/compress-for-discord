@@ -43,7 +43,8 @@ static class Planner
             : totalKbps >= 600 ? 128
             : totalKbps >= 250 ? 96
             : 64;
-        var videoKbps = (int)Math.Floor(totalKbps - audioKbps);
+        // Held to 200 Mbps: a short clip with a big limit and a source that doesn't say its bitrate would ask for gigabits
+        var videoKbps = (int)Math.Floor(Math.Min(totalKbps - audioKbps, 200_000));
 
         // Never spend more bits than the source has; that just makes a bigger file with no quality gain
         var srcVideoKbps = (p.VideoBitrate > 0 ? p.VideoBitrate : Math.Max(0, p.Bitrate - audioKbps * 1000)) / 1000.0;

@@ -127,8 +127,15 @@ sealed class SettingsForm : DarkForm
         var desktop = Check("Desktop shortcut", Shortcut.OnDesktop);
         desktop.CheckedChanged += (_, _) =>
         {
+            if (desktop.Checked == Shortcut.OnDesktop) return;
             try { Shortcut.SetOnDesktop(desktop.Checked); }
-            catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
+            catch (Exception ex)
+            {
+                AppLog.Error("Desktop shortcut", ex);
+                MessageBox.Show(this, "Couldn't change the desktop shortcut.", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                // Show what's really there (the check above stops this asking again)
+                desktop.Checked = Shortcut.OnDesktop;
+            }
         };
         root.Controls.Add(desktop);
         // Waveforms: up from the bottom of the lane, or mirrored about its middle
@@ -317,16 +324,26 @@ sealed class SettingsForm : DarkForm
         var progress = new Progress<double>(p => { ffmpegStatus.Text = $"Downloading ffmpeg · {p * 100:0}%"; ffmpegStatus.ForeColor = Theme.Text; bar.Value = p; });
         try
         {
-            await Task.Run(() => Ff.DownloadFfmpeg(progress, download.Token));
-            SetPath(""); // the download is found automatically
+            var token = download.Token;
+            await Task.Run(() => Ff.DownloadFfmpeg(progress, token));
+            // Settings was closed meanwhile: the download is found automatically next time
+            if (!IsDisposed) SetPath("");
         }
-        catch (OperationCanceledException) { RefreshFfmpeg(); }
-        catch (Exception ex) { AppLog.Error("ffmpeg download failed", ex); ffmpegStatus.Text = "Download failed: " + ex.Message; ffmpegStatus.ForeColor = Theme.Danger; }
+        catch (OperationCanceledException) { if (!IsDisposed) RefreshFfmpeg(); }
+        catch (Exception ex)
+        {
+            AppLog.Error("ffmpeg download failed", ex);
+            if (!IsDisposed) { ffmpegStatus.Text = "Download failed: " + ex.Message; ffmpegStatus.ForeColor = Theme.Danger; }
+        }
         finally
         {
+            download?.Dispose();
             download = null;
-            bar.Visible = false;
-            pathBox.Enabled = browseBtn.Enabled = downloadLink.Enabled = true;
+            if (!IsDisposed)
+            {
+                bar.Visible = false;
+                pathBox.Enabled = browseBtn.Enabled = downloadLink.Enabled = true;
+            }
         }
     }
 
@@ -360,8 +377,11 @@ sealed class SettingsForm : DarkForm
         updateStatus.Text = "Downloading the update…";
         try
         {
-            await Updater.Install(release);
-            Application.Exit();
+            // False = the release has no installer and its page was opened instead: nothing to quit for
+            if (await Updater.Install(release)) { Application.Exit(); return; }
+            if (IsDisposed) return;
+            updateStatus.Text = "Opened the release page: download it from there.";
+            installBtn.Enabled = checkLink.Enabled = true;
         }
         catch (Exception ex)
         {
@@ -660,12 +680,14 @@ sealed class SettingsForm : DarkForm
             if (!Visible) peek?.Hide();
         }
 
+#if DEBUG
         /// <summary>Shows a row as hovered, at this thumbnail (test screenshots)</summary>
         public void Hover(int i, int frame = -1) { (hover, hoverFrame) = (i, frame); Invalidate(); ShowPeek(); }
         /// <summary>Whether every project on the page has its thumbnails (or can't have any)</summary>
         public bool ThumbsDone => !filling && Items.Skip(page * PerPage).Take(PerPage).All(i => i.Missing || thumbs.ContainsKey(Key(i)));
         /// <summary>Shows this page (test screenshots)</summary>
         public void ShowPage(int p) => GoTo(p);
+#endif
 
         protected override void OnPaint(PaintEventArgs e)
         {
