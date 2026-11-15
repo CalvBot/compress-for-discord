@@ -45,9 +45,6 @@ sealed class HomeForm : DarkForm
 
         Controls.Add(root);
         AcceptDrop(f => Program.OpenVideo(f, this), on => drop.Hot = on);
-#if DEBUG
-        if (Environment.GetEnvironmentVariable("CFD_TEST") == "drophot") drop.Hot = true;
-#endif
     }
 
     // A dialog isn't disposed when it closes, unlike a normal window

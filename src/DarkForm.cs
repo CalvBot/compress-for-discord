@@ -177,10 +177,6 @@ class DarkForm : Form
             foreach (Control child in c.Controls) Hook(child);
         }
         Hook(this);
-#if DEBUG
-        if (hot == null && (Environment.GetEnvironmentVariable("CFD_TEST") ?? "").Contains("dropoverlay"))
-            Shown += (_, _) => BeginInvoke(() => { overlay ??= new DropOverlay(this, onFile); overlay.Cover(); });
-#endif
     }
 
     /// <summary>Covers a window while a video is dragged over it: a dashed brand-blue target that takes the drop</summary>

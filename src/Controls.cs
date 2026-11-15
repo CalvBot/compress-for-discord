@@ -377,7 +377,7 @@ sealed class Bar : Control
 /// Thumbnail strip with a playhead. Dragging on the strip scrubs. The start and end are moved with the tabs
 /// above it, and the bar between the tabs moves the whole selection. Keys live in MainForm.
 /// </summary>
-sealed class Timeline : Control
+sealed partial class Timeline : Control
 {
     const double MinClip = 0.1;
     enum DragKind { None, Start, End, Range, Seek }
@@ -553,25 +553,8 @@ sealed class Timeline : Control
         Seeked?.Invoke(Current);
     }
 
-#if DEBUG
-    // For the drag test: how many moves and paints there were, and the time spent handling the moves
-    public int DebugMoves, DebugPaints;
-    public double DebugMoveMs;
-    public void DebugBeginSeekDrag() => drag = DragKind.Seek;
-    public void DebugEndDrag() => drag = DragKind.None;
-#endif
-
     protected override void OnMouseMove(MouseEventArgs e)
     {
-#if DEBUG
-        var watch = System.Diagnostics.Stopwatch.StartNew();
-        try { Moved(e); }
-        finally { DebugMoveMs += watch.Elapsed.TotalMilliseconds; DebugMoves++; }
-    }
-
-    void Moved(MouseEventArgs e)
-    {
-#endif
         base.OnMouseMove(e);
         if (drag == DragKind.None)
         {
@@ -667,9 +650,6 @@ sealed class Timeline : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
-#if DEBUG
-        DebugPaints++;
-#endif
         var key = HashCode.Combine(HashCode.Combine(From, Span, Start, End, Enabled, Focused, Grid), ThumbStart, ThumbSpan, stripVersion, Thumbs, FrameLock);
         if (strip == null || strip.Width != Width || strip.Height != Height || key != stripKey)
         {
@@ -845,7 +825,7 @@ sealed class RoundBox : Panel
 /// What every keyframable track shares (audio volume, position and scale): the zoomed view of time, the frame
 /// grid, selecting key points, the wheel shortcuts and the name badge.
 /// </summary>
-abstract class KeyTrackLane : Control
+abstract partial class KeyTrackLane : Control
 {
     protected static readonly Font Small = new("Segoe UI", 8f);
 
@@ -872,10 +852,6 @@ abstract class KeyTrackLane : Control
     protected abstract int KeyCount { get; }
     protected abstract double KeyTime(int i);
     public IEnumerable<double> KeyTimes => Enumerable.Range(0, KeyCount).Select(KeyTime);
-#if DEBUG
-    /// <summary>Where key point i is drawn, for tests that click it</summary>
-    public abstract PointF DebugKey(int i);
-#endif
     /// <summary>Removes the selected key points</summary>
     public abstract void DeleteSelected();
 
@@ -891,6 +867,42 @@ abstract class KeyTrackLane : Control
     // A press on a point: where it began, whether it has dragged yet, and a Shift+click on a point that was
     // already selected (let go of it if the mouse comes up without dragging)
     protected int grabX, toggleOff = -1;
+
+    // Everything but the playhead is kept as a picture and redrawn only when it changes: drawing a track again
+    // (its waveform, its lines) for every playhead move is what made playback and scrubbing drag
+    Bitmap? face;
+    int faceKey;
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) face?.Dispose();
+        base.Dispose(disposing);
+    }
+
+    /// <summary>The selection as one number for a picture's key, the same whatever order the set gives its points in</summary>
+    protected int SelectionHash()
+    {
+        var picked = 0;
+        foreach (var i in Selection.Set) picked ^= HashCode.Combine(i);
+        return picked;
+    }
+
+    /// <summary>Draws the track from its kept picture (made again with render when key says it has changed), then the playhead on top</summary>
+    protected void PaintFace(PaintEventArgs e, int key, Action<Graphics> render)
+    {
+        if (face == null || face.Width != Width || face.Height != Height || key != faceKey)
+        {
+            face?.Dispose();
+            face = new Bitmap(Math.Max(1, Width), Math.Max(1, Height), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            using var fg = Graphics.FromImage(face);
+            render(fg);
+            faceKey = key;
+        }
+        e.Graphics.DrawImageUnscaled(face, 0, 0);
+        var x = X(Current);
+        if (x >= G && x <= Width)
+            using (var head = new Pen(Color.FromArgb(160, Color.White))) e.Graphics.DrawLine(head, x, 1, x, Height - 2);
+    }
     protected bool moved;
 
     public void Select(int index)
@@ -1063,7 +1075,7 @@ abstract class KeyTrackLane : Control
 /// and Del removes it. Holding Shift while dragging a point keeps its value, and a level stretch between two
 /// points at the same value drags as one.
 /// </summary>
-sealed class VolumeLane : KeyTrackLane
+sealed partial class VolumeLane : KeyTrackLane
 {
     /// <summary>
     /// The waveforms drawn on this lane, each at a gain over time (null = as it is): a track's own, or for the
@@ -1083,9 +1095,6 @@ sealed class VolumeLane : KeyTrackLane
     public readonly List<(double T, double V, Ease E)> Keys = [];
     protected override int KeyCount => Keys.Count;
     protected override double KeyTime(int i) => Keys[i].T;
-#if DEBUG
-    public override PointF DebugKey(int i) => new(X(Keys[i].T), Y(Keys[i].V));
-#endif
 
     /// <summary>Changes how the volume moves next to several points at once, committing once (so playback restarts once, not per point)</summary>
     public void SetEase(IEnumerable<int> ids, Ease ease)
@@ -1135,17 +1144,7 @@ sealed class VolumeLane : KeyTrackLane
     /// <summary>First of two neighbouring points being dragged together (a level stretch); -1 = none</summary>
     int dragStretch = -1;
 
-    // Everything but the playhead is kept as a picture and redrawn only when it changes: drawing the waveform
-    // again for every playhead move, on every track, is what made playback and scrubbing drag
-    Bitmap? face;
-    int faceKey;
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing) face?.Dispose();
-        base.Dispose(disposing);
-    }
-
+    /// <summary>Changes whenever the track would draw differently (see PaintFace)</summary>
     int FaceKey()
     {
         var h = new HashCode();
@@ -1153,10 +1152,7 @@ sealed class VolumeLane : KeyTrackLane
         h.Add(Active); h.Add(Silent); h.Add(Enabled); h.Add(dragKey); h.Add(OnKey >= 0); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Sources); h.Add(AppConfig.Current.MirroredWaves);
         // A waveform that's still being measured redraws as each chunk comes in
         for (var j = 0; j < Sources.Count; j++) h.Add(Sources[j].Wave.Version);
-        // In any order: a set's order can differ for the same points
-        var picked = 0;
-        foreach (var i in Selection.Set) picked ^= HashCode.Combine(i);
-        h.Add(picked);
+        h.Add(SelectionHash());
         foreach (var k in Keys) { h.Add(k.T); h.Add(k.V); h.Add(k.E); }
         return h.ToHashCode();
     }
@@ -1371,22 +1367,7 @@ sealed class VolumeLane : KeyTrackLane
         EndDrag();
     }
 
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var key = FaceKey();
-        if (face == null || face.Width != Width || face.Height != Height || key != faceKey)
-        {
-            face?.Dispose();
-            face = new Bitmap(Math.Max(1, Width), Math.Max(1, Height), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
-            using var fg = Graphics.FromImage(face);
-            Render(fg);
-            faceKey = key;
-        }
-        e.Graphics.DrawImageUnscaled(face, 0, 0);
-        var x = X(Current);
-        if (x >= G && x <= Width)
-            using (var head = new Pen(Color.FromArgb(160, Color.White))) e.Graphics.DrawLine(head, x, 1, x, Height - 2);
-    }
+    protected override void OnPaint(PaintEventArgs e) => PaintFace(e, FaceKey(), Render);
 
     void Render(Graphics g)
     {
@@ -1493,7 +1474,7 @@ sealed class VolumeLane : KeyTrackLane
 /// Moving: Ctrl snaps to the picture's edges, Shift keeps to one direction. Resizing: Shift works from the
 /// centre instead of the opposite corner, Alt lets the shape change, Ctrl snaps the dragged edges to the picture's.
 /// </summary>
-sealed class CropView : Control
+sealed partial class CropView : Control
 {
     enum Grab { None, Move, TopLeft, TopRight, BottomLeft, BottomRight, Left, Right, Top, Bottom }
 
@@ -1545,10 +1526,6 @@ sealed class CropView : Control
     }
 
     RectangleF ToScreen(RectangleF b) { var p = Picture; return new RectangleF(p.X + b.X * p.Width, p.Y + b.Y * p.Height, b.Width * p.Width, b.Height * p.Height); }
-#if DEBUG
-    /// <summary>The box in the control's pixels, for tests that drag it</summary>
-    public RectangleF DebugBoxOnScreen => box is { } b ? ToScreen(b) : RectangleF.Empty;
-#endif
     PointF ToFrame(Point at) { var p = Picture; return new PointF((at.X - p.X) / p.Width, (at.Y - p.Y) / p.Height); }
 
     Grab HitTest(Point at)
@@ -1849,15 +1826,12 @@ static class KeyButton
 /// clicking selects it and jumps to it, Del removes it. The button also takes away the point the playhead is
 /// on. What a point holds is set by the box on the preview.
 /// </summary>
-sealed class KeyLane : KeyTrackLane
+sealed partial class KeyLane : KeyTrackLane
 {
     /// <summary>Times of the key points, in order</summary>
     public IReadOnlyList<double> Keys = [];
     protected override int KeyCount => Keys.Count;
     protected override double KeyTime(int i) => Keys[i];
-#if DEBUG
-    public override PointF DebugKey(int i) => new(X(Keys[i]), Y(Level(i)));
-#endif
     /// <summary>Height of the line at each key point, 0 (bottom) to 1</summary>
     public IReadOnlyList<double> Levels = [];
     /// <summary>The line at any time (it curves where points are eased), and a second, fainter one or null (position has two values: across and down)</summary>
@@ -1963,45 +1937,20 @@ sealed class KeyLane : KeyTrackLane
         if (!Capture) { toggleOff = -1; dragKey = -1; EndPartnerDrag(); }
     }
 
-    // Everything but the playhead is kept as a picture and redrawn only when it changes (as VolumeLane does):
-    // tracing the lines again for every frame while playing or scrubbing is wasted work
-    Bitmap? face;
-    int faceKey;
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing) face?.Dispose();
-        base.Dispose(disposing);
-    }
-
+    /// <summary>Changes whenever the track would draw differently (see PaintFace)</summary>
     int FaceKey(int onKey)
     {
         var h = new HashCode();
         h.Add(From); h.Add(Span); h.Add(Grid); h.Add(Duration); h.Add(DataVersion); h.Add(onKey);
         h.Add(Enabled); h.Add(Label); h.Add(Back.ToArgb()); h.Add(Keys.Count);
-        // In any order: a set's order can differ for the same points
-        var picked = 0;
-        foreach (var i in Selection.Set) picked ^= HashCode.Combine(i);
-        h.Add(picked);
+        h.Add(SelectionHash());
         return h.ToHashCode();
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         var onKey = OnKey;
-        var key = FaceKey(onKey);
-        if (face == null || face.Width != Width || face.Height != Height || key != faceKey)
-        {
-            face?.Dispose();
-            face = new Bitmap(Math.Max(1, Width), Math.Max(1, Height), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
-            using var fg = Graphics.FromImage(face);
-            Render(fg, onKey);
-            faceKey = key;
-        }
-        e.Graphics.DrawImageUnscaled(face, 0, 0);
-        var x = X(Current);
-        if (x >= G && x <= Width)
-            using (var head = new Pen(Color.FromArgb(160, Color.White))) e.Graphics.DrawLine(head, x, 1, x, Height - 2);
+        PaintFace(e, FaceKey(onKey), g => Render(g, onKey));
     }
 
     void Render(Graphics g, int onKey)

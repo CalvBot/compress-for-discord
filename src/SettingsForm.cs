@@ -1,7 +1,7 @@
 namespace CompressForDiscord;
 
 /// <summary>Recent projects, ffmpeg location, desktop shortcut, done sound and updates. Everything applies as soon as it's changed.</summary>
-sealed class SettingsForm : DarkForm
+sealed partial class SettingsForm : DarkForm
 {
     const int W = 580;
     readonly AppConfig cfg = AppConfig.Current;
@@ -39,6 +39,7 @@ sealed class SettingsForm : DarkForm
         recentList = new RecentList { Width = W, Margin = new Padding(0, 0, 0, 8) };
         recentList.RowClicked += OpenRecent;
         recentList.RowMenu += ShowRecentMenu;
+        recentList.RowRemoved += i => { Projects.Remove(recentList.Items[i].Path); FillRecent(); };
         root.Controls.Add(recentList);
         var keepLabel = Muted("Keep the last");
         keepLabel.Margin = new Padding(0, 5, 8, 0);
@@ -202,24 +203,11 @@ sealed class SettingsForm : DarkForm
     {
         base.OnShown(e);
         ActiveControl = null;
-#if DEBUG
-        // Test screenshots: recenthover=N shows a row hovered, recentmenu=N opens its right-click menu, recentpage=N
-        // shows that page (from 0)
-        foreach (var part in (Environment.GetEnvironmentVariable("CFD_TEST") ?? "").Split(';'))
-        {
-            if (part.StartsWith("recentpage=")) recentList.ShowPage(int.Parse(part[11..]));
-            // recenthover=N or N,F: row N hovered, at thumbnail F (once the thumbnails are made)
-            if (part.StartsWith("recenthover="))
-            {
-                var at = part[12..].Split(',').Select(int.Parse).ToArray();
-                var wait = new System.Windows.Forms.Timer { Interval = 100 };
-                wait.Tick += (_, _) => { if (!recentList.ThumbsDone) return; wait.Dispose(); recentList.Hover(at[0], at.Length > 1 ? at[1] : -1); };
-                wait.Start();
-            }
-            if (part.StartsWith("recentmenu=")) BeginInvoke(() => ShowRecentMenu(int.Parse(part[11..]), new Point(recentList.Width / 2, 20)));
-        }
-#endif
+        TestShown();
     }
+
+    /// <summary>For the test code in src\Debug (debug builds only); in a release build the call is dropped</summary>
+    partial void TestShown();
 
     /// <summary>One row per recent project, newest first; click to open it, right-click for more. Pages of five.</summary>
     void FillRecent()
@@ -397,15 +385,19 @@ sealed class SettingsForm : DarkForm
     /// saved, a gone video in red. Pages of five, with ‹ › at the bottom right once there's more than one page. The box
     /// is always five rows tall (a short page leaves blank rows), so it and the arrows stay put while paging.
     /// </summary>
-    sealed class RecentList : Control
+    sealed partial class RecentList : Control
     {
         public sealed record Item(string Path, Project Project, bool Missing);
         public IReadOnlyList<Item> Items { get; private set; } = [];
         public event Action<int>? RowClicked;
         public event Action<int, Point>? RowMenu;
+        /// <summary>The ✕ at the end of a row was clicked: take that project off the list</summary>
+        public event Action<int>? RowRemoved;
 
         const int RowH = 34, PerPage = 5, Pad = 4, FootH = 30, ArrowW = 30;
         int hover = -1, page;
+        /// <summary>The mouse is on the hovered row's ✕</summary>
+        bool overRemove;
         /// <summary>The arrow under the mouse: -1 back, 1 on, 0 neither</summary>
         int overArrow;
         /// <summary>The thumbnail shown for the hovered row: moving across the row scrubs through them</summary>
@@ -471,6 +463,16 @@ sealed class SettingsForm : DarkForm
         {
             var h = row.Height - Px(10);
             return new Rectangle(row.X + Px(8), row.Y + (row.Height - h) / 2, h * 16 / 9, h);
+        }
+
+        /// <summary>A row's place in the list</summary>
+        Rectangle RowBox(int i) => new(Px(Pad), Px(Pad) + (i - page * PerPage) * Row, Width - 2 * Px(Pad), Row);
+
+        /// <summary>The ✕ at the right end of a row (shown on the row under the mouse)</summary>
+        Rectangle RemoveBox(Rectangle row)
+        {
+            var s = Px(22);
+            return new Rectangle(row.Right - s - Px(6), row.Y + (row.Height - s) / 2, s, s);
         }
 
         /// <summary>The larger frame above the hovered row (below it if there's no room), or hidden</summary>
@@ -630,9 +632,10 @@ sealed class SettingsForm : DarkForm
             // Left to right across the row runs through the thumbnails
             var inner = Width - 2 * Px(Pad);
             var frame = row >= 0 ? Math.Clamp((e.X - Px(Pad)) * ProjectThumbs.Count / Math.Max(1, inner), 0, ProjectThumbs.Count - 1) : -1;
-            if (row != hover || arrow != overArrow)
+            var remove = row >= 0 && RemoveBox(RowBox(row)).Contains(e.Location);
+            if (row != hover || arrow != overArrow || remove != overRemove)
             {
-                (hover, overArrow) = (row, arrow);
+                (hover, overArrow, overRemove) = (row, arrow, remove);
                 Cursor = row >= 0 || arrow != 0 ? Cursors.Hand : Cursors.Default;
                 // The preview shows the path; the tooltip is for rows without one
                 tips.SetToolTip(this, row >= 0 && Thumbs(Items[row]) == null ? Items[row].Project.File : null);
@@ -656,7 +659,8 @@ sealed class SettingsForm : DarkForm
             }
             var row = RowAt(e.Location);
             if (row < 0) return;
-            if (e.Button == MouseButtons.Left) RowClicked?.Invoke(row);
+            if (e.Button == MouseButtons.Left && RemoveBox(RowBox(row)).Contains(e.Location)) RowRemoved?.Invoke(row);
+            else if (e.Button == MouseButtons.Left) RowClicked?.Invoke(row);
             else if (e.Button == MouseButtons.Right) RowMenu?.Invoke(row, e.Location);
         }
 
@@ -669,7 +673,7 @@ sealed class SettingsForm : DarkForm
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
-            (hover, overArrow, hoverFrame) = (-1, 0, -1);
+            (hover, overArrow, hoverFrame, overRemove) = (-1, 0, -1, false);
             Invalidate();
             peek?.Hide();
         }
@@ -679,15 +683,6 @@ sealed class SettingsForm : DarkForm
             base.OnVisibleChanged(e);
             if (!Visible) peek?.Hide();
         }
-
-#if DEBUG
-        /// <summary>Shows a row as hovered, at this thumbnail (test screenshots)</summary>
-        public void Hover(int i, int frame = -1) { (hover, hoverFrame) = (i, frame); Invalidate(); ShowPeek(); }
-        /// <summary>Whether every project on the page has its thumbnails (or can't have any)</summary>
-        public bool ThumbsDone => !filling && Items.Skip(page * PerPage).Take(PerPage).All(i => i.Missing || thumbs.ContainsKey(Key(i)));
-        /// <summary>Shows this page (test screenshots)</summary>
-        public void ShowPage(int p) => GoTo(p);
-#endif
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -726,7 +721,20 @@ sealed class SettingsForm : DarkForm
                     else using (var fill = new SolidBrush(Theme.Bg2)) g.FillPath(fill, shape);
                 }
                 var text = Px(10);
-                r = Rectangle.FromLTRB(tb.Right, r.Y, r.Right, r.Bottom);
+                // The ✕ that takes this project off the list: on the row under the mouse, in a column every row keeps
+                // clear so the dates line up
+                var x = RemoveBox(r);
+                if (i == hover)
+                {
+                    if (overRemove)
+                        using (var shape = Theme.Round(new RectangleF(x.X, x.Y, x.Width - 1, x.Height - 1), Px(5)))
+                        using (var fill = new SolidBrush(Theme.Bg3)) g.FillPath(fill, shape);
+                    float mx = x.X + x.Width / 2f, my = x.Y + x.Height / 2f, arm = Px(4);
+                    using var cross = new Pen(overRemove ? Theme.Danger : Theme.Muted, Math.Max(1.5f, Px(2))) { StartCap = System.Drawing.Drawing2D.LineCap.Round, EndCap = System.Drawing.Drawing2D.LineCap.Round };
+                    g.DrawLine(cross, mx - arm, my - arm, mx + arm, my + arm);
+                    g.DrawLine(cross, mx - arm, my + arm, mx + arm, my - arm);
+                }
+                r = Rectangle.FromLTRB(tb.Right, r.Y, x.X + Px(4), r.Bottom);
                 var when = item.Missing ? "moved or deleted · click to locate" : Projects.When(item.Project.Saved);
                 var whenW = TextRenderer.MeasureText(when, Font).Width;
                 TextRenderer.DrawText(g, when, Font, new Rectangle(r.Right - text - whenW, r.Y, whenW, r.Height), item.Missing ? Theme.Danger : Theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPrefix);

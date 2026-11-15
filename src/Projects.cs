@@ -31,26 +31,21 @@ sealed record TrackState(int Index, bool Active, double Volume, List<ValueKey> K
 /// The last few projects, one file each, newest first. A video has at most one: saving it again replaces the
 /// old one. Only as many as the setting says are kept.
 /// </summary>
-static class Projects
+static partial class Projects
 {
-#if DEBUG
-    /// <summary>Test runs point this somewhere else so they never touch the real list</summary>
-    static readonly string Folder = Environment.GetEnvironmentVariable("CFD_PROJECTS") is { Length: > 0 } dir ? dir : Path.Combine(Paths.Data, "projects");
-#else
-    static readonly string Folder = Path.Combine(Paths.Data, "projects");
-#endif
+    static readonly string Folder = FindFolder();
 
-    static bool Enabled
+    static string FindFolder()
     {
-        get
-        {
-#if DEBUG
-            // A debug test run without its own folder saves nothing
-            if (Environment.GetEnvironmentVariable("CFD_TEST") is { Length: > 0 } && Environment.GetEnvironmentVariable("CFD_PROJECTS") is not { Length: > 0 }) return false;
-#endif
-            return AppConfig.Current.RecentProjects > 0;
-        }
+        var folder = Path.Combine(Paths.Data, "projects");
+        TestFolder(ref folder);
+        return folder;
     }
+
+    /// <summary>For the test code in src\Debug (debug builds only), which keeps test runs off the real list; in a release build the call is dropped</summary>
+    static partial void TestFolder(ref string folder);
+
+    static bool Enabled => AppConfig.Current.RecentProjects > 0;
 
     public static List<(string Path, Project Project)> Recent()
     {

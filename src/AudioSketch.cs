@@ -119,10 +119,6 @@ static class AudioSketch
 
             // The gains are read alongside, start to end; spots read before they're in are read again after
             var gains = AacGains.Open(path, tracks.Select(t => t.Track).ToList());
-#if DEBUG
-            // To compare with the sketch read at fixed spots
-            if (Environment.GetEnvironmentVariable("CFD_TEST")?.Contains("noguide") == true) gains = null;
-#endif
             if (gains != null) _ = Task.Run(() => gains.Scan(paused, stopScan.Token), CancellationToken.None);
             // ffmpeg has measured all of it: the sketch wouldn't show anywhere
             while (!waves.All(w => w.Complete))

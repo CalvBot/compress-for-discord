@@ -45,9 +45,8 @@ static class AppLog
                     }
                     catch (IOException) when (attempt < 5) { Thread.Sleep(10); }
             }
-#if DEBUG
+            // To the debugger's output window too (the compiler leaves this call out of a release build)
             Debug.Write(line);
-#endif
         }
         catch { }
     }

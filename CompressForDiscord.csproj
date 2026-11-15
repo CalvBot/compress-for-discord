@@ -24,6 +24,12 @@
     <TieredPGO>true</TieredPGO>
   </PropertyGroup>
 
+  <!-- src\Debug holds the test code (screenshots and end-to-end checks driven by the CFD_TEST variable).
+       Only debug builds compile it: a release build has none of it. -->
+  <ItemGroup Condition="'$(Configuration)' != 'Debug'">
+    <Compile Remove="src\Debug\**" />
+  </ItemGroup>
+
   <ItemGroup>
     <EmbeddedResource Include="assets\complete.wav" LogicalName="complete.wav" />
     <EmbeddedResource Include="assets\app.ico" LogicalName="app.ico" />
