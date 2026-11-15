@@ -308,17 +308,20 @@ sealed partial class MainForm
                     for (var n = 0; n < 40; n++) ZoomBy(1 / 0.75, timeline.Duration * 0.9);
                     AppLog.Info($"Zoomsim out: {viewStart:0.000}-{viewEnd:0.000} of {timeline.Duration:0.000}");
                     break;
+                case "in": timeline.SetStart(double.Parse(value, System.Globalization.CultureInfo.InvariantCulture)); break;
                 case "goto": timeBox.Text = value; if (ParseTime(value) is { } go) timeline.Seek(go); break;
                 case "cropkeys":
                 {
-                    // A zoom: the full box at 20% of the way in, half the width (cropkeys=0.1: a tenth) and
-                    // off-centre by 60%. cropkeys=still,0.5: zoomed in to half the width throughout.
+                    // A zoom: the full box at 20% of the way in, half the width and off-centre by 60%.
+                    // cropkeys=0.1: to a tenth. cropkeys=0.5,0.3: from half to 0.3. cropkeys=still,0.5: half throughout.
                     var still = value.StartsWith("still");
-                    var to = double.TryParse(value.Split(',')[^1], System.Globalization.CultureInfo.InvariantCulture, out var given) ? given : 0.5;
+                    var widths = value.Split(',').Select(v => double.TryParse(v, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : double.NaN).Where(n => !double.IsNaN(n)).ToList();
+                    var to = widths.Count > 0 ? widths[^1] : 0.5;
+                    var from = still ? to : widths.Count > 1 ? widths[0] : 1;
                     pos.Keys.Clear();
                     scale.Keys.Clear();
-                    pos.Keys.AddRange([(probe!.Duration * 0.2, still ? (0.62, 0.45) : (0.5, 0.5), Ease.Linear), (probe.Duration * 0.6, (0.62, 0.45), Ease.Linear)]);
-                    scale.Keys.AddRange([(probe.Duration * 0.2, MaxCropW * (still ? to : 1), Ease.Linear), (probe.Duration * 0.6, MaxCropW * to, Ease.Linear)]);
+                    pos.Keys.AddRange([(probe!.Duration * 0.2, from < 1 ? (0.62, 0.45) : (0.5, 0.5), Ease.Linear), (probe.Duration * 0.6, (0.62, 0.45), Ease.Linear)]);
+                    scale.Keys.AddRange([(probe.Duration * 0.2, MaxCropW * from, Ease.Linear), (probe.Duration * 0.6, MaxCropW * to, Ease.Linear)]);
                     timeline.Seek(probe.Duration * 0.4);
                     ShowCrop();
                     UpdateSummary();

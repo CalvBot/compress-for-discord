@@ -42,8 +42,8 @@ sealed class EncodeRequest
     /// <summary>Where the picture is over time; null = whole frame. The box always has the shape CropW:CropH.</summary>
     public CropPath? Crop;
     /// <summary>
-    /// Size of the crop's shape at its widest on the source frame. The output is this (times the scale): the box
-    /// only says which part of the frame fills it, so where it's smaller (zoomed in) the picture is enlarged.
+    /// Size of the crop box at its widest in what's being encoded. The output is this (times the scale): where the
+    /// box is smaller (zoomed in further), the picture is enlarged to fill it.
     /// </summary>
     public int CropW, CropH;
     /// <summary>Size of the source frame, to tell when the box hangs off it</summary>
@@ -340,9 +340,9 @@ static class Ff
         t.Keys is { Count: > 0 } k ? $"volume='{Ramp(k, offset)}':eval=frame" : $"volume={F3(t.Volume)}";
 
     /// <summary>
-    /// Crop (and scale) filters. The output is always the crop's shape at full size (times the chosen scale): the
-    /// box only says which part of the frame fills it, so zooming in enlarges the picture and never shrinks the video.
-    /// A box that doesn't change is a plain crop, scaled up if it's zoomed in. A moving or zooming one can't be,
+    /// Crop (and scale) filters. The output is the box at its widest (CropW by CropH, times the chosen scale), so
+    /// wherever the box is tighter than that the picture is enlarged to fill it.
+    /// A box that doesn't change is a plain crop (scaled if the output isn't its size). A moving or zooming one can't be,
     /// because ffmpeg's crop can't change size mid-video: instead each frame is scaled so the box comes out at the
     /// output size, and a fixed-size crop then follows the box around. That scales the whole frame, so for a very
     /// tight zoom (which would make frames of hundreds of megapixels) the box is stretched over the frame directly
@@ -378,7 +378,7 @@ static class Ff
                 (left, top) = (l, t);
             }
         }
-        // Output size: the crop's shape at full size, times the chosen scale, kept even for H.264
+        // Output size: the box at its widest, times the chosen scale, kept even for H.264
         var f = o.ScaleShortSide is { } s ? s / (double)Math.Min(o.CropW, o.CropH) : 1;
         int outW = Math.Max(2, (int)Math.Round(o.CropW * f) & ~1), outH = Math.Max(2, (int)Math.Round(o.CropH * f) & ~1);
         static bool Still(List<(double T, double V, Ease E)> k) => k.All(p => Math.Abs(p.V - k[0].V) < 0.5);

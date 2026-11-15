@@ -1693,16 +1693,20 @@ sealed partial class MainForm : DarkForm
     }
 
     /// <summary>
-    /// What gets planned as the source: the whole frame, or when reframed the crop's shape at its widest on the
-    /// frame. The output is that size (times the scale). Position and scale don't come into it: they only say
-    /// which part of the frame fills the picture, so zooming in enlarges it and never makes the video smaller.
+    /// What gets planned as the source: the whole frame, or when reframed the picture at its widest between the in
+    /// and out points. The output is that size (times the scale), so that moment is pixel for pixel and anything
+    /// tighter is enlarged to match, however much tighter. A zoom that never changes comes out the size of its
+    /// box; one that zooms in from the full frame and back stays the size of the frame. What's outside the in
+    /// and out points doesn't count.
     /// </summary>
     ProbeResult PlanSource
     {
         get
         {
             if (!Reframed) return probe!;
-            var w = MaxCropW;
+            // The box's width over the trimmed stretch: at its ends, and at each key point in between
+            var w = scale.Keys.Where(k => k.T > timeline.Start && k.T < timeline.End).Select(k => k.Value)
+                .Append(scale.At(timeline.Start)).Append(scale.At(timeline.End)).Max(v => Math.Min(v, MaxCropW));
             int pw = Math.Max(2, (int)Math.Round(w * probe!.Width) & ~1), ph = Math.Max(2, (int)Math.Round(pw / cropAspect) & ~1);
             return probe with { Width = pw, Height = Math.Min(ph, probe.Height & ~1) };
         }
