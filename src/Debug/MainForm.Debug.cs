@@ -510,7 +510,7 @@ sealed partial class MainForm
                 case "settings": BeginInvoke(ShowSettings); break;
                 case "help": BeginInvoke(ShowHelp); break;
                 case "menu": BeginInvoke(() => moreBtn.GetType().GetMethod("OnClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(moreBtn, [EventArgs.Empty])); break;
-                case "save": BeginInvoke(() => Go(save: true, value)); break;
+                case "save": BeginInvoke(() => Compress(value)); break;
             }
         }
     }

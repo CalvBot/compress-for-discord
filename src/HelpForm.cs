@@ -1,6 +1,6 @@
 namespace CompressForDiscord;
 
-/// <summary>How to use the app and every hotkey</summary>
+/// <summary>Every key and mouse shortcut, with the version and links at the bottom</summary>
 sealed class HelpForm : DarkForm
 {
     static readonly (string Section, (string Keys, string What)[] Rows)[] Hotkeys =

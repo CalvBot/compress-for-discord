@@ -1,6 +1,9 @@
 namespace CompressForDiscord;
 
-/// <summary>Recent projects, ffmpeg location, desktop shortcut, done sound and updates. Everything applies as soon as it's changed.</summary>
+/// <summary>
+/// Recent projects, where ffmpeg is, the encoder, the general choices (desktop shortcut, done sound, waveform
+/// style, undo steps) and updates. Everything applies as soon as it's changed.
+/// </summary>
 sealed partial class SettingsForm : DarkForm
 {
     const int W = 580;
@@ -39,7 +42,7 @@ sealed partial class SettingsForm : DarkForm
         recentList = new RecentList { Width = W, Margin = new Padding(0, 0, 0, 8) };
         recentList.RowClicked += OpenRecent;
         recentList.RowMenu += ShowRecentMenu;
-        recentList.RowRemoved += i => { Projects.Remove(recentList.Items[i].Path); FillRecent(); };
+        recentList.RowRemoved += i => { Projects.Delete(recentList.Items[i].Path); FillRecent(); };
         root.Controls.Add(recentList);
         var keepLabel = Muted("Keep the last");
         keepLabel.Margin = new Padding(0, 5, 8, 0);
@@ -60,6 +63,8 @@ sealed partial class SettingsForm : DarkForm
         clearLink = Link("Clear", () => { Projects.Clear(); FillRecent(); });
         clearLink.Margin = new Padding(8, 5, 0, 0);
         root.Controls.Add(Row([keepLabel, .. keep, clearLink]));
+        // ffmpeg found first: the list's thumbnails are made with it (opened from the home window, nothing has looked yet)
+        Ff.Locate(cfg.FfmpegPath);
         FillRecent();
 
         // ffmpeg: a folder you can type or paste, Browse, and Open folder. Empty = found automatically.
@@ -250,7 +255,7 @@ sealed partial class SettingsForm : DarkForm
         recentMenu.Add(item.Missing ? "Locate video…" : "Swap video…", "", () => { if (PickVideoFor(item, item.Missing ? "Locate" : "Swap for")) FillRecent(); });
         if (!item.Missing) recentMenu.Add("Show in folder", "", () => System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{item.Project.File}\""));
         recentMenu.Items.Add(new ToolStripSeparator());
-        recentMenu.Add("Remove from list", "", () => { Projects.Remove(item.Path); FillRecent(); });
+        recentMenu.Add("Remove from list", "", () => { Projects.Delete(item.Path); FillRecent(); });
         recentMenu.Show(recentList, at);
     }
 
@@ -398,6 +403,8 @@ sealed partial class SettingsForm : DarkForm
         int hover = -1, page;
         /// <summary>The mouse is on the hovered row's ✕</summary>
         bool overRemove;
+        /// <summary>When a project was last taken off with its ✕ (Environment.TickCount64)</summary>
+        long lastRemove;
         /// <summary>The arrow under the mouse: -1 back, 1 on, 0 neither</summary>
         int overArrow;
         /// <summary>The thumbnail shown for the hovered row: moving across the row scrubs through them</summary>
@@ -451,6 +458,8 @@ sealed partial class SettingsForm : DarkForm
             if (disposing)
             {
                 life.Cancel();
+                life.Dispose();
+                tips.Dispose();
                 peek?.Dispose();
                 foreach (var frames in thumbs.Values) foreach (var b in frames ?? []) b.Dispose();
                 thumbs.Clear();
@@ -478,7 +487,8 @@ sealed partial class SettingsForm : DarkForm
         /// <summary>The larger frame above the hovered row (below it if there's no room), or hidden</summary>
         void ShowPeek()
         {
-            if (hover < 0 || hoverFrame < 0 || Thumbs(Items[hover]) is not { } frames || !IsHandleCreated || !Visible)
+            // (not while the mouse is on the ✕: that's about removing the project, not looking at it)
+            if (hover < 0 || hoverFrame < 0 || overRemove || Thumbs(Items[hover]) is not { } frames || !IsHandleCreated || !Visible)
             {
                 peek?.Hide();
                 return;
@@ -588,12 +598,18 @@ sealed partial class SettingsForm : DarkForm
         public void SetItems(IReadOnlyList<Item> items)
         {
             Items = items;
-            hover = -1;
+            (hover, overRemove) = (-1, false);
             page = Math.Clamp(page, 0, Pages - 1);
             Fit();
             Invalidate();
             peek?.Hide();
             FillThumbs();
+            // Another row may be under the mouse now (one was removed): show it as such
+            if (IsHandleCreated && Visible)
+            {
+                var p = PointToClient(MousePosition);
+                if (ClientRectangle.Contains(p)) OnMouseMove(new MouseEventArgs(MouseButtons.None, 0, p.X, p.Y, 0));
+            }
         }
 
         void GoTo(int to)
@@ -638,7 +654,7 @@ sealed partial class SettingsForm : DarkForm
                 (hover, overArrow, overRemove) = (row, arrow, remove);
                 Cursor = row >= 0 || arrow != 0 ? Cursors.Hand : Cursors.Default;
                 // The preview shows the path; the tooltip is for rows without one
-                tips.SetToolTip(this, row >= 0 && Thumbs(Items[row]) == null ? Items[row].Project.File : null);
+                tips.SetToolTip(this, remove ? "Remove from the list" : row >= 0 && Thumbs(Items[row]) == null ? Items[row].Project.File : null);
                 Invalidate();
             }
             if (frame != hoverFrame)
@@ -659,7 +675,14 @@ sealed partial class SettingsForm : DarkForm
             }
             var row = RowAt(e.Location);
             if (row < 0) return;
-            if (e.Button == MouseButtons.Left && RemoveBox(RowBox(row)).Contains(e.Location)) RowRemoved?.Invoke(row);
+            if (e.Button == MouseButtons.Left && RemoveBox(RowBox(row)).Contains(e.Location))
+            {
+                // Only an ✕ that's showing, and not the second click of a double-click: the next project has moved
+                // up under the mouse by then, and would go too
+                if (row != hover || !overRemove || Environment.TickCount64 - lastRemove < SystemInformation.DoubleClickTime) return;
+                lastRemove = Environment.TickCount64;
+                RowRemoved?.Invoke(row);
+            }
             else if (e.Button == MouseButtons.Left) RowClicked?.Invoke(row);
             else if (e.Button == MouseButtons.Right) RowMenu?.Invoke(row, e.Location);
         }
@@ -772,5 +795,11 @@ sealed partial class SettingsForm : DarkForm
     {
         download?.Cancel();
         base.OnFormClosing(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) recentMenu.Dispose();
+        base.Dispose(disposing);
     }
 }

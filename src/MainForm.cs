@@ -623,21 +623,21 @@ sealed partial class MainForm : DarkForm
         var now = StateKey();
         if (now == undoState) return;
         undoStack.Add(undoState);
-        var steps = Math.Clamp(AppConfig.Current.UndoSteps, 1, 100);
+        var steps = Math.Clamp(cfg.UndoSteps, 1, 100);
         if (undoStack.Count > steps) undoStack.RemoveRange(0, undoStack.Count - steps);
         redoStack.Clear();
         undoState = now;
     }
 
     /// <summary>Ctrl+Z: back a step (redo: Ctrl+Shift+Z, forward again). The playhead and the open tracks stay as they are.</summary>
-    bool Undo(bool redo)
+    void Undo(bool redo)
     {
         // Not mid-drag: the dragged lane's points would change under it
-        if (MouseButtons != MouseButtons.None) return true;
+        if (MouseButtons != MouseButtons.None) return;
         // A change just made counts before stepping back from it
         RecordUndo();
         var (from, to) = redo ? (redoStack, undoStack) : (undoStack, redoStack);
-        if (from.Count == 0 || undoState == null) return true;
+        if (from.Count == 0 || undoState == null) return;
         to.Add(undoState);
         var state = from[^1];
         from.RemoveAt(from.Count - 1);
@@ -653,7 +653,6 @@ sealed partial class MainForm : DarkForm
         undoState = StateKey();
         // Hear the mix as it now is
         RestartSoon();
-        return true;
     }
 
     void SaveProject()
@@ -742,6 +741,8 @@ sealed partial class MainForm : DarkForm
             ShowTracksNow();
             // Undo leaves the playhead where it is (and playback going: Seek would stop it)
             if (!exact) timeline.Seek(Math.Clamp(p.Current, timeline.Start, timeline.End));
+            // (but the frame on show is fetched again when paused: the preview may now want it at another size)
+            else if (playCts == null) RequestFrame(timeline.Current);
             ShowCrop();
             UpdateSummary();
         });
@@ -1953,19 +1954,31 @@ sealed partial class MainForm : DarkForm
         return dlg.ShowDialog(this) == DialogResult.OK ? dlg.FileName : null;
     }
 
-    /// <param name="saveTo">skips the save dialog (tests)</param>
-    async void Go(bool save, string? saveTo = null)
-    {
-        if (probe == null || encodeCts != null || !goBtn.Enabled || !goBtn.Visible) return;
-        var plan = CurrentPlan();
-        if (plan is not { Feasible: true }) return;
-        var name = OutputName;
+    bool CanCompress => probe != null && encodeCts == null && goBtn.Enabled && goBtn.Visible && CurrentPlan() is { Feasible: true };
 
+    /// <summary>The button and Enter: compress and copy. With save, compress into a file chosen first (remembering its folder).</summary>
+    void Go(bool save)
+    {
+        if (!CanCompress) return;
         StopPlayback();
         string? savePath = null;
-        if (save && (savePath = saveTo ?? AskSavePath()) == null) return;
+        if (save)
+        {
+            if ((savePath = AskSavePath()) == null) return;
+            cfg.SaveFolder = Path.GetDirectoryName(savePath) ?? "";
+            cfg.Save();
+        }
+        Compress(savePath);
+    }
+
+    /// <param name="savePath">where the result goes; null = onto the clipboard</param>
+    async void Compress(string? savePath)
+    {
+        if (!CanCompress || CurrentPlan() is not { } plan) return;
+        var name = OutputName;
+        StopPlayback();
         encodeCts = new CancellationTokenSource();
-        AppLog.Info($"Compress {(save ? "& save" : "& copy")}: {timeline.Start:0.00}-{timeline.End:0.00} s, limit {plan.TargetBytes / Planner.MB:0.00} MB, video {plan.VideoKbps} kbps, audio {plan.AudioKbps} kbps, " +
+        AppLog.Info($"Compress {(savePath != null ? "& save" : "& copy")}: {timeline.Start:0.00}-{timeline.End:0.00} s, limit {plan.TargetBytes / Planner.MB:0.00} MB, video {plan.VideoKbps} kbps, audio {plan.AudioKbps} kbps, " +
             $"short side {plan.ScaleShortSide?.ToString() ?? "source"}, fps {plan.Fps?.ToString() ?? "source"}, crop {(CropForEncode() != null ? "yes" : "no")}, tracks {Mix().Count}, encoder {cfg.Encoder}");
         SetBusy(true);
         var progress = new Progress<(string Stage, double Progress)>(p =>
@@ -1987,7 +2000,7 @@ sealed partial class MainForm : DarkForm
                 Master = Master,
                 ScaleShortSide = plan.ScaleShortSide,
                 Fps = plan.Fps,
-                Portrait = probe.Height > probe.Width,
+                Portrait = probe!.Height > probe.Width,
                 SrcW = probe.Width,
                 SrcH = probe.Height,
                 Crop = CropForEncode(),
@@ -2005,11 +2018,6 @@ sealed partial class MainForm : DarkForm
             {
                 File.Move(temp, savePath, true);
                 outPath = savePath;
-                if (saveTo == null)
-                {
-                    cfg.SaveFolder = Path.GetDirectoryName(savePath) ?? "";
-                    cfg.Save();
-                }
                 Done($"✓ Saved {Path.GetFileName(savePath)} ({Planner.FormatBytes(size)}{shrunk})");
             }
             else
@@ -2029,20 +2037,19 @@ sealed partial class MainForm : DarkForm
         catch (OperationCanceledException)
         {
             AppLog.Info("Compress cancelled");
-            ShowStatus("Cancelled", Theme.Muted);
-            SetBusy(false);
+            // (the window may have been closed to cancel it: nothing left to show it on)
+            if (!IsDisposed) { ShowStatus("Cancelled", Theme.Muted); SetBusy(false); }
         }
         catch (Exception ex)
         {
             AppLog.Error("Compress failed", ex);
-            ShowStatus(ex.Message, Theme.Danger);
-            SetBusy(false);
+            if (!IsDisposed) { ShowStatus(ex.Message, Theme.Danger); SetBusy(false); }
         }
         finally
         {
             encodeCts?.Dispose();
             encodeCts = null;
-            if (outPath == null) UpdateSummary(keepStatus: true);
+            if (outPath == null && !IsDisposed) UpdateSummary(keepStatus: true);
         }
     }
 
@@ -2070,7 +2077,7 @@ sealed partial class MainForm : DarkForm
         // Chime, then get out of the way; the file is already on the clipboard or saved
         bar.Value = 1;
         ShowStatus(message, Theme.Green);
-        var chime = AppConfig.Current.PlaySound;
+        var chime = cfg.PlaySound;
         if (chime) try { Player.Chime(); } catch { }
         Hide();
         if (chime) await Task.Delay(Player.ChimeLength);
@@ -2092,17 +2099,19 @@ sealed partial class MainForm : DarkForm
         (downloadBtn.AltText, downloadBtn.HoverText) = ("Downloading…", "✕  Cancel");
         bar.Value = 0;
         bar.Visible = true;
-        var progress = new Progress<double>(p => { ShowStatus($"Downloading ffmpeg · {p * 100:0}%", Theme.Text); bar.Value = p; });
+        var progress = new Progress<double>(p => { if (IsDisposed) return; ShowStatus($"Downloading ffmpeg · {p * 100:0}%", Theme.Text); bar.Value = p; });
+        // Done with the download (and free to compress) before the video is read
+        void Finished() { encodeCts?.Dispose(); encodeCts = null; if (!IsDisposed) bar.Visible = false; }
         try
         {
-            await Task.Run(() => Ff.DownloadFfmpeg(progress, encodeCts.Token));
-            encodeCts = null;
-            bar.Visible = false;
-            await LoadVideo();
+            var token = encodeCts.Token;
+            await Task.Run(() => Ff.DownloadFfmpeg(progress, token));
+            Finished();
+            if (!IsDisposed) await LoadVideo();
         }
-        catch (OperationCanceledException) { encodeCts = null; bar.Visible = false; ShowStatus("Download cancelled.", Theme.Muted); }
-        catch (Exception ex) { AppLog.Error("ffmpeg download failed", ex); encodeCts = null; bar.Visible = false; ShowStatus("Download failed: " + ex.Message, Theme.Danger); }
-        finally { settingsBtn.Enabled = true; (downloadBtn.AltText, downloadBtn.HoverText) = (null, null); }
+        catch (OperationCanceledException) { Finished(); if (!IsDisposed) ShowStatus("Download cancelled.", Theme.Muted); }
+        catch (Exception ex) { AppLog.Error("ffmpeg download failed", ex); Finished(); if (!IsDisposed) ShowStatus("Download failed: " + ex.Message, Theme.Danger); }
+        finally { if (!IsDisposed) { settingsBtn.Enabled = true; (downloadBtn.AltText, downloadBtn.HoverText) = (null, null); } }
     }
 
     // ---------- menu ----------
@@ -2170,8 +2179,7 @@ sealed partial class MainForm : DarkForm
         var mods = keyData & Keys.Modifiers;
         if (keyData == (Keys.Control | Keys.C)) return CopyKeys();
         if (keyData == (Keys.Control | Keys.V)) return PasteKeys();
-        if (keyData == (Keys.Control | Keys.Z)) return Undo(redo: false);
-        if (keyData == (Keys.Control | Keys.Shift | Keys.Z)) return Undo(redo: true);
+        if (keyData is (Keys.Control | Keys.Z) or (Keys.Control | Keys.Shift | Keys.Z)) { Undo(redo: keyData.HasFlag(Keys.Shift)); return true; }
         // Ctrl + Space: play on from the playhead to the end of the video, trimmed or not (to watch what's outside the trim)
         if (keyData == (Keys.Control | Keys.Space))
         {
@@ -2239,7 +2247,12 @@ sealed partial class MainForm : DarkForm
         undoTimer.Dispose();
         tips.Dispose();
         thumbCts?.Dispose();
+        foreach (var menu in new[] { trackMenu, cropMenu, goMenu, timeline.ContextMenuStrip }) menu?.Dispose();
         timeline.Thumbs = [];
+        // The frame on show (the window is gone: nothing draws it again)
+        var shown = preview.Image;
+        preview.Image = null;
+        shown?.Dispose();
         foreach (var img in thumbCache.Values) img.Dispose();
         thumbCache.Clear();
         if (frameReader is { } open) _ = open.ContinueWith(t => { if (t.IsCompletedSuccessfully) t.Result?.Dispose(); }, TaskScheduler.Default);

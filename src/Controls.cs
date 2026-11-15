@@ -451,7 +451,9 @@ sealed partial class Timeline : Control
     /// <summary>Strip at the left, so the timeline lines up with the tracks below and their buttons. It holds the frame lock button.</summary>
     int G => Px(Tracks.Gutter);
     float X(double t) => G + (float)((t - From) / Span * (Width - G));
-    double T(int x) => Math.Clamp(From + (x - G) / (double)Math.Max(1, Width - G) * Span, 0, Duration);
+    double T(int x) => Math.Clamp(RawT(x), 0, Duration);
+    /// <summary>The time at x even off either end of the video, for drags that go by how far the mouse has moved</summary>
+    double RawT(int x) => From + (x - G) / (double)Math.Max(1, Width - G) * Span;
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
@@ -526,13 +528,13 @@ sealed partial class Timeline : Control
             return;
         }
         Focus();
-        var t = T(e.X);
+        var t = RawT(e.X);
         drag = HitTest(e.Location);
         // Held where it was taken hold of: a tab is wider than the edge it moves, and mustn't jump to the mouse
         if (drag == DragKind.Range) { grabOffset = t - Start; length = End - Start; }
         if (drag == DragKind.Start) grabOffset = t - Start;
         if (drag == DragKind.End) grabOffset = t - End;
-        if (drag == DragKind.Seek) ScrubTo(t, e.X);
+        if (drag == DragKind.Seek) ScrubTo(T(e.X), e.X);
     }
 
     /// <summary>Moves the playhead while scrubbing. With Shift it jumps to a key point, the start or the end when one is close.</summary>
@@ -587,7 +589,8 @@ sealed partial class Timeline : Control
     {
         pendingDrag = null;
         sinceDrag.Restart();
-        var t = T(x);
+        // Not held to the video's ends here: a tab taken hold of off its edge still has to reach them
+        var t = RawT(x);
         switch (drag)
         {
             // Normally the playhead follows the edge so you see the frame you're cutting on. With Shift it stays
@@ -613,7 +616,7 @@ sealed partial class Timeline : Control
                 SetRange(s, s + length);
                 Seek(s);
                 break;
-            default: ScrubTo(t, x); break;
+            default: ScrubTo(T(x), x); break;
         }
         // Draw the playhead now. Windows only repaints when no input is waiting, so with a fast mouse the
         // playhead would otherwise trail behind in jumps.
@@ -1044,7 +1047,15 @@ abstract partial class KeyTrackLane : Control
     protected double From => ViewEnd > ViewStart ? ViewStart : 0;
     protected double Span => ViewEnd > ViewStart ? ViewEnd - ViewStart : Duration;
     protected float X(double t) => G + (float)((t - From) / Span * BodyW);
-    protected double T(int x) => Math.Clamp(From + (x - G) / (double)BodyW * Span, 0, Duration);
+    protected double T(int x) => Math.Clamp(RawT(x), 0, Duration);
+    /// <summary>The time at x even off either end of the video</summary>
+    protected double RawT(int x) => From + (x - G) / (double)BodyW * Span;
+    /// <summary>
+    /// A point being dragged goes to the time under the mouse plus this: how far off its centre it was taken hold
+    /// of. So it doesn't jump to the mouse, still reaches both ends of the video, and stays under the mouse if
+    /// the view is scrolled or zoomed mid-drag.
+    /// </summary>
+    protected double grabOff;
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
@@ -1269,10 +1280,13 @@ sealed partial class VolumeLane : KeyTrackLane
             dragKey = k;
             grabX = e.X;
             grabT = k >= 0 ? Keys[k].T : 0;
+            grabOff = grabT - RawT(e.X);
             dragStretch = k < 0 ? HitStretch(e.Location) : -1;
             dragFlat = k < 0 && Keys.Count == 0;
             grabY = e.Y;
-            grabVolume = k >= 0 ? Keys[k].V : dragStretch >= 0 ? Keys[dragStretch].V : Volume;
+            // A point just put in with Ctrl+click follows the mouse's level once it's dragged; any other keeps
+            // however far off its centre it was taken hold of
+            grabVolume = k >= 0 ? added ? V(e.Y) : Keys[k].V : dragStretch >= 0 ? Keys[dragStretch].V : Volume;
         }
     }
 
@@ -1330,7 +1344,7 @@ sealed partial class VolumeLane : KeyTrackLane
             var stay = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Control) || Math.Abs(e.X - grabX) <= Px(3);
             // By how far the mouse has moved since the press, in time and in level: a point taken hold of a little
             // off its centre mustn't jump to the mouse (a sideways drag would change its level)
-            DragShift(Keys[dragKey].T, stay ? grabT : grabT + T(e.X) - T(grabX), stay);
+            DragShift(Keys[dragKey].T, stay ? grabT : RawT(e.X) + grabOff, stay);
             var dv = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift) ? 0
                 : Snap(grabVolume + (grabY - e.Y) / (double)Math.Max(1, Height - 2 * Pad) * 2) - Keys[dragKey].V;
             // The whole group stays within 0..200%
@@ -1842,8 +1856,6 @@ sealed partial class KeyLane : KeyTrackLane
     public IReadOnlyList<Ease> Eases = [];
     Ease EaseOf(int i) => i < Eases.Count ? Eases[i] : Ease.Linear;
     bool shiftClick;
-    /// <summary>When the held point was when the drag began</summary>
-    double grabT;
 
     public KeyLane() => Label = "Position & scale";
 
@@ -1900,7 +1912,7 @@ sealed partial class KeyLane : KeyTrackLane
             PressSelect(k, shiftClick);
             dragKey = k;
             grabX = e.X;
-            grabT = k >= 0 && k < Keys.Count ? Keys[k] : 0;
+            grabOff = (k >= 0 && k < Keys.Count ? Keys[k] : 0) - RawT(e.X);
         }
     }
 
@@ -1915,7 +1927,7 @@ sealed partial class KeyLane : KeyTrackLane
         if (dragKey >= Keys.Count) return;
         if (!Selection.Contains(dragKey)) Selection.Add(dragKey);
         // By how far the mouse has moved, so a point taken hold of off its centre doesn't jump
-        DragShift(Keys[dragKey], grabT + T(e.X) - T(grabX), false);
+        DragShift(Keys[dragKey], RawT(e.X) + grabOff, false);
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -2064,8 +2076,12 @@ sealed class ZoomBar : Control
             ViewChanged?.Invoke(centre - grabSpan / 2, centre + grabSpan / 2);
             grab = Grab.Move;
         }
-        grabOffset = T(e.X) - ViewStart;
+        // Held where it was taken hold of (a narrow window is drawn wider than it is, so an end can be some way
+        // from the mouse)
+        grabOffset = RawT(e.X) - (grab == Grab.Right ? ViewEnd : ViewStart);
     }
+
+    double RawT(int x) => (x - G) / (double)BodyW * Duration;
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
@@ -2075,12 +2091,12 @@ sealed class ZoomBar : Control
             Cursor = HitTest(e.X) switch { Grab.Left or Grab.Right => Cursors.SizeWE, Grab.Move => Cursors.Hand, _ => Cursors.Default };
             return;
         }
-        var t = T(e.X);
+        var t = RawT(e.X) - grabOffset;
         switch (grab)
         {
-            case Grab.Left: ViewChanged?.Invoke(Math.Min(t, ViewEnd - MinSpan), ViewEnd); break;
-            case Grab.Right: ViewChanged?.Invoke(ViewStart, Math.Max(t, ViewStart + MinSpan)); break;
-            default: ViewChanged?.Invoke(t - grabOffset, t - grabOffset + grabSpan); break;
+            case Grab.Left: ViewChanged?.Invoke(Math.Min(Math.Max(0, t), ViewEnd - MinSpan), ViewEnd); break;
+            case Grab.Right: ViewChanged?.Invoke(ViewStart, Math.Max(Math.Min(Duration, t), ViewStart + MinSpan)); break;
+            default: ViewChanged?.Invoke(t, t + grabSpan); break;
         }
     }
 

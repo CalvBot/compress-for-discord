@@ -220,7 +220,10 @@ static class Ff
     public static async Task<ProbeResult> Probe(string path)
     {
         // A minute at most: a file on a share that has gone away would otherwise leave the window reading forever
-        var (code, stdout, _) = await Run(Ffprobe, ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", path], default, 60000);
+        int code;
+        byte[] stdout;
+        try { (code, stdout, _) = await Run(Ffprobe, ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", path], default, 60000); }
+        catch (OperationCanceledException) { throw new Exception("Reading this file took too long. Is its drive still connected?"); }
         if (code != 0) throw new Exception("ffprobe could not read this file. Is it a video?");
         var root = JsonNode.Parse(stdout)!;
         var streams = root["streams"]?.AsArray().Where(s => s != null).Select(s => s!).ToList() ?? [];

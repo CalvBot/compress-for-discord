@@ -116,14 +116,17 @@ sealed class AppConfig
 
     public void Save()
     {
+        // Written beside it and swapped in, so another window opening just now never reads half a file
+        var tmp = $"{Paths.Config}.{Environment.ProcessId}.tmp";
         try
         {
             Directory.CreateDirectory(Paths.Data);
-            // Written beside it and swapped in, so another window opening just now never reads half a file
-            var tmp = $"{Paths.Config}.{Environment.ProcessId}.tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
-            File.Move(tmp, Paths.Config, true);
+            // Another window can be reading it at this moment: try again shortly rather than lose the change
+            for (var attempt = 0; ; attempt++)
+                try { File.Move(tmp, Paths.Config, true); break; }
+                catch (IOException) when (attempt < 3) { Thread.Sleep(20); }
         }
-        catch { }
+        catch { try { File.Delete(tmp); } catch { } }
     }
 }

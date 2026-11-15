@@ -91,8 +91,6 @@ static partial class Projects
         catch { }
     }
 
-    public static void Remove(string path) => Delete(path);
-
     /// <summary>Drops all but the newest ones the setting keeps</summary>
     public static void Trim()
     {
@@ -109,8 +107,8 @@ static partial class Projects
     /// <summary>The project's thumbnails (<see cref="ProjectThumbs"/>), saved beside it</summary>
     public static string ThumbPath(string path) => Path.ChangeExtension(path, ".jpg");
 
-    /// <summary>A project file and its thumbnails</summary>
-    static void Delete(string path)
+    /// <summary>Takes a project off the list: its file and its thumbnails</summary>
+    public static void Delete(string path)
     {
         try { File.Delete(path); } catch { }
         try { File.Delete(ThumbPath(path)); } catch { }
