@@ -1691,16 +1691,25 @@ sealed partial class MainForm : DarkForm
         ShowCrop();
     }
 
+    /// <summary>A zoom is enlarged up to this many times to fill the output; past that the output is made smaller instead</summary>
+    const double MaxEnlarge = 4;
+
     /// <summary>
-    /// What gets planned as the source: the whole frame, or when reframed the picture at its most zoomed in. The
-    /// output is that size (times the scale), so that moment is pixel for pixel and nothing is ever enlarged.
+    /// What gets planned as the source: the whole frame, or when reframed the picture at its widest within the trim.
+    /// The output is that size (times the scale): a video that zooms in and back out stays the size it is zoomed
+    /// out, and the zoomed-in stretch is enlarged to fill it, as a video editor does. Only a zoom of more than
+    /// MaxEnlarge times brings the output down (to that many times its tightest), since enlarging further is
+    /// only blur, and slow to make.
     /// </summary>
     ProbeResult PlanSource
     {
         get
         {
             if (!Reframed) return probe!;
-            var w = scale.Keys.Min(k => Math.Min(k.Value, MaxCropW));
+            // The box's width over the trimmed stretch: at its ends, and at each key point in between
+            var widths = scale.Keys.Where(k => k.T > timeline.Start && k.T < timeline.End).Select(k => k.Value)
+                .Append(scale.At(timeline.Start)).Append(scale.At(timeline.End)).Select(v => Math.Min(v, MaxCropW)).ToList();
+            var w = Math.Min(widths.Max(), widths.Min() * MaxEnlarge);
             int pw = Math.Max(2, (int)Math.Round(w * probe!.Width) & ~1), ph = Math.Max(2, (int)Math.Round(pw / cropAspect) & ~1);
             return probe with { Width = pw, Height = Math.Min(ph, probe.Height & ~1) };
         }

@@ -41,7 +41,10 @@ sealed class EncodeRequest
     public double Calibration;
     /// <summary>Where the picture is over time; null = whole frame. The box always has the shape CropW:CropH.</summary>
     public CropPath? Crop;
-    /// <summary>Size of the smallest crop box. The output is this (times the scale), so nothing is ever enlarged.</summary>
+    /// <summary>
+    /// Size of the crop box at its widest. The output is this (times the scale): where the box is smaller (zoomed
+    /// in), the picture is enlarged to fill it.
+    /// </summary>
     public int CropW, CropH;
     /// <summary>Size of the source frame, to tell when the box hangs off it</summary>
     public int SrcW, SrcH;
@@ -365,7 +368,7 @@ static class Ff
                 (left, top) = (l, t);
             }
         }
-        // Output size: the smallest box, times the chosen scale, kept even for H.264
+        // Output size: the widest box, times the chosen scale, kept even for H.264
         var f = o.ScaleShortSide is { } s ? s / (double)Math.Min(o.CropW, o.CropH) : 1;
         int outW = Math.Max(2, (int)Math.Round(o.CropW * f) & ~1), outH = Math.Max(2, (int)Math.Round(o.CropH * f) & ~1);
         static bool Still(List<(double T, double V, Ease E)> k) => k.All(p => Math.Abs(p.V - k[0].V) < 0.5);
