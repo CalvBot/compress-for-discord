@@ -422,8 +422,8 @@ static class Ff
     }
 
     /// <summary>
-    /// The most pixels a frame may be scaled up to for an animated zoom (a 1440p frame enlarged 4 times, each way)
-    /// before the slower way that doesn't scale whole frames is used
+    /// The most pixels a frame may be scaled up to for an animated zoom before the slower way that doesn't scale
+    /// whole frames is used. A 1440p frame enlarged 4 times each way is 59 million.
     /// </summary>
     const long MaxScaledPixels = 64_000_000;
 
