@@ -750,6 +750,26 @@ sealed class Timeline : Control
     }
 }
 
+/// <summary>A table on a card with rounded corners, like the tracks and the list in Settings</summary>
+sealed class RoundTable : TableLayoutPanel
+{
+    public RoundTable()
+    {
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        BackColor = Theme.Bg2;
+    }
+
+    protected override void OnPaintBackground(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Parent?.BackColor ?? Theme.Bg);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var card = Theme.Round(new RectangleF(0, 0, Width - 1, Height - 1), 8 * DeviceDpi / 96f);
+        using var fill = new SolidBrush(BackColor);
+        g.FillPath(fill, card);
+    }
+}
+
 /// <summary>
 /// Chip-shaped frame for a text box, so it sits in a row of chips without looking out of place.
 /// Sizes itself from DeviceDpi like Pill does, so it's always exactly as tall as the chips next to it.

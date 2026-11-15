@@ -219,7 +219,7 @@ sealed class MainForm : DarkForm
         timeRow.Controls.AddRange([timeLabel, advBtn, timeField, Gap(), previewBtn, Gap(), playBtn]);
 
         // Options: label column + chip rows
-        options = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, BackColor = Theme.Bg2, Padding = new Padding(12, 10, 12, 6), Margin = new Padding(0, 10, 0, 10), MinimumSize = new Size(ContentWidth, 0) };
+        options = new RoundTable { ColumnCount = 2, AutoSize = true, Padding = new Padding(12, 10, 12, 6), Margin = new Padding(0, 10, 0, 10), MinimumSize = new Size(ContentWidth, 0) };
         options.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         options.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         FlowLayoutPanel ChipRow()

@@ -58,7 +58,7 @@ sealed class HelpForm : DarkForm
 
         var root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, Location = new Point(20, 14), Margin = Padding.Empty };
         root.Controls.Add(Heading("Keys"));
-        var keys = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, BackColor = Theme.Bg2, Padding = new Padding(12, 10, 12, 8), Margin = new Padding(0, 4, 0, 12), MinimumSize = new Size(W, 0) };
+        var keys = new RoundTable { ColumnCount = 2, AutoSize = true, Padding = new Padding(12, 10, 12, 8), Margin = new Padding(0, 4, 0, 12), MinimumSize = new Size(W, 0) };
         keys.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         keys.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var firstSection = true;
