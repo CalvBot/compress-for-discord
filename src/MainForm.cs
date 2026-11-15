@@ -43,10 +43,8 @@ sealed class MainForm : DarkForm
     readonly CancellationTokenSource lifetime = new();
     /// <summary>A preview frame is being fetched; the next one wanted goes straight after it</summary>
     bool frameBusy;
-    /// <summary>When a click on the timeline last stopped playback, so the same click can't also count towards a double-click that starts it again</summary>
-    long stoppedByClick;
     double pendingFrame;
-    /// <summary>Where the current playback stops when it isn't the end of the trim (double-click play)</summary>
+    /// <summary>Where the current playback stops when it isn't the end of the trim (Ctrl + Space)</summary>
     double? playTo;
     string? outPath;
 
@@ -184,10 +182,7 @@ sealed class MainForm : DarkForm
             if (timeline.FrameLock && probe != null) timeline.Seek(timeline.Current);
         };
         timeline.KeyPoints = () => AllTracks.SelectMany(l => l.KeyTimes);
-        timeline.Seeked += t => { if (playCts != null) stoppedByClick = Environment.TickCount64; StopPlayback(); RequestFrame(t); };
-        // Double-click plays from that spot to the end of the video, so you can watch what's outside the trim.
-        // Not when the first click of the two was what stopped it playing: then it just stays stopped there.
-        timeline.PlayRequested += t => { if (probe != null && encodeCts == null && Environment.TickCount64 - stoppedByClick > 800) { StopPlayback(); _ = PlayFrom(t, probe.Duration); } };
+        timeline.Seeked += t => { StopPlayback(); RequestFrame(t); };
 
         var timelineMenu = new DarkMenu();
         timelineMenu.Add("Clear in and out", "", () => timeline.SetRange(0, timeline.Duration));
@@ -965,6 +960,53 @@ sealed class MainForm : DarkForm
                     if (int.TryParse(value, out var playIn)) _ = Task.Delay(playIn).ContinueWith(_ => BeginInvoke(TogglePlay));
                     else TogglePlay();
                     break;
+                // playzoom: plays, then zooms in and out a notch every 80 ms, and logs how evenly the frames came
+                // before and during the zooming
+                case "playzoom":
+                    BeginInvoke(new Action(async () =>
+                    {
+                        string Gaps(int from)
+                        {
+                            var g = debugFrames.Skip(from).Zip(debugFrames.Skip(from + 1), (a, b) => (double)(b - a)).ToList();
+                            return g.Count == 0 ? "no frames" : $"{g.Count} frames, gap avg {g.Average():0.0} ms, worst {g.Max():0} ms, over 100 ms: {g.Count(x => x > 100)}";
+                        }
+                        await Task.Delay(int.TryParse(value, out var wait) ? wait : 2000);
+                        timeline.Seek(timeline.Duration * 0.3);
+                        TogglePlay();
+                        await Task.Delay(3000);
+                        var mark = debugFrames.Count;
+                        await Task.Delay(4000);
+                        AppLog.Info($"Playzoom: still: {Gaps(mark)}");
+                        mark = debugFrames.Count;
+                        var ui = System.Diagnostics.Stopwatch.StartNew();
+                        var busy = 0.0;
+                        for (var n = 0; n < 50; n++)
+                        {
+                            var w = System.Diagnostics.Stopwatch.StartNew();
+                            ZoomBy(n / 10 % 2 == 0 ? 0.75 : 1 / 0.75, timeline.Current);
+                            Update();
+                            busy += w.Elapsed.TotalMilliseconds;
+                            await Task.Delay(80);
+                        }
+                        AppLog.Info($"Playzoom: zooming: {Gaps(mark)}; zoom steps took {busy / 50:0.0} ms each");
+                        mark = debugFrames.Count;
+                        await Task.Delay(3000);
+                        AppLog.Info($"Playzoom: after: {Gaps(mark)}");
+                    }));
+                    break;
+                // thumbsim: zooms in 6 notches, out 6, in 6 and scrolls, pausing for the thumbnails each time; the
+                // "Thumbs:" log lines show how many had to be made
+                case "thumbsim":
+                    BeginInvoke(new Action(async () =>
+                    {
+                        await Task.Delay(4000);
+                        timeline.Seek(timeline.Duration * 0.3);
+                        foreach (var factor in new[] { 0.75, 1 / 0.75, 0.75 })
+                            for (var n = 0; n < 6; n++) { ZoomBy(factor, timeline.Current); await Task.Delay(1500); }
+                        for (var n = 0; n < 3; n++) { var by = (viewEnd - viewStart) * 0.15; SetView(viewStart + by, viewEnd + by, keepSpan: true); await Task.Delay(1500); }
+                        AppLog.Info("Thumbs: sim done");
+                    }));
+                    break;
                 // zoomsim: Alt + wheel in, 40 notches past the limit, then out; logs where the view and playhead sit
                 case "zoomsim":
                     timeline.Seek(timeline.Duration * 0.3);
@@ -1027,9 +1069,9 @@ sealed class MainForm : DarkForm
                         AppLog.Info("Dumped waveforms");
                     });
                     break;
-                // keysim: A / Shift+A, dragging points on two tracks at once (plain, Shift to the playhead, Alt+Shift
-                // free), Del on both, and undo / redo, with posted mouse messages and this thread's key state (not the
-                // real keyboard). Wants masterkeys and cropkeys first.
+                // keysim: A / Shift+A, dragging points on two tracks at once (and with Shift, to the playhead), Del on
+                // both, and undo / redo, with posted mouse messages and this thread's key state (not the real
+                // keyboard). Wants masterkeys and cropkeys first.
                 case "keysim":
                     _ = Task.Delay(1500).ContinueWith(_ => BeginInvoke(new Action(async () =>
                     {
@@ -1072,7 +1114,7 @@ sealed class MainForm : DarkForm
                             var dm = masterLane.Keys[0].T - m0[0];
                             var dp = pos.Keys[0].T - p0[0];
                             Check("drag moves both tracks", dm > 0 && Math.Abs(dm - dp) < 1e-9 && Math.Abs(masterLane.Keys[2].T - m0[2] - dm) < 1e-9, $"master {dm:0.0000}, pos {dp:0.0000}");
-                            Check("Alt+Shift: off the frame grid", Math.Abs(masterLane.Keys[0].T / FrameLength - Math.Round(masterLane.Keys[0].T / FrameLength)) > 1e-6, $"{masterLane.Keys[0].T:0.00000} s, frame {FrameLength:0.00000}");
+                            Check("Alt+Shift still lands on a frame", Math.Abs(masterLane.Keys[0].T / FrameLength - Math.Round(masterLane.Keys[0].T / FrameLength)) < 1e-6, $"{masterLane.Keys[0].T:0.00000} s, frame {FrameLength:0.00000}");
                             // Shift: the playhead a little way right of the second pos point; a drag ending near it snaps
                             var target = pos.Keys[1].T + 0.5;
                             timeline.Seek(target);
@@ -1244,37 +1286,42 @@ sealed class MainForm : DarkForm
     {
         thumbCts?.Cancel();
         var cts = thumbCts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-        double start = viewStart, span = viewEnd - viewStart;
-        // Zoomed in until there are fewer frames than thumbnails: show the frames themselves, one each
-        const int Usual = 16;
+        // The pictures sit on a fixed grid, not wherever the view happens to start: each stands for a stretch that is
+        // a power of two seconds long (8 to 16 of them on screen) and shows the frame at its start. So scrolling
+        // and zooming ask for the same moments again and find them in the cache: zooming out a level needs
+        // nothing new, zooming in a level only every other one.
+        var cell = Math.Pow(2, Math.Floor(Math.Log2((viewEnd - viewStart) / 8)));
         var frame = FrameLength;
-        var count = Usual;
-        if (frame > 0 && span / frame <= Usual)
-        {
-            start = Math.Floor(start / frame) * frame;
-            count = Math.Max(1, (int)Math.Ceiling((viewEnd - start) / frame - 1e-6));
-            span = count * frame;
-        }
-        var cell = span / count;
+        // Zoomed in until a stretch would be a frame or less: show the frames themselves, one each
+        var frames = frame > 0 && cell <= frame;
+        if (frames) cell = frame;
+        var first = (long)Math.Floor(viewStart / cell + 1e-9);
+        var count = Math.Max(1, (int)((long)Math.Ceiling(viewEnd / cell - 1e-9) - first));
+        var start = first * cell;
+        // A frame's picture is taken from its middle (its start can round down into the frame before)
+        double Time(int i) => (first + i + (frames ? 0.5 : 0)) * cell;
+        // Each picture standing for 20 s or more: the keyframe just before its time is close enough, and quicker
+        var rough = cell >= 20;
         var strip = new Image?[count];
         var missing = new List<int>();
         for (var i = 0; i < count; i++)
         {
-            var mid = start + (i + 0.5) * cell;
-            var (img, at) = NearestThumb(mid);
-            strip[i] = img;
-            // Only a thumbnail from inside this cell is the right picture; anything else is a stand-in
-            // (and one from a keyframe is only near its time: not good enough once zoomed in)
-            if (img == null || Math.Abs(at - mid) > cell / 2 || (cell < 20 && roughThumbs.Contains(at))) missing.Add(i);
+            // Anything but this moment's own picture is a stand-in (and one from a keyframe is only near its time:
+            // not good enough once zoomed in)
+            if (thumbCache.TryGetValue(Time(i), out var own) && (rough || !roughThumbs.Contains(Time(i)))) { strip[i] = own; continue; }
+            strip[i] = NearestThumb(Time(i)).Img;
+            missing.Add(i);
         }
-        (timeline.Thumbs, timeline.ThumbStart, timeline.ThumbSpan) = (strip, start, span);
+        (timeline.Thumbs, timeline.ThumbStart, timeline.ThumbSpan) = (strip, start, count * cell);
         timeline.StripChanged();
+#if DEBUG
+        AppLog.Info($"Thumbs: {count} of {cell:0.###} s from {start:0.###}, {missing.Count} to make");
+#endif
         if (missing.Count == 0) return;
 
-        var times = missing.Select(i => start + (i + 0.5) * cell).ToArray();
-        // Each picture standing for 20 s or more: the keyframe just before its time is close enough, and quicker
-        var rough = cell >= 20;
-        await Ff.Thumbnails(file, times, timeline.Height, keyOnly: rough, (j, img) =>
+        var times = missing.Select(Time).ToArray();
+        // While playing they're made two at a time: a full set at once made the playback stutter
+        await Ff.Thumbnails(file, times, timeline.Height, keyOnly: rough, playCts != null ? 2 : 0, (j, img) =>
         {
             void Keep()
             {
@@ -1455,6 +1502,9 @@ sealed class MainForm : DarkForm
             await Player.Play(file, from, to ?? timeline.End, Mix(), Master, DecodeSize(), probe!.Width, probe.Height, PlaybackFps, (bmp, t) =>
             {
                 playStarting = false;
+#if DEBUG
+                debugFrames.Add(Environment.TickCount64);
+#endif
                 if (cts.IsCancellationRequested || IsDisposed) { bmp.Dispose(); return; }
                 // Playing to the out point, and it was moved in while playing: stop there now
                 if (to == null && t >= timeline.End) { bmp.Dispose(); StopPlayback(); return; }
@@ -1562,6 +1612,8 @@ sealed class MainForm : DarkForm
 
     [DllImport("user32.dll")]
     static extern bool PostMessage(IntPtr hwnd, int msg, nint wparam, nint lparam);
+    /// <summary>When each playback frame was shown (Environment.TickCount64), for the playzoom test</summary>
+    readonly List<long> debugFrames = [];
     [DllImport("user32.dll")] static extern bool GetKeyboardState(byte[] state);
     [DllImport("user32.dll")] static extern bool SetKeyboardState(byte[] state);
 #endif
@@ -2336,7 +2388,7 @@ sealed class MainForm : DarkForm
         timeline.Invalidate();
         foreach (Control c in scroller.Content.Controls) c.Invalidate();
         // Zoomed right in, the thumbnails are one per frame, so they follow the frame rate too
-        if ((viewEnd - viewStart) / frame <= timeline.Thumbs.Length) { thumbTimer.Stop(); thumbTimer.Start(); }
+        if ((viewEnd - viewStart) / frame <= 32) { thumbTimer.Stop(); thumbTimer.Start(); }
         // Preview plays at the chosen frame rate, so pick up a new one straight away
         if (showResult) RestartIfPlaying();
     }
@@ -2635,6 +2687,14 @@ sealed class MainForm : DarkForm
         if (keyData == (Keys.Control | Keys.V)) return PasteKeys();
         if (keyData == (Keys.Control | Keys.Z)) return Undo(redo: false);
         if (keyData == (Keys.Control | Keys.Shift | Keys.Z)) return Undo(redo: true);
+        // Ctrl + Space: play on from the playhead to the end of the video, trimmed or not (to watch what's outside the trim)
+        if (keyData == (Keys.Control | Keys.Space))
+        {
+            var playing = playCts != null;
+            StopPlayback();
+            if (!playing && timeline.Current < probe.Duration - 0.05) _ = PlayFrom(timeline.Current, probe.Duration);
+            return true;
+        }
         if (mods != Keys.None && !(mods == Keys.Shift && key is Keys.Left or Keys.Right or Keys.Space or Keys.A)) return false;
         var step = mods == Keys.Shift ? 5 : StepLength;
         // Close enough to count as being on a key point (with frame lock, the playhead can only get within half a frame)

@@ -164,11 +164,12 @@ static class Ff
     /// <summary>The last few lines of ffmpeg's error output, where the reason usually is</summary>
     static string Tail(string stderr, int lines = 6) => string.Join("\n", stderr.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).TakeLast(lines));
 
-    internal static async Task<(int Code, byte[] Stdout, string Stderr)> Run(string exe, IEnumerable<string> args, CancellationToken ct = default, int timeoutMs = 0)
+    internal static async Task<(int Code, byte[] Stdout, string Stderr)> Run(string exe, IEnumerable<string> args, CancellationToken ct = default, int timeoutMs = 0, bool background = false)
     {
         var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
+        if (background) try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
         var stdout = new MemoryStream();
         var outTask = p.StandardOutput.BaseStream.CopyToAsync(stdout);
         var errTask = p.StandardError.ReadToEndAsync();
@@ -257,7 +258,8 @@ static class Ff
     public static Task<Image?> Frame(string path, double time, int height, CancellationToken ct = default, bool keyOnly = false) =>
         Frame(path, time, height, ct, keyOnly, retry: true);
 
-    static async Task<Image?> Frame(string path, double time, int height, CancellationToken ct, bool keyOnly, bool retry)
+    /// <param name="background">run below normal priority, so it gives way to playback and the window</param>
+    static async Task<Image?> Frame(string path, double time, int height, CancellationToken ct, bool keyOnly, bool retry, bool background = false)
     {
         try
         {
@@ -265,10 +267,10 @@ static class Ff
             var (code, stdout, _) = await Run(Ffmpeg, [
                 "-hide_banner", "-loglevel", "error", .. seek, "-i", path, "-an", "-sn",
                 "-frames:v", "1", "-vf", $"scale=-2:{height}", "-q:v", "4", "-f", "image2pipe", "-c:v", "mjpeg", "-"
-            ], ct, 20000);
+            ], ct, 20000, background);
             // A seek at the very end of a short clip can land past the last frame; take an earlier one instead. Once
             // only: a file ffmpeg can't read at all would otherwise try every second back to the start.
-            if ((code != 0 || stdout.Length == 0) && time > 0 && retry) return await Frame(path, Math.Max(0, time - 1), height, ct, keyOnly, retry: false);
+            if ((code != 0 || stdout.Length == 0) && time > 0 && retry) return await Frame(path, Math.Max(0, time - 1), height, ct, keyOnly, retry: false, background);
             if (code != 0 || stdout.Length == 0) return null;
             using var ms = new MemoryStream(stdout);
             using var img = Image.FromStream(ms);
@@ -279,16 +281,17 @@ static class Ff
 
     /// <summary>Frames at these times for the timeline, several at a time; each one is reported (by its index) as soon as it's ready.</summary>
     /// <param name="keyOnly">the keyframe at or before each time will do (a third quicker on long recordings)</param>
-    public static async Task Thumbnails(string path, double[] times, int height, bool keyOnly, Action<int, Image> onFrame, CancellationToken ct)
+    /// <param name="workers">how many at a time; 0 = as many as suits the processor</param>
+    public static async Task Thumbnails(string path, double[] times, int height, bool keyOnly, int workers, Action<int, Image> onFrame, CancellationToken ct)
     {
         var next = -1;
-        var workers = Math.Clamp(Environment.ProcessorCount / 2, 4, 8);
+        if (workers <= 0) workers = Math.Clamp(Environment.ProcessorCount / 2, 4, 8);
         await Task.WhenAll(Enumerable.Range(0, workers).Select(_ => Task.Run(async () =>
         {
             int i;
             while ((i = Interlocked.Increment(ref next)) < times.Length && !ct.IsCancellationRequested)
             {
-                var img = await Frame(path, times[i], height, ct, keyOnly);
+                var img = await Frame(path, times[i], height, ct, keyOnly, retry: true, background: true);
                 if (img != null) onFrame(i, img);
             }
         })));

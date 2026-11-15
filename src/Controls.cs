@@ -383,8 +383,6 @@ sealed class Timeline : Control
     public event Action? RangeChanged;
     /// <summary>The playhead moved; the form shows that frame</summary>
     public event Action<double>? Seeked;
-    /// <summary>The strip was double-clicked at this time; the form plays from there, trimmed or not</summary>
-    public event Action<double>? PlayRequested;
     /// <summary>Key point times on every track; Shift + scrubbing snaps to these (and to the start and end)</summary>
     public Func<IEnumerable<double>>? KeyPoints;
 
@@ -601,6 +599,14 @@ sealed class Timeline : Control
             case DragKind.End when ModifierKeys.HasFlag(Keys.Shift): SetEnd(SnapToPlayhead(t, x)); break;
             case DragKind.Start: SetStart(t); Seek(Start); break;
             case DragKind.End: SetEnd(t); Seek(End); break;
+            case DragKind.Range when ModifierKeys.HasFlag(Keys.Shift):
+                // The playhead stays, and whichever end comes close to it lands on it
+                var to = Snap(t - grabOffset);
+                if (Math.Abs(X(to) - X(Current)) <= Px(7)) to = Current;
+                else if (Math.Abs(X(to + length) - X(Current)) <= Px(7)) to = Current - length;
+                to = Math.Clamp(to, 0, Duration - length);
+                SetRange(to, to + length);
+                break;
             case DragKind.Range:
                 var s = Math.Clamp(Snap(t - grabOffset), 0, Duration - length);
                 SetRange(s, s + length);
@@ -611,12 +617,6 @@ sealed class Timeline : Control
         // Draw the playhead now. Windows only repaints when no input is waiting, so with a fast mouse the
         // playhead would otherwise trail behind in jumps.
         Update();
-    }
-
-    protected override void OnMouseDoubleClick(MouseEventArgs e)
-    {
-        base.OnMouseDoubleClick(e);
-        if (Enabled && e.Button == MouseButtons.Left && e.X >= G && HitTest(e.Location) == DragKind.Seek) PlayRequested?.Invoke(Snap(T(e.X)));
     }
 
     double SnapToPlayhead(double t, int x) => Math.Abs(x - X(Current)) <= Px(7) ? Current : t;
@@ -895,16 +895,14 @@ abstract class KeyTrackLane : Control
     /// <summary>
     /// A drag of the held point (now at held) towards the time under the mouse (want): every selected point here and
     /// on the partner tracks moves by the same amount, as far as all of them can. The held point lands on a frame;
-    /// with Shift, any selected point that comes near the playhead lands on it; with Alt+Shift nothing snaps.
+    /// with Shift, any selected point that comes near the playhead lands on it.
     /// Exact = want is where it must go (back where it was), with no snapping.
     /// </summary>
     protected void DragShift(double held, double want, bool exact)
     {
-        var shift = ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift);
-        var free = exact || shift && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Alt);
-        var dt = (free ? Math.Clamp(want, 0, Duration) : OnFrame(want)) - held;
+        var dt = (exact ? Math.Clamp(want, 0, Duration) : OnFrame(want)) - held;
         var others = Partners?.Invoke().Where(p => p != this && p.Selection.Count > 0).ToList() ?? [];
-        if (shift && !free)
+        if (!exact && ModifierKeys.HasFlag(System.Windows.Forms.Keys.Shift))
         {
             // Within a few pixels of the playhead: the nearest point onto it
             var reach = Px(8) * Span / BodyW;
