@@ -42,12 +42,14 @@ sealed class EncodeRequest
     /// <summary>Where the picture is over time; null = whole frame. The box always has the shape CropW:CropH.</summary>
     public CropPath? Crop;
     /// <summary>
-    /// Size of the crop box at its widest. The output is this (times the scale): where the box is smaller (zoomed
-    /// in), the picture is enlarged to fill it.
+    /// Size of the crop's shape at its widest on the source frame. The output is this (times the scale): the box
+    /// only says which part of the frame fills it, so where it's smaller (zoomed in) the picture is enlarged.
     /// </summary>
     public int CropW, CropH;
     /// <summary>Size of the source frame, to tell when the box hangs off it</summary>
     public int SrcW, SrcH;
+    /// <summary>The source's frames a second (for a tight animated zoom, which is timed by counting frames)</summary>
+    public double SrcFps;
 }
 
 static class Ff
@@ -318,9 +320,10 @@ static class Ff
     /// Ease says (and holds before the first and after the last). Seeking with -ss restarts the filter clock at 0,
     /// so the offset is added back to get source time.
     /// </summary>
-    static string Ramp(IReadOnlyList<(double T, double V, Ease E)> k, double offset)
+    /// <param name="clock">the filter's time in seconds: t, or frames over the frame rate for a filter that only counts frames</param>
+    static string Ramp(IReadOnlyList<(double T, double V, Ease E)> k, double offset, string clock = "t")
     {
-        var time = $"(t+{F3(offset)})";
+        var time = $"({clock}+{F3(offset)})";
         var expr = F3(k[^1].V);
         for (var i = k.Count - 1; i >= 1; i--)
         {
@@ -337,9 +340,13 @@ static class Ff
         t.Keys is { Count: > 0 } k ? $"volume='{Ramp(k, offset)}':eval=frame" : $"volume={F3(t.Volume)}";
 
     /// <summary>
-    /// Crop (and scale) filters. A box that doesn't change is a plain crop. A moving or zooming one can't be, because
-    /// ffmpeg's crop can't change size mid-video: instead each frame is scaled so the box comes out at the output
-    /// size, and a fixed-size crop then follows the box around.
+    /// Crop (and scale) filters. The output is always the crop's shape at full size (times the chosen scale): the
+    /// box only says which part of the frame fills it, so zooming in enlarges the picture and never shrinks the video.
+    /// A box that doesn't change is a plain crop, scaled up if it's zoomed in. A moving or zooming one can't be,
+    /// because ffmpeg's crop can't change size mid-video: instead each frame is scaled so the box comes out at the
+    /// output size, and a fixed-size crop then follows the box around. That scales the whole frame, so for a very
+    /// tight zoom (which would make frames of hundreds of megapixels) the box is stretched over the frame directly
+    /// instead: slower for an ordinary zoom, but the same work however tight it gets.
     /// </summary>
     static IEnumerable<string> CropFilters(EncodeRequest o)
     {
@@ -357,6 +364,8 @@ static class Ff
         // match. Eased stretches can reach a little past the key points' boxes, so look in between them too.
         var boxes = times.Concat(Enumerable.Range(0, 401).Select(i => first + (last - first) * i / 400)).Select(Box).ToList();
         double left = 0, top = 0;
+        // The frame the box is taken from: the source, plus any padding
+        long frameW = o.SrcW, frameH = o.SrcH;
         if (o.SrcW > 0 && o.SrcH > 0)
         {
             static int Even(double v) => (int)Math.Ceiling(Math.Max(0, v) / 2) * 2;
@@ -364,29 +373,59 @@ static class Ff
             int r = Even(boxes.Max(b => b.X + b.W) - o.SrcW), btm = Even(boxes.Max(b => b.Y + Tall(b.W)) - o.SrcH);
             if (l + t + r + btm > 0)
             {
-                yield return $"pad={o.SrcW + l + r}:{o.SrcH + t + btm}:{l}:{t}:black";
+                (frameW, frameH) = (o.SrcW + l + r, o.SrcH + t + btm);
+                yield return $"pad={frameW}:{frameH}:{l}:{t}:black";
                 (left, top) = (l, t);
             }
         }
-        // Output size: the widest box, times the chosen scale, kept even for H.264
+        // Output size: the crop's shape at full size, times the chosen scale, kept even for H.264
         var f = o.ScaleShortSide is { } s ? s / (double)Math.Min(o.CropW, o.CropH) : 1;
         int outW = Math.Max(2, (int)Math.Round(o.CropW * f) & ~1), outH = Math.Max(2, (int)Math.Round(o.CropH * f) & ~1);
         static bool Still(List<(double T, double V, Ease E)> k) => k.All(p => Math.Abs(p.V - k[0].V) < 0.5);
         if (Still(c.X) && Still(c.Y) && Still(c.W))
         {
+            // The box as it is (even-sided), then made the output's size if it isn't already
             var b = Box(first);
-            yield return $"crop={o.CropW}:{o.CropH}:{(int)(b.X + left)}:{(int)(b.Y + top)}";
-            if (f != 1) yield return $"scale={outW}:{outH}";
+            int bw = Math.Max(2, (int)Math.Round(b.W) & ~1), bh = Math.Max(2, (int)Math.Round(Tall(b.W)) & ~1);
+            yield return $"crop={bw}:{bh}:{(int)(b.X + left)}:{(int)(b.Y + top)}";
+            if (bw != outW || bh != outH) yield return $"scale={outW}:{outH}";
             yield break;
         }
         static List<(double T, double V, Ease E)> Shift(List<(double T, double V, Ease E)> k, double by) => k.Select(p => (p.T, p.V + by, p.E)).ToList();
-        var w = Ramp(c.W, o.Start);
-        var x = $"({Ramp(Shift(c.X, left), o.Start)})-({w})/2";
-        var y = $"({Ramp(Shift(c.Y, top), o.Start)})-({w})*{o.CropH}/{o.CropW}/2";
-        // Rounded up to even so the scaled frame is never a pixel smaller than the crop taken from it
-        yield return $"scale=w='ceil(iw*{outW}/({w})/2)*2':h='ceil(ih*{outW}/({w})/2)*2':eval=frame";
-        yield return $"crop={outW}:{outH}:x='({x})*{outW}/({w})':y='({y})*{outW}/({w})'";
+        // How big scaling whole frames would make them at the tightest zoom within what's being encoded
+        var tightest = Enumerable.Range(0, 401).Min(i => Box(o.Start + o.Duration * i / 400).W);
+        var enlarge = outW / Math.Max(1, tightest);
+        if (frameW * frameH * enlarge * enlarge <= MaxScaledPixels)
+        {
+            var w = Ramp(c.W, o.Start);
+            var x = $"({Ramp(Shift(c.X, left), o.Start)})-({w})/2";
+            var y = $"({Ramp(Shift(c.Y, top), o.Start)})-({w})*{o.CropH}/{o.CropW}/2";
+            // Rounded up to even so the scaled frame is never a pixel smaller than the crop taken from it
+            yield return $"scale=w='ceil(iw*{outW}/({w})/2)*2':h='ceil(ih*{outW}/({w})/2)*2':eval=frame";
+            yield return $"crop={outW}:{outH}:x='({x})*{outW}/({w})':y='({y})*{outW}/({w})'";
+            yield break;
+        }
+        // A tight zoom: the box's corners are stretched to the frame's (to a fraction of a pixel), then the frame is
+        // made the output's size. This filter only counts frames, so the frame rate is fixed first to turn the
+        // count into time.
+        var rate = o.Fps ?? (o.SrcFps > 0 ? o.SrcFps : 30);
+        var clock = $"in/{F3(rate)}";
+        yield return $"fps={F3(rate)}";
+        {
+            var w = Ramp(c.W, o.Start, clock);
+            var x0 = $"({Ramp(Shift(c.X, left), o.Start, clock)})-({w})/2";
+            var y0 = $"({Ramp(Shift(c.Y, top), o.Start, clock)})-({w})*{o.CropH}/{o.CropW}/2";
+            var (x1, y1) = ($"({x0})+({w})", $"({y0})+({w})*{o.CropH}/{o.CropW}");
+            yield return $"perspective=x0='{x0}':y0='{y0}':x1='{x1}':y1='{y0}':x2='{x0}':y2='{y1}':x3='{x1}':y3='{y1}':sense=source:interpolation=cubic:eval=frame";
+            yield return $"scale={outW}:{outH}";
+        }
     }
+
+    /// <summary>
+    /// The most pixels a frame may be scaled up to for an animated zoom (a 1440p frame enlarged 4 times, each way)
+    /// before the slower way that doesn't scale whole frames is used
+    /// </summary>
+    const long MaxScaledPixels = 64_000_000;
 
     /// <param name="offset">source time the input was seeked to</param>
     /// <param name="master">volume applied to the finished mix; null = leave it</param>

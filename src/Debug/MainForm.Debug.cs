@@ -310,15 +310,20 @@ sealed partial class MainForm
                     break;
                 case "goto": timeBox.Text = value; if (ParseTime(value) is { } go) timeline.Seek(go); break;
                 case "cropkeys":
-                    // A zoom: the full box at 20% of the way in, half the width and off-centre by 60%
+                {
+                    // A zoom: the full box at 20% of the way in, half the width (cropkeys=0.1: a tenth) and
+                    // off-centre by 60%. cropkeys=still,0.5: zoomed in to half the width throughout.
+                    var still = value.StartsWith("still");
+                    var to = double.TryParse(value.Split(',')[^1], System.Globalization.CultureInfo.InvariantCulture, out var given) ? given : 0.5;
                     pos.Keys.Clear();
                     scale.Keys.Clear();
-                    pos.Keys.AddRange([(probe!.Duration * 0.2, (0.5, 0.5), Ease.Linear), (probe.Duration * 0.6, (0.62, 0.45), Ease.Linear)]);
-                    scale.Keys.AddRange([(probe.Duration * 0.2, MaxCropW, Ease.Linear), (probe.Duration * 0.6, MaxCropW * 0.5, Ease.Linear)]);
+                    pos.Keys.AddRange([(probe!.Duration * 0.2, still ? (0.62, 0.45) : (0.5, 0.5), Ease.Linear), (probe.Duration * 0.6, (0.62, 0.45), Ease.Linear)]);
+                    scale.Keys.AddRange([(probe.Duration * 0.2, MaxCropW * (still ? to : 1), Ease.Linear), (probe.Duration * 0.6, MaxCropW * to, Ease.Linear)]);
                     timeline.Seek(probe.Duration * 0.4);
                     ShowCrop();
                     UpdateSummary();
                     break;
+                }
                 // manykeys=N: a crop that wanders through N points, for a filter graph too long for a command line
                 case "manykeys":
                     pos.Keys.Clear();
