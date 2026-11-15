@@ -7,11 +7,11 @@ Right-click a video → **Compress for Discord**. Trim it, pick a size, press **
 ## Install
 
 1. Download the `.msi` from [Releases](https://github.com/CalvBot/compress-for-discord/releases/latest) and run it. If SmartScreen warns (the installer isn't signed), click **More info → Run anyway**.
-2. On first launch it offers to download ffmpeg, or you can point it at your own copy in **Settings**. Windows prompts for the .NET 9 Desktop Runtime if it's missing.
+2. The first time you open a video it offers to download ffmpeg, or you can point it at your own copy in **Settings**. Windows prompts for the .NET 9 Desktop Runtime if it's missing.
 
 If you're on Windows 11 and don't see the option, it might be under **Show more options**.
 
-Videos can be up to 10 hours long. On long recordings the audio waveforms fill in as they're measured, starting with the part on screen, and scrubbing uses the GPU through Windows Media Foundation where it can (falling back to ffmpeg).
+Videos can be up to 10 hours long. On long recordings the audio waveforms fill in as they're measured, starting with the part on screen. Scrubbing uses the GPU through Windows Media Foundation where it can, and ffmpeg where it can't.
 
 ## Building
 

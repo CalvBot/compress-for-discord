@@ -280,7 +280,7 @@ sealed partial class SettingsForm : DarkForm
         // A folder that doesn't have it still falls back to an automatic find, so check it's really the typed one
         var usingTyped = found && custom && Ff.Ffmpeg.StartsWith(cfg.FfmpegPath.TrimEnd('\\', '/').Replace('/', '\\'), StringComparison.OrdinalIgnoreCase);
         // Only problems get a line; a working ffmpeg needs nothing said
-        ffmpegStatus.Text = custom && !usingTyped ? "ffmpeg.exe isn't in that folder." : found ? "" : "Not found. Download it, or paste its folder above.";
+        ffmpegStatus.Text = custom && !usingTyped ? "ffmpeg.exe isn't in that folder." : found ? "" : "ffmpeg wasn't found. Download it, or paste its folder above.";
         ffmpegStatus.ForeColor = Theme.Danger;
         ffmpegStatus.Parent!.Visible = ffmpegStatus.Text != "";
         openBtn.Enabled = found;
@@ -373,7 +373,7 @@ sealed partial class SettingsForm : DarkForm
             // False = the release has no installer and its page was opened instead: nothing to quit for
             if (await Updater.Install(release)) { Application.Exit(); return; }
             if (IsDisposed) return;
-            updateStatus.Text = "Opened the release page: download it from there.";
+            updateStatus.Text = "The release page is open. Download the update from there.";
             installBtn.Enabled = checkLink.Enabled = true;
         }
         catch (Exception ex)
@@ -654,7 +654,7 @@ sealed partial class SettingsForm : DarkForm
                 (hover, overArrow, overRemove) = (row, arrow, remove);
                 Cursor = row >= 0 || arrow != 0 ? Cursors.Hand : Cursors.Default;
                 // The preview shows the path; the tooltip is for rows without one
-                tips.SetToolTip(this, remove ? "Remove from the list" : row >= 0 && Thumbs(Items[row]) == null ? Items[row].Project.File : null);
+                tips.SetToolTip(this, remove ? "Remove from list" : row >= 0 && Thumbs(Items[row]) == null ? Items[row].Project.File : null);
                 Invalidate();
             }
             if (frame != hoverFrame)

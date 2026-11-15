@@ -261,7 +261,7 @@ static class Ff
         var duration = Num(root["format"]?["duration"]);
         if (duration <= 0) duration = Num(v["duration"]);
         // A still image, or a file whose length isn't stored (some browser recordings): nothing sensible to compress
-        if (!(duration > 0)) throw new Exception("Couldn't tell how long this video is. Try remuxing it first, or it may be an image.");
+        if (!(duration > 0)) throw new Exception("Couldn't tell how long this video is. It may be an image. If it's a video, try remuxing it first.");
         if (w <= 0 || h <= 0) throw new Exception("Couldn't read this video's picture size.");
         if (duration > MaxHours * 3600) throw new Exception($"This video is over {MaxHours} hours long. Cut it into shorter parts first.");
         // The file's video and audio streams in order ("vaaa"): Windows' reader can list them differently
@@ -608,7 +608,7 @@ static class Ff
                     videoKbps = next;
                 }
             }
-            throw new Exception("Couldn't get the video under the size limit. Try a smaller scale, or trimming it shorter.");
+            throw new Exception("Couldn't get the video under the size limit. Try a smaller scale, or trim it shorter.");
         }
         catch
         {
