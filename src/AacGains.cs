@@ -246,20 +246,29 @@ sealed class AacGains
             var delta = U32(m, stts.From + 12);
             var fixedSize = U32(m, stsz.From + 4);
             var count = (int)U32(m, stsz.From + 8);
-            if (timescale <= 0 || delta == 0 || count == 0) return true;
+            if (timescale <= 0 || delta == 0 || count <= 0) return true;
+            // Counts from the file must fit in their own box, or the reads below wander into the next one
+            static bool Fits((int From, int To) box, int head, long n, int size) => n >= 0 && head + n * size <= box.To - box.From;
+            if (fixedSize == 0 && !Fits(stsz, 12, count, 4) || !Fits(stsc, 8, U32(m, stsc.From + 4), 12)) return true;
             var sizes = new int[count];
             for (var i = 0; i < count; i++) sizes[i] = (int)(fixedSize != 0 ? fixedSize : U32(m, stsz.From + 12 + 4 * i));
             var offsets = new List<long>();
             if (Child(m, stbl, "stco") is { } stco)
+            {
+                if (!Fits(stco, 8, U32(m, stco.From + 4), 4)) return true;
                 for (int i = 0, n = (int)U32(m, stco.From + 4); i < n; i++) offsets.Add(U32(m, stco.From + 8 + 4 * i));
+            }
             else if (Child(m, stbl, "co64") is { } co64)
+            {
+                if (!Fits(co64, 8, U32(m, co64.From + 4), 8)) return true;
                 for (int i = 0, n = (int)U32(m, co64.From + 4); i < n; i++) offsets.Add((long)BinaryPrimitives.ReadUInt64BigEndian(m.AsSpan(co64.From + 8 + 8 * i)));
+            }
             var runs = (int)U32(m, stsc.From + 4);
             var chunks = new List<(long, int, int, int)>();
             for (int c = 0, run = 0, first = 0; c < offsets.Count && first < count; c++)
             {
                 while (run + 1 < runs && U32(m, stsc.From + 8 + 12 * (run + 1)) <= c + 1) run++;
-                var n = Math.Min((int)U32(m, stsc.From + 8 + 12 * run + 4), count - first);
+                var n = (int)Math.Min(U32(m, stsc.From + 8 + 12 * run + 4), (uint)(count - first));
                 var bytes = 0L;
                 for (var k = first; k < first + n; k++) bytes += sizes[k];
                 if (bytes > 64 << 20) return true;
@@ -275,7 +284,8 @@ sealed class AacGains
             }
             track = new Track { Gain = new byte[count], Sizes = sizes, Chunks = [.. chunks], Frame = delta / timescale, Start = -lead };
         }
-        catch (ArgumentOutOfRangeException) { track = null; }
+        // A damaged track loses only its own scan, not the other tracks'
+        catch (Exception) { track = null; }
         return true;
     }
 }

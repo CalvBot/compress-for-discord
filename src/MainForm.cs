@@ -332,7 +332,7 @@ sealed class MainForm : DarkForm
         foreach (var lane in new Control[] { keyLane, posLane, scaleLane, masterLane }) scroller.Content.Controls.Add(lane);
         HookTrack(masterLane);
         masterLane.MuteToggled += () => { UpdateSummary(); RestartIfPlaying(); };
-        masterLane.Committed += RestartIfPlaying;
+        masterLane.Committed += RestartSoon;
 
         options.Controls.Add(OptLabel("Size"), 0, 0); options.Controls.Add(sizeChips, 1, 0);
         options.Controls.Add(OptLabel("Scale"), 0, 1); options.Controls.Add(resChips, 1, 1);
@@ -526,7 +526,7 @@ sealed class MainForm : DarkForm
             lane.MuteToggled += () => { UpdateMasterPeaks(); UpdateSummary(); RestartIfPlaying(); };
             lane.Committed += UpdateMasterPeaks;
             // Hear a volume change once the mouse is let go
-            lane.Committed += RestartIfPlaying;
+            lane.Committed += RestartSoon;
             (lane.ViewStart, lane.ViewEnd) = (viewStart, viewEnd);
             lane.Visible = false;
             scroller.Content.Controls.Add(lane);
@@ -603,7 +603,8 @@ sealed class MainForm : DarkForm
         var now = StateKey();
         if (now == undoState) return;
         undoStack.Add(undoState);
-        if (undoStack.Count > Math.Max(1, AppConfig.Current.UndoSteps)) undoStack.RemoveRange(0, undoStack.Count - Math.Max(1, AppConfig.Current.UndoSteps));
+        var steps = Math.Clamp(AppConfig.Current.UndoSteps, 1, 100);
+        if (undoStack.Count > steps) undoStack.RemoveRange(0, undoStack.Count - steps);
         redoStack.Clear();
         undoState = now;
     }
@@ -611,6 +612,8 @@ sealed class MainForm : DarkForm
     /// <summary>Ctrl+Z: back a step (redo: Ctrl+Shift+Z, forward again). The playhead and the open tracks stay as they are.</summary>
     bool Undo(bool redo)
     {
+        // Not mid-drag: the dragged lane's points would change under it
+        if (MouseButtons != MouseButtons.None) return true;
         // A change just made counts before stepping back from it
         RecordUndo();
         var (from, to) = redo ? (redoStack, undoStack) : (undoStack, redoStack);
@@ -628,6 +631,8 @@ sealed class MainForm : DarkForm
         catch (Exception ex) { AppLog.Error(redo ? "Redo" : "Undo", ex); }
         // As it came out (so the next check doesn't see a change that wasn't made)
         undoState = StateKey();
+        // Hear the mix as it now is
+        RestartSoon();
         return true;
     }
 
@@ -1423,6 +1428,19 @@ sealed class MainForm : DarkForm
         _ = PlayFrom(t, playTo);
     }
 
+    bool restartQueued;
+
+    /// <summary>
+    /// RestartIfPlaying once the current message is handled: an edit on several tracks at once (Del, ease, a drag)
+    /// commits each track, and that should be one restart, not one per track
+    /// </summary>
+    void RestartSoon()
+    {
+        if (restartQueued || playCts == null || !IsHandleCreated) return;
+        restartQueued = true;
+        BeginInvoke(() => { restartQueued = false; RestartIfPlaying(); });
+    }
+
     /// <param name="to">where to stop; the end of the trim unless given</param>
     async Task PlayFrom(double from, double? to = null)
     {
@@ -1544,10 +1562,8 @@ sealed class MainForm : DarkForm
 
     [DllImport("user32.dll")]
     static extern bool PostMessage(IntPtr hwnd, int msg, nint wparam, nint lparam);
-#if DEBUG
     [DllImport("user32.dll")] static extern bool GetKeyboardState(byte[] state);
     [DllImport("user32.dll")] static extern bool SetKeyboardState(byte[] state);
-#endif
 #endif
 
     [DllImport("user32.dll")]
