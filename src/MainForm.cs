@@ -1909,7 +1909,7 @@ sealed partial class MainForm : DarkForm
             var encoder = EffectiveEncoder switch { "nvenc" => "GPU (NVIDIA)", "amf" => "GPU (AMD)", _ => "CPU (2 passes)" };
             SummaryTip(string.Join("\n",
                 $"Size:  ~{Planner.FormatBytes(plan.EstimateBytes)} of {limit}",
-                $"Picture:  {plan.OutputShortSide}p at {fps} fps",
+                $"Picture:  {plan.OutputShortSide}p at {fps} fps{(plan.Shrunk ? " (made smaller: the size limit is too tight for more)" : "")}",
                 // The video's own rate, so turning the audio off shows the room it hands to the picture
                 $"Video:  {Planner.FormatRate(plan.VideoKbps)}",
                 $"Audio:  {(plan.AudioKbps > 0 ? Planner.FormatRate(plan.AudioKbps) : "off")}",

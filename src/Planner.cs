@@ -10,6 +10,8 @@ sealed record Plan(
     /// <summary>longest clip that still fits at minimum quality</summary>
     double MaxDuration,
     int OutputShortSide,
+    /// <summary>The picture was made smaller than asked because the bitrate is too low for that many pixels</summary>
+    bool Shrunk,
     bool CappedBySource,
     /// <summary>actual/predicted size ratio learned from past encodes; bitrate is divided by it</summary>
     double Calibration,
@@ -27,6 +29,15 @@ static class Planner
     public static readonly int[] ScaleChips = [100, 75, 50];
     public static readonly int[] FrameRates = [60, 48, 30, 24];
     const int MinVideoKbps = 80;
+    /// <summary>
+    /// The fewest bits per pixel (per frame) an encoder can be held to. Below it the encoder is already at its
+    /// coarsest and ignores a lower bitrate, so the file comes out over the limit: measured on NVENC at 1440p60,
+    /// 0.009 lands 2% over what's asked, 0.007 4% over, 0.0045 40% over and 0.003 130% over. Fewer pixels is the
+    /// only way down from there (and looks better than the blocks it would otherwise be).
+    /// </summary>
+    const double MinBitsPerPixel = 0.009;
+    /// <summary>The smallest picture the plan (or a retry) shrinks to</summary>
+    public const int MinSide = 144;
 
     /// <param name="resolution">output short side, null = keep the source's</param>
     /// <param name="frameRate">null = keep the source's</param>
@@ -56,6 +67,17 @@ static class Planner
         int? scale = resolution < shortSide ? resolution : null;
         int? fps = frameRate < p.Fps - 0.5 ? frameRate : null;
 
+        // Too few bits for that many pixels: a smaller picture, worked out now rather than found out by an attempt
+        // that comes out over the limit. (Not when held to the source's own bitrate: that it can clearly be made at.)
+        var shrunk = false;
+        var side = scale ?? shortSide;
+        double aspect = Math.Max(p.Width, p.Height) / (double)Math.Max(1, shortSide), rate = fps ?? (p.Fps > 0 ? p.Fps : 30);
+        if (!cappedBySource && shortSide > 0 && videoKbps * 1000.0 / (side * side * aspect * rate) < MinBitsPerPixel)
+        {
+            var fits = Math.Max(MinSide, (int)Math.Sqrt(videoKbps * 1000.0 / (MinBitsPerPixel * aspect * rate)) & ~1);
+            if (fits < side) (scale, shrunk) = (fits, true);
+        }
+
         return new Plan(
             targetBytes,
             videoKbps,
@@ -66,6 +88,7 @@ static class Planner
             cappedBySource || videoKbps >= MinVideoKbps,
             budgetKbits / cal / (MinVideoKbps + (hasAudio ? 64 : 0)),
             scale ?? shortSide,
+            shrunk,
             cappedBySource,
             cal,
             Math.Min(targetBytes, (videoKbps + audioKbps) * 125.0 * duration * (cappedBySource ? 1 : cal)));

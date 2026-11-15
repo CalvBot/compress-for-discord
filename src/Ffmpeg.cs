@@ -478,6 +478,9 @@ static class Ff
         AppLog.Info($"{stage}: done in {clock.Elapsed.TotalSeconds:0.0} s");
     }
 
+    /// <summary>How each encoder is told to hold its bitrate, as written to the encode log</summary>
+    internal static string? RateControl(string encoder) => encoder == "nvenc" ? "cbr" : null;
+
     /// <summary>
     /// Encodes, retrying up to 3 times at a lower bitrate (or, when that stops helping, a smaller picture) if the
     /// result overshoots. Returns the temp output path.
@@ -528,7 +531,11 @@ static class Ff
 
                 if (encoder == "nvenc")
                 {
-                    await RunEncode([.. inputArgs, .. common, "-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-rc", "vbr", "-multipass", "fullres", .. rate, .. audioOut, "-movflags", "+faststart", output],
+                    // Constant bitrate with a one-second buffer: the file comes out within a few percent of what's
+                    // asked (0-2% over, measured on three kinds of video at 1440p60). Variable bitrate, used before,
+                    // landed anywhere from 21% under to 58% over, which is what took the retries.
+                    string[] held = ["-rc", "cbr", "-b:v", $"{videoKbps}k", "-maxrate", $"{videoKbps}k", "-bufsize", $"{videoKbps}k"];
+                    await RunEncode([.. inputArgs, .. common, "-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-multipass", "fullres", .. held, .. audioOut, "-movflags", "+faststart", output],
                         o.Duration, 0, 1, $"Compressing on GPU{label}", progress, ct);
                 }
                 else if (encoder == "amf")
@@ -551,6 +558,8 @@ static class Ff
                     ["kind"] = "encode",
                     ["time"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     ["encoder"] = encoder,
+                    // How the bitrate was held (Calibration only learns from encodes made the way they are now)
+                    ["rc"] = RateControl(encoder),
                     ["attempt"] = attempt,
                     ["duration"] = o.Duration,
                     ["outputShortSide"] = o.ScaleShortSide,
@@ -577,14 +586,16 @@ static class Ff
                 var side = o.ScaleShortSide ?? fullSide;
                 // The last bitrate cut moved the size less than half as much as it should have
                 var stuck = lastKbps > 0 && lastSize - size < (lastSize - audioBytes) * (1 - (double)videoKbps / lastKbps) * 0.5;
-                var next = Math.Max(50, (int)Math.Floor(videoKbps * (videoBudget / videoMade) * 0.92));
-                if ((size > o.TargetBytes * 1.4 || stuck || next >= videoKbps) && side > 144)
+                // By as much as it was over, and a little more. NVENC's size follows its bitrate closely, so a small
+                // allowance makes the second attempt fit; the others get a wider one.
+                var next = Math.Max(50, (int)Math.Floor(videoKbps * (videoBudget / videoMade) * (encoder == "nvenc" ? 0.97 : 0.92)));
+                if ((size > o.TargetBytes * 1.4 || stuck || next >= videoKbps) && side > Planner.MinSide)
                 {
                     // The encoder has hit its lowest quality for this many pixels and ignores a lower bitrate
                     // (NVENC does this at very low bits per pixel). Fewer pixels is the only way down; at its floor
                     // the size goes with the pixel count, so the side goes with the square root.
                     var shrink = Math.Sqrt(videoBudget / videoMade) * 0.9;
-                    o.ScaleShortSide = Math.Max(144, (int)(side * shrink) / 2 * 2);
+                    o.ScaleShortSide = Math.Max(Planner.MinSide, (int)(side * shrink) / 2 * 2);
                     smaller = true;
                     AppLog.Warn($"{(stuck ? "Lower bitrate didn't help" : "Way over the limit")} at {side}p; trying {o.ScaleShortSide}p at {videoKbps} kbps");
                     lastKbps = 0;
@@ -649,10 +660,13 @@ static class Log
         catch { }
     }
 
-    /// <summary>Median actual/predicted size ratio per encoder, from the 20 latest uncapped first attempts.</summary>
+    /// <summary>
+    /// Median actual/predicted size ratio per encoder, from the 20 latest uncapped first attempts made the way that
+    /// encoder is run now. Until NVENC has some of its own, it starts at the 2% over that it was measured to land.
+    /// </summary>
     public static Dictionary<string, double> Calibration()
     {
-        var result = new Dictionary<string, double>();
+        var result = new Dictionary<string, double> { ["nvenc"] = 1.02 };
         try
         {
             if (!File.Exists(Paths.Log)) return result;
@@ -663,7 +677,10 @@ static class Log
                 {
                     var e = JsonNode.Parse(line);
                     if (e?["kind"]?.ToString() != "encode" || e["attempt"]?.GetValue<int>() != 0 || e["cappedBySource"]?.GetValue<bool>() == true) continue;
-                    entries.Add((e["encoder"]!.ToString(), e["ratio"]!.GetValue<double>()));
+                    var encoder = e["encoder"]!.ToString();
+                    // Made another way (NVENC's variable bitrate, before it was held constant): says nothing about now
+                    if (e["rc"]?.ToString() != Ff.RateControl(encoder)) continue;
+                    entries.Add((encoder, e["ratio"]!.GetValue<double>()));
                 }
                 catch { }
             }
