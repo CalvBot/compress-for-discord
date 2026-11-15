@@ -488,6 +488,13 @@ sealed class MainForm : DarkForm
     void SetUp(ProbeResult probe, int fps)
     {
         preview.FrameAspect = probe.Width / (double)probe.Height;
+        // The smallest window shows the video edge to edge: the preview is as tall as the video is at that width
+        // (no taller than 16:9, so an upright video doesn't make a window taller than the screen)
+        if (baseW > 0 && probe.Width > 0 && probe.Height > 0)
+        {
+            basePreviewH = Math.Clamp((int)Math.Round(baseW * (double)probe.Height / probe.Width), baseW / 4, baseW * 9 / 16);
+            preview.Height = basePreviewH + extraH;
+        }
         timeline.Reset(probe.Duration);
         zoomBar.Duration = probe.Duration;
         // Closest zoom: a dozen frames across the timeline
